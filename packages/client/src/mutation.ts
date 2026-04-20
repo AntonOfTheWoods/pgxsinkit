@@ -1,5 +1,4 @@
 import type { AnyPgTable } from "drizzle-orm/pg-core";
-import { getColumns } from "drizzle-orm/utils";
 import { ZodObject } from "zod";
 
 import type {
@@ -12,7 +11,7 @@ import type {
   SyncTableRegistry,
   SyncTableUpdateInput,
 } from "@pgxsinkit/contracts";
-import { getSyncRegistrySchema } from "@pgxsinkit/contracts";
+import { getProjectedColumns as getProjectedTableColumns, getSyncRegistrySchema } from "@pgxsinkit/contracts";
 
 export type MutationStatus = "pending" | "sending" | "acked" | "failed";
 export type MutationKind = "create" | "update" | "delete";
@@ -69,6 +68,7 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
   writeUrl: string;
   batchWriteUrl?: string;
   authToken?: string;
+  getAuthToken?: () => Promise<string | undefined>;
 }
 
 interface TableContext {
@@ -78,13 +78,14 @@ interface TableContext {
   syncedTable: string;
   overlayTable: string;
   journalTable: string;
-  routeBasePath: string;
+  journalSequence: string;
+  routeBasePath?: string;
   pkColumnNames: string[];
   pkPropertyKeys: string[];
   recordIncludesOverlayState: boolean;
   columns: Array<{
     propertyKey: string;
-    column: ReturnType<typeof getColumns<AnyPgTable>>[string];
+    column: ReturnType<typeof getProjectedTableColumns<AnyPgTable>>[number]["column"];
   }>;
 }
 
@@ -136,7 +137,15 @@ export function shouldClearOverlayRow(syncedUpdatedAtUs: string, serverUpdatedAt
 export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   options: CreateMutationRuntimeOptions<TRegistry>,
 ): MutationRuntime<TRegistry> {
-  const tableContexts = buildTableContexts(options.registry);
+  const resolveAuthToken = async () => {
+    if (options.getAuthToken) {
+      return await options.getAuthToken();
+    }
+
+    return options.authToken;
+  };
+
+  const tableContexts = buildTableContexts(options.registry, options.batchWriteUrl === undefined);
   let flushQueue = Promise.resolve();
 
   const getTableContext = (table: SyncTableName<TRegistry>) => {
@@ -279,7 +288,6 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               mutationId: item.mutationId,
               entityKey: item.entityKey,
               entityKeyJson: item.entityKeyJson,
-              mutationSeq: 1,
               mutationKind: "create",
               payloadJson: JSON.stringify({
                 kind: "create",
@@ -291,7 +299,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
             entityState.record = item.optimisticRecord;
             entityState.overlayKind = "pending_create";
             entityState.localUpdatedAtUs = item.nowUs;
-            entityState.latestMutationSeq = 1;
+            entityState.latestMutationSeq = (entityState.latestMutationSeq ?? 0) + 1;
             entityState.latestMutationKind = "create";
             entityState.latestMutationStatus = "pending";
             plannedOverlays.set(item.entityKeyJson, {
@@ -326,13 +334,10 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
                 },
               ),
             );
-            const mutationSeq = (entityState.latestMutationSeq ?? 0) + 1;
-
             plannedMutations.push({
               mutationId: item.mutationId,
               entityKey: item.entityKey,
               entityKeyJson: item.entityKeyJson,
-              mutationSeq,
               mutationKind: "update",
               payloadJson: JSON.stringify({
                 kind: "update",
@@ -344,7 +349,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
             entityState.record = optimisticRecord;
             entityState.overlayKind = overlayKind;
             entityState.localUpdatedAtUs = item.nowUs;
-            entityState.latestMutationSeq = mutationSeq;
+            entityState.latestMutationSeq = (entityState.latestMutationSeq ?? 0) + 1;
             entityState.latestMutationKind = "update";
             entityState.latestMutationStatus = "pending";
             plannedOverlays.set(item.entityKeyJson, {
@@ -364,13 +369,10 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               throw new Error(`${context.key} is already queued for deletion`);
             }
 
-            const mutationSeq = (entityState.latestMutationSeq ?? 0) + 1;
-
             plannedMutations.push({
               mutationId: item.mutationId,
               entityKey: item.entityKey,
               entityKeyJson: item.entityKeyJson,
-              mutationSeq,
               mutationKind: "delete",
               payloadJson: JSON.stringify({
                 kind: "delete",
@@ -381,7 +383,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
 
             entityState.overlayKind = "pending_delete";
             entityState.localUpdatedAtUs = item.nowUs;
-            entityState.latestMutationSeq = mutationSeq;
+            entityState.latestMutationSeq = (entityState.latestMutationSeq ?? 0) + 1;
             entityState.latestMutationKind = "delete";
             entityState.latestMutationStatus = "pending";
             plannedOverlays.set(item.entityKeyJson, {
@@ -411,7 +413,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
           tableContexts as Record<string, TableContext>,
           options.batchWriteUrl,
           table,
-          options.authToken,
+          resolveAuthToken,
         );
 
         processedCount = batchResult.processedCount;
@@ -433,7 +435,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         const contexts = filterContexts(tableContexts, table);
 
         for (const context of contexts) {
-          processedCount += await flushTable(options.db, context, options.writeUrl, options.authToken);
+          processedCount += await flushTable(options.db, context, options.writeUrl, resolveAuthToken);
         }
       } while (processedCount > 0);
     }
@@ -675,7 +677,6 @@ interface PlannedMutationInsert {
   mutationId: string;
   entityKey: Record<string, string>;
   entityKeyJson: string;
-  mutationSeq: number;
   mutationKind: MutationKind;
   payloadJson: string;
   nowUs: string;
@@ -731,26 +732,31 @@ type NormalizedBatchItem =
       order: number;
     };
 
-function buildTableContexts<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
+function buildTableContexts<TRegistry extends SyncTableRegistry>(registry: TRegistry, requireRouteBasePath: boolean) {
   const localSchema = getSyncRegistrySchema(registry);
 
   return Object.fromEntries(
     Object.entries(registry)
       .filter(([, entry]) => entry.mode !== "readonly")
-      .map(([key, entry]) => [key, buildTableContext(key, entry, localSchema)]),
+      .map(([key, entry]) => [key, buildTableContext(key, entry, localSchema, requireRouteBasePath)]),
   ) as Partial<Record<SyncTableName<TRegistry>, TableContext>>;
 }
 
-function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, localSchema: string): TableContext {
+function buildTableContext(
+  key: string,
+  entry: SyncTableEntry<AnyPgTable>,
+  localSchema: string,
+  requireRouteBasePath: boolean,
+): TableContext {
   if (!entry.clientProjection?.overlayTable || !entry.clientProjection.journalTable) {
     throw new Error(`overlay and journal tables are required for writable table ${key}`);
   }
 
-  if (!entry.routes?.basePath) {
+  if (requireRouteBasePath && !entry.routes?.basePath) {
     throw new Error(`routes.basePath is required for writable table ${key}`);
   }
 
-  const columns = Object.entries(getColumns(entry.table)).map(([propertyKey, column]) => ({
+  const columns = getProjectedTableColumns(entry).map(({ propertyKey, column }) => ({
     propertyKey,
     column,
   }));
@@ -772,7 +778,8 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     syncedTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.syncedTable),
     overlayTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.overlayTable),
     journalTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.journalTable),
-    routeBasePath: entry.routes.basePath,
+    journalSequence: qualifyLocalIdentifier(localSchema, buildJournalSequenceName(entry.clientProjection.journalTable)),
+    ...(entry.routes?.basePath ? { routeBasePath: entry.routes.basePath } : {}),
     pkColumnNames: [...entry.primaryKey.columns],
     pkPropertyKeys,
     recordIncludesOverlayState: recordSchemaIncludesOverlayState(entry.schemas?.recordSchema),
@@ -996,7 +1003,7 @@ async function insertMutationsBulk(db: MutationDb, context: TableContext, rows: 
     return;
   }
 
-  const columnNames = [
+  const insertColumnNames = [
     "mutation_id",
     ...context.pkColumnNames,
     "entity_key_json",
@@ -1015,7 +1022,6 @@ async function insertMutationsBulk(db: MutationDb, context: TableContext, rows: 
       row.mutationId,
       ...context.pkPropertyKeys.map((propertyKey) => row.entityKey[propertyKey]),
       row.entityKeyJson,
-      row.mutationSeq,
       row.mutationKind,
       "pending",
       row.payloadJson,
@@ -1026,15 +1032,26 @@ async function insertMutationsBulk(db: MutationDb, context: TableContext, rows: 
 
     params.push(...values);
 
-    return `(${columnNames
-      .map((columnName, index) => formatSqlValuePlaceholder(start + index + 1, columnName))
-      .join(", ")})`;
+    const valuePlaceholders = [
+      formatSqlValuePlaceholder(start + 1, "mutation_id"),
+      ...context.pkColumnNames.map((columnName, index) => formatSqlValuePlaceholder(start + index + 2, columnName)),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 2, "entity_key_json"),
+      `nextval('${escapeSqlString(context.journalSequence)}')::integer`,
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 3, "mutation_kind"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 4, "status"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 5, "payload_json"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 6, "enqueued_at_us"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 7, "next_retry_at_us"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 8, "updated_at_us"),
+    ];
+
+    return `(${valuePlaceholders.join(", ")})`;
   });
 
   await db.query(
     `
       INSERT INTO ${context.journalTable} (
-        ${columnNames.join(", ")}
+        ${insertColumnNames.join(", ")}
       )
       VALUES ${tuples.join(",\n        ")}
     `,
@@ -1257,7 +1274,7 @@ async function flushBatch(
   tableContexts: Record<string, TableContext>,
   batchWriteUrl: string,
   tableFilter?: string,
-  authToken?: string,
+  getAuthToken?: () => Promise<string | undefined>,
 ): Promise<FlushBatchResult> {
   const contexts = filterContexts(tableContexts, tableFilter);
   const nowUs = nowMicroseconds();
@@ -1346,11 +1363,19 @@ async function flushBatch(
   let acksByMutationId: Map<string, BatchMutationAck["acks"][number]> = new Map();
 
   try {
-    const response = await fetch(`${batchWriteUrl}/api/mutations`, {
+    let response = await fetch(`${batchWriteUrl}/api/mutations`, {
       method: "POST",
-      headers: buildRequestHeaders(authToken),
+      headers: buildRequestHeaders(await getAuthToken?.()),
       body: JSON.stringify({ mutations }),
     });
+
+    if ([401, 403].includes(response.status) && getAuthToken) {
+      response = await fetch(`${batchWriteUrl}/api/mutations`, {
+        method: "POST",
+        headers: buildRequestHeaders(await getAuthToken()),
+        body: JSON.stringify({ mutations }),
+      });
+    }
 
     if (response.ok) {
       const responseJson = (await response.json()) as BatchMutationAck;
@@ -1483,7 +1508,29 @@ function toSqlColumnPayload(context: TableContext, payload: Record<string, unkno
   return normalized;
 }
 
-async function flushTable(db: MutationDb, context: TableContext, writeUrl: string, authToken?: string) {
+function filterProjectedPayload(context: TableContext, payload: Record<string, unknown>) {
+  const normalized: Record<string, unknown> = {};
+
+  for (const { propertyKey, column } of context.columns) {
+    if (Object.prototype.hasOwnProperty.call(payload, propertyKey)) {
+      normalized[propertyKey] = payload[propertyKey];
+      continue;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(payload, column.name)) {
+      normalized[column.name] = payload[column.name];
+    }
+  }
+
+  return normalized;
+}
+
+async function flushTable(
+  db: MutationDb,
+  context: TableContext,
+  writeUrl: string,
+  getAuthToken?: () => Promise<string | undefined>,
+) {
   const result = await db.query<MutationRow>(
     `
       SELECT
@@ -1534,7 +1581,12 @@ async function flushTable(db: MutationDb, context: TableContext, writeUrl: strin
     try {
       const entityKey = JSON.parse(mutation.entityKeyJson) as Record<string, string>;
       const payload = JSON.parse(mutation.payloadJson) as Record<string, unknown>;
-      const response = await sendMutationRequest(writeUrl, context, entityKey, payload, authToken);
+      let response = await sendMutationRequest(writeUrl, context, entityKey, payload, await getAuthToken?.());
+
+      if ([401, 403].includes(response.status) && getAuthToken) {
+        response = await sendMutationRequest(writeUrl, context, entityKey, payload, await getAuthToken());
+      }
+
       const responseText = await response.text();
       const responseJson = responseText.length > 0 ? JSON.parse(responseText) : null;
 
@@ -1692,12 +1744,16 @@ async function sendMutationRequest(
   payload: Record<string, unknown>,
   authToken?: string,
 ) {
+  if (!context.routeBasePath) {
+    throw new Error(`routes.basePath is required for direct mutation requests on table ${context.key}`);
+  }
+
   switch (payload.kind) {
     case "create":
       return fetch(`${writeUrl}${context.routeBasePath}`, {
         method: "POST",
         headers: buildRequestHeaders(authToken),
-        body: JSON.stringify(payload.value),
+        body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.value))),
       });
     case "update":
       return fetch(
@@ -1705,7 +1761,7 @@ async function sendMutationRequest(
         {
           method: "PATCH",
           headers: buildRequestHeaders(authToken),
-          body: JSON.stringify(payload.patch),
+          body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.patch))),
         },
       );
     case "delete":
@@ -1981,6 +2037,10 @@ function qualifyLocalIdentifier(schemaName: string, tableName: string) {
 
 function quoteIdentifier(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+function buildJournalSequenceName(journalTable: string) {
+  return `${journalTable}_mutation_seq`;
 }
 
 function escapeSqlString(value: string) {

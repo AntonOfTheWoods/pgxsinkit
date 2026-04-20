@@ -11,7 +11,10 @@ import type {
   SyncTableEntry,
   SyncTableRegistry,
 } from "@pgxsinkit/contracts";
-import { batchMutationRequestSchema } from "@pgxsinkit/contracts";
+import {
+  batchMutationRequestSchema,
+  getOmittedProjectedColumns as getOmittedProjectionColumns,
+} from "@pgxsinkit/contracts";
 
 import type { OperationsLogConfig } from "../../operations-log/types";
 import { logOperation, logOperationSafely } from "../../operations-log/writer";
@@ -111,6 +114,14 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
       const syncEntry = entry as SyncTableEntry;
       const schemas = syncEntry.schemas;
       const normalizedPayload = toSchemaPayload(syncEntry, mutation.payload);
+      const projectedFieldViolations = findProjectedFieldViolations(syncEntry, mutation.kind, normalizedPayload);
+
+      if (projectedFieldViolations.length > 0) {
+        const message = `${mutation.tableName}/${mutation.mutationId} includes client-omitted fields: ${projectedFieldViolations.join(", ")}`;
+        validationErrors.push(message);
+        invalidMutations.push({ mutation, message });
+        continue;
+      }
 
       if (backend === "bulk-plpgsql-artifact") {
         const managedFieldViolations = findManagedFieldViolations(syncEntry, mutation.kind, normalizedPayload);
@@ -197,7 +208,7 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
           }
 
           const batchRequest =
-            backend === "bulk-plpgsql-artifact" ? sanitizeArtifactManagedFields(body, registry) : body;
+            backend === "bulk-plpgsql-artifact" ? sanitizeArtifactRestrictedFields(body, registry) : body;
 
           if (backend === "bulk-plpgsql-artifact") {
             await tx.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
@@ -425,7 +436,35 @@ function findManagedFieldViolations(
   return managedFields.filter((field) => payloadKeys.has(field.propertyKey)).map((field) => field.propertyKey);
 }
 
-function sanitizeArtifactManagedFields(batch: BatchMutationRequest, registry: SyncTableRegistry): BatchMutationRequest {
+function findProjectedFieldViolations(
+  entry: SyncTableEntry,
+  mutationKind: BatchMutationRequest["mutations"][number]["kind"],
+  payload: unknown,
+): string[] {
+  if (mutationKind === "delete" || !isPlainObject(payload)) {
+    return [];
+  }
+
+  const projectedFields = getProjectedAwayFields(entry);
+  if (projectedFields.length === 0) {
+    return [];
+  }
+
+  const payloadKeys = new Set(Object.keys(payload));
+
+  return [
+    ...new Set(
+      projectedFields
+        .filter((field) => payloadKeys.has(field.propertyKey) || payloadKeys.has(field.columnName))
+        .map((field) => field.propertyKey),
+    ),
+  ];
+}
+
+function sanitizeArtifactRestrictedFields(
+  batch: BatchMutationRequest,
+  registry: SyncTableRegistry,
+): BatchMutationRequest {
   return {
     mutations: batch.mutations.map((mutation) => {
       if (mutation.kind === "delete") {
@@ -439,13 +478,20 @@ function sanitizeArtifactManagedFields(batch: BatchMutationRequest, registry: Sy
       }
 
       const managedFields = getManagedFieldsForOperation(entry as SyncTableEntry, mutation.kind);
-      if (managedFields.length === 0) {
+      const projectedFields = getProjectedAwayFields(entry as SyncTableEntry);
+
+      if (managedFields.length === 0 && projectedFields.length === 0) {
         return mutation;
       }
 
       const payload = isPlainObject(mutation.payload) ? { ...mutation.payload } : {};
 
       for (const field of managedFields) {
+        delete payload[field.propertyKey];
+        delete payload[field.columnName];
+      }
+
+      for (const field of projectedFields) {
         delete payload[field.propertyKey];
         delete payload[field.columnName];
       }
@@ -476,6 +522,13 @@ function getManagedFieldsForOperation(
       columnName: columnMap.get(field.column) ?? field.column,
       strategy: field.strategy,
     }));
+}
+
+function getProjectedAwayFields(entry: SyncTableEntry) {
+  return getOmittedProjectionColumns(entry).map(({ propertyKey, columnName }) => ({
+    propertyKey,
+    columnName,
+  }));
 }
 
 function toSchemaPayload(entry: SyncTableEntry, payload: unknown): unknown {

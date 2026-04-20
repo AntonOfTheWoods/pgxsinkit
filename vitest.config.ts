@@ -8,6 +8,7 @@ export default defineConfig({
       "@pgxsinkit/contracts": fileURLToPath(new URL("./packages/contracts/src/index.ts", import.meta.url)),
       "@pgxsinkit/client": fileURLToPath(new URL("./packages/client/src/index.ts", import.meta.url)),
       "@pgxsinkit/demo": fileURLToPath(new URL("./packages/demo/src/index.ts", import.meta.url)),
+      "@pgxsinkit/pglite-sync": fileURLToPath(new URL("./packages/pglite-sync/src/index.ts", import.meta.url)),
       "@pgxsinkit/server": fileURLToPath(new URL("./packages/server/src/index.ts", import.meta.url)),
       "@pgxsinkit/client/schema": fileURLToPath(new URL("./packages/client/src/schema.ts", import.meta.url)),
       "@pgxsinkit/sync-engine": fileURLToPath(new URL("./packages/sync-engine/src/index.ts", import.meta.url)),

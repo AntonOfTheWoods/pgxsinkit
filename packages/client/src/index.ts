@@ -21,6 +21,8 @@ import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-en
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
 import { generateLocalSchemaSql } from "./schema";
 
+export { generateLocalSchemaSql };
+
 export type ClientPGlite = PGliteWithLive &
   PGliteInterfaceExtensions<{ electric: ReturnType<typeof createElectricExtension> }>;
 
@@ -30,11 +32,14 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   writeUrl: string;
   batchWriteUrl?: string;
   authToken?: string;
+  getAuthToken?: () => Promise<string | undefined>;
   syncEnabled?: boolean;
   dataDir?: string;
   resetSubscriptionKeys?: string[];
   prepareLocalDb?: (pglite: ClientPGlite) => Promise<void>;
   onStatusChange?: (status: SyncRuntimeStatus) => void;
+  onTableInitialSync?: (tableKey: string) => void;
+  pgliteInstance?: ClientPGlite;
 }
 
 export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey extends SyncTableName<TRegistry>> {
@@ -59,6 +64,7 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
   flush: (table?: SyncTableName<TRegistry>) => Promise<void>;
   reconcile: (table?: SyncTableName<TRegistry>) => Promise<void>;
   retryFailed: (table?: SyncTableName<TRegistry>) => Promise<void>;
+  recoverSending: (table?: SyncTableName<TRegistry>) => Promise<void>;
   readMutationDetails: (table?: SyncTableName<TRegistry>) => Promise<MutationDetail[]>;
   mutate: {
     create: <TKey extends SyncTableName<TRegistry>>(
@@ -91,18 +97,22 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     resolveReady = resolve;
   });
 
-  const pglite = (await PGlite.create(options.dataDir ?? "idb://pgxsinkit-overlay-v1", {
-    extensions: {
-      electric: createElectricExtension(),
-      live,
-    },
-  })) as ClientPGlite;
-
-  const schemaSql = generateLocalSchemaSql(options.registry);
-  await pglite.exec(schemaSql);
-
-  if (options.prepareLocalDb) {
-    await options.prepareLocalDb(pglite);
+  let pglite: ClientPGlite;
+  if (options.pgliteInstance) {
+    pglite = options.pgliteInstance;
+    // Assume schema is already applied by caller
+  } else {
+    pglite = (await PGlite.create(options.dataDir ?? "idb://pgxsinkit-overlay-v1", {
+      extensions: {
+        electric: createElectricExtension(),
+        live,
+      },
+    })) as ClientPGlite;
+    const schemaSql = generateLocalSchemaSql(options.registry);
+    await pglite.exec(schemaSql);
+    if (options.prepareLocalDb) {
+      await options.prepareLocalDb(pglite);
+    }
   }
 
   const drizzleDb = createDrizzleDatabase(pglite, buildSchema(options.registry));
@@ -121,6 +131,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     sync = await startConfiguredSync(pglite as unknown as Parameters<typeof startConfiguredSync>[0], {
       syncConfig: buildSyncConfigFromRegistry(options.registry, options.electricUrl),
       ...(options.authToken ? { shapeHeaders: { Authorization: `Bearer ${options.authToken}` } } : {}),
+      ...(options.onTableInitialSync ? { onTableInitialSync: options.onTableInitialSync } : {}),
       onInitialSync: () => {
         status.phase = "ready";
         options.onStatusChange?.(status);
@@ -139,6 +150,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     writeUrl: options.writeUrl,
     ...(options.batchWriteUrl !== undefined ? { batchWriteUrl: options.batchWriteUrl } : {}),
     ...(options.authToken ? { authToken: options.authToken } : {}),
+    ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
   });
 
   await mutationRuntime.recoverSending();
@@ -187,6 +199,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     flush: (table) => mutationRuntime.flush(table),
     reconcile: (table) => mutationRuntime.reconcile(table),
     retryFailed: (table) => mutationRuntime.retryFailed(table),
+    recoverSending: (table) => mutationRuntime.recoverSending(table),
     readMutationDetails: (table) => mutationRuntime.readMutationDetails(table),
     mutate,
     diagnostics: async (table) => ({

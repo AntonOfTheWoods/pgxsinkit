@@ -1,5 +1,8 @@
+import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+
 import {
   defineSyncRegistry,
+  defineSyncTable,
   getSyncRegistrySchema,
   mutationAckSchema,
   mutationEnvelopeSchema,
@@ -16,6 +19,14 @@ import {
   todoTableSpec,
   updateTodoInputSchema,
 } from "@pgxsinkit/demo";
+
+const projectedContractsTable = pgTable("projected_contracts_items", {
+  id: uuid("id").primaryKey(),
+  ownerId: uuid("owner_id").notNull(),
+  modifiedBy: uuid("modified_by"),
+  title: varchar("title", { length: 120 }).notNull(),
+  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+});
 
 describe("todo contracts", () => {
   it("parses a serialized author row", () => {
@@ -98,6 +109,7 @@ describe("todo contracts", () => {
             overlayTable: "projects_overlay",
             journalTable: "projects_mutations",
             readModel: "projects_read_model",
+            omitColumns: ["ownerId"],
           },
           governance: {
             managedFields: [
@@ -120,6 +132,7 @@ describe("todo contracts", () => {
     expect(result.tables.projects?.mode).toBe("readwrite");
     expect(result.tables.projects?.governance?.managedFields?.[0]?.column).toBe("ownerId");
     expect(result.localSchema).toBe("workspace_local");
+    expect(result.tables.projects?.clientProjection?.omitColumns).toEqual(["ownerId"]);
   });
 
   it("attaches registry-level schema metadata without changing table enumeration", () => {
@@ -186,6 +199,44 @@ describe("todo contracts", () => {
         },
       }),
     ).toThrow(/clientProjection is required/);
+  });
+
+  it("rejects omitting primary-key columns from the client projection", () => {
+    expect(() =>
+      defineSyncTable({
+        table: projectedContractsTable,
+        mode: "readwrite",
+        primaryKey: { columns: ["id"] },
+        shape: { tableName: "projected_contracts_items", shapeKey: "projected_contracts_items" },
+        routes: { basePath: "/api/projected-contracts-items", allowBatch: false },
+        clientProjection: {
+          syncedTable: "projected_contracts_items",
+          overlayTable: "projected_contracts_items_overlay",
+          journalTable: "projected_contracts_items_mutations",
+          readModel: "projected_contracts_items_read_model",
+          omitColumns: ["id"],
+        },
+      }),
+    ).toThrow(/must not omit primary-key columns/);
+  });
+
+  it("rejects omitting required unmanaged create columns from writable tables", () => {
+    expect(() =>
+      defineSyncTable({
+        table: projectedContractsTable,
+        mode: "readwrite",
+        primaryKey: { columns: ["id"] },
+        shape: { tableName: "projected_contracts_items", shapeKey: "projected_contracts_items" },
+        routes: { basePath: "/api/projected-contracts-items", allowBatch: false },
+        clientProjection: {
+          syncedTable: "projected_contracts_items",
+          overlayTable: "projected_contracts_items_overlay",
+          journalTable: "projected_contracts_items_mutations",
+          readModel: "projected_contracts_items_read_model",
+          omitColumns: ["title"],
+        },
+      }),
+    ).toThrow(/must only omit create-safe columns/);
   });
 
   it("parses generic mutation envelopes and acks", () => {

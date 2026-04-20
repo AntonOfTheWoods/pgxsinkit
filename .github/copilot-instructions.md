@@ -38,7 +38,7 @@ Build and maintain a battle-hardened demo and verification harness for `PostgreS
 - Preserve Bun for the write API runtime.
 - Preserve Drizzle ORM and `drizzle-kit@1.0.0-beta.*` for schema management.
 - Keep Drizzle schema authoritative for server-side PostgreSQL structure.
-- Preserve Zod validation on all user-controlled payloads.
+- Preserve Zod v4 validation on all user-controlled payloads.
 - Run ALL type checks through `tsgo` from `@typescript/native-preview`, never attempt to use tsc.
 - Use `oxlint` and `oxfmt` instead of ESLint and Prettier.
 - Pure JavaScript is forbidden for project code and ad-hoc scripts; use TypeScript with repository typecheck coverage, or use bash when TypeScript coverage cannot be made robust.

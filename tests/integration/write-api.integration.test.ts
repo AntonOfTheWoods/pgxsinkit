@@ -620,16 +620,11 @@ describe.each([
 
     const children = await server.drizzle.select().from(fkChildrenTable);
     const parents = await server.drizzle.select().from(fkParentsTable);
+    const persistsDeferredParent = backend === "bulk-plpgsql-artifact";
 
-    if (backend === "bulk-plpgsql-artifact") {
-      expect(children).toHaveLength(1);
-      expect(parents).toHaveLength(1);
-      expect(children[0]?.parentId).toBe(parentId);
-      return;
-    }
-
-    expect(children).toHaveLength(0);
-    expect(parents).toHaveLength(0);
+    expect(children).toHaveLength(persistsDeferredParent ? 1 : 0);
+    expect(parents).toHaveLength(persistsDeferredParent ? 1 : 0);
+    expect(children[0]?.parentId ?? null).toBe(persistsDeferredParent ? parentId : null);
   });
 });
 
@@ -1141,5 +1136,8 @@ async function postBatchMutations(
 
 async function expectResponseStatus(response: Response, expectedStatus: number): Promise<void> {
   const responseText = await response.clone().text();
-  expect(response.status, responseText).toBe(expectedStatus);
+
+  if (response.status !== expectedStatus) {
+    throw new Error(`Expected HTTP ${expectedStatus}, got ${response.status}: ${responseText}`);
+  }
 }

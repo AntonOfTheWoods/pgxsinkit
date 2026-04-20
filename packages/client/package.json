@@ -1,15 +1,22 @@
 {
   "name": "@pgxsinkit/client",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@electric-sql/pglite": "0.4.4",
-    "@electric-sql/pglite-react": "0.3.4",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/sync-engine": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.4.4",
+    "drizzle-orm": "1.0.0-beta.22"
+  },
+  "peerDependencies": {
+    "@electric-sql/pglite": "0.4.4",
     "drizzle-orm": "1.0.0-beta.22"
   }
 }

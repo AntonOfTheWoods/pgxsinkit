@@ -29,8 +29,27 @@ export const clientProjectionSpecSchema = z
     overlayTable: z.string().trim().min(1).optional(),
     journalTable: z.string().trim().min(1).optional(),
     readModel: z.string().trim().min(1),
+    omitColumns: z.array(z.string().trim().min(1)).optional(),
+    localPrimaryKey: primaryKeySpecSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.omitColumns && new Set(value.omitColumns).size !== value.omitColumns.length) {
+      context.addIssue({
+        code: "custom",
+        message: "omitColumns must not contain duplicate entries",
+        path: ["omitColumns"],
+      });
+    }
+
+    if (value.localPrimaryKey && new Set(value.localPrimaryKey.columns).size !== value.localPrimaryKey.columns.length) {
+      context.addIssue({
+        code: "custom",
+        message: "localPrimaryKey.columns must not contain duplicate entries",
+        path: ["localPrimaryKey", "columns"],
+      });
+    }
+  });
 
 export const deferrableConstraintSpecSchema = z
   .object({
@@ -122,9 +141,9 @@ export const tableSpecInputSchema = z
     mode: tableModeSchema,
     primaryKey: primaryKeySpecSchema,
     shape: shapeSpecSchema.optional(),
-    routes: serverRouteSpecSchema.optional(),
     clientProjection: clientProjectionSpecSchema.optional(),
     governance: tableGovernanceSpecSchema.optional(),
+    routes: serverRouteSpecSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -144,11 +163,25 @@ export const tableSpecInputSchema = z
       });
     }
 
-    if (value.mode === "readwrite" && value.routes === undefined) {
+    if (value.clientProjection?.localPrimaryKey && value.mode !== "readonly") {
       context.addIssue({
         code: "custom",
-        message: "routes are required for readwrite tables",
-        path: ["routes"],
+        message: "clientProjection.localPrimaryKey is only supported for readonly tables",
+        path: ["clientProjection", "localPrimaryKey"],
+      });
+    }
+
+    const omittedColumns = new Set(value.clientProjection?.omitColumns ?? []);
+    const localPrimaryKeyColumns = value.clientProjection?.localPrimaryKey?.columns ?? [];
+    const omittedLocalPrimaryKeyColumns = localPrimaryKeyColumns.filter((column) => omittedColumns.has(column));
+
+    if (omittedLocalPrimaryKeyColumns.length > 0) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "clientProjection.localPrimaryKey.columns must not include omitted columns: " +
+          omittedLocalPrimaryKeyColumns.join(", "),
+        path: ["clientProjection", "localPrimaryKey", "columns"],
       });
     }
   });
@@ -215,4 +248,18 @@ export interface TableSpec<TCreate, TUpdate, TRecord> extends TableSpecInput {
 export interface SyncConfig {
   electricUrl: string;
   tables: Record<string, TableSpec<any, any, any>>;
+}
+
+export function getLocalSyncPrimaryKey(source: {
+  primaryKey: PrimaryKeySpec;
+  clientProjection?: Pick<ClientProjectionSpec, "localPrimaryKey">;
+}) {
+  return source.clientProjection?.localPrimaryKey ?? source.primaryKey;
+}
+
+export function getLocalSyncPrimaryKeyColumns(source: {
+  primaryKey: PrimaryKeySpec;
+  clientProjection?: Pick<ClientProjectionSpec, "localPrimaryKey">;
+}) {
+  return [...getLocalSyncPrimaryKey(source).columns];
 }

@@ -1,11 +1,16 @@
 {
   "name": "@pgxsinkit/contracts",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
-  "dependencies": {
+  "devDependencies": {
+    "drizzle-orm": "1.0.0-beta.22",
+    "zod": "4.3.6"
+  },
+  "peerDependencies": {
     "drizzle-orm": "1.0.0-beta.22",
     "zod": "4.3.6"
   }

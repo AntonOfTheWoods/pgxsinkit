@@ -16,10 +16,10 @@
     "@pgxsinkit/sync-engine": "workspace:*",
     "react": "19.2.5",
     "react-dom": "19.2.5",
-    "uuid": "13.0.0"
+    "uuid": "14.0.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "6.0.1",
-    "vite": "8.0.8"
+    "vite": "8.0.9"
   }
 }

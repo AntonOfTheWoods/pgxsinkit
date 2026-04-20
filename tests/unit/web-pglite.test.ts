@@ -15,6 +15,7 @@ vi.mock("@pgxsinkit/client", () => ({
 
 describe("web pglite loader", () => {
   beforeEach(() => {
+    vi.resetModules();
     destroyMock.mockClear();
     createSyncClientMock.mockClear();
   });

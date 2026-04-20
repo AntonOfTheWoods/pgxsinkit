@@ -1,4 +1,5 @@
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
+import { getColumns } from "drizzle-orm/utils";
 
 import type {
   ClientProjectionSpec,
@@ -53,6 +54,16 @@ export interface ResolvedManagedFieldSpecForTable<TTable extends AnyPgTable> {
   strategy: ManagedFieldStrategy;
 }
 
+export type ClientProjectionSpecForTable<TTable extends AnyPgTable> = Omit<ClientProjectionSpec, "omitColumns"> & {
+  omitColumns?: Array<TableColumnKey<TTable>>;
+};
+
+export interface ProjectedTableColumn<TTable extends AnyPgTable = AnyPgTable> {
+  propertyKey: TableColumnKey<TTable>;
+  columnName: string;
+  column: ReturnType<typeof getColumns<AnyPgTable>>[string];
+}
+
 export type TableGovernanceSpecForTable<TTable extends AnyPgTable> = Omit<
   TableGovernanceSpecBase,
   "deferrableConstraints" | "managedFields" | "rls"
@@ -73,7 +84,7 @@ export interface SyncTableEntry<
   primaryKey: PrimaryKeySpec;
   shape?: ShapeSpec;
   routes?: ServerRouteSpec;
-  clientProjection?: ClientProjectionSpec;
+  clientProjection?: ClientProjectionSpecForTable<TTable>;
   governance?: TableGovernanceSpecForTable<TTable>;
   schemas?: TableSchemas<TCreate, TUpdate, TRecord>;
   adapters?: TableAdapters;
@@ -106,6 +117,7 @@ export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends ke
 export function defineSyncTable<const TTable extends AnyPgTable, TCreate, TUpdate, TRecord>(
   entry: SyncTableEntry<TTable, TCreate, TUpdate, TRecord>,
 ) {
+  validateSyncTableEntry(entry);
   return entry;
 }
 
@@ -126,10 +138,66 @@ export function defineSyncRegistry<
   const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any, any, any, any> },
 >(input: TRegistry | SyncRegistryDefinition<TRegistry>) {
   if (isSyncRegistryDefinition(input)) {
+    for (const entry of getRegistryEntries(input.tables)) {
+      validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
+    }
+
     return attachSyncRegistrySchema(input.tables, input.schema);
   }
 
+  for (const entry of getRegistryEntries(input)) {
+    validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
+  }
+
   return input;
+}
+
+export function getProjectedColumns<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {
+  const omittedColumns = new Set(entry.clientProjection?.omitColumns ?? []);
+
+  return Object.entries(getColumns(entry.table)).flatMap(([propertyKey, column]) => {
+    if (omittedColumns.has(propertyKey as TableColumnKey<TTable>)) {
+      return [];
+    }
+
+    return [
+      {
+        propertyKey: propertyKey as TableColumnKey<TTable>,
+        columnName: column.name,
+        column,
+      } satisfies ProjectedTableColumn<TTable>,
+    ];
+  });
+}
+
+export function getOmittedProjectedColumns<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {
+  const omittedColumns = new Set(entry.clientProjection?.omitColumns ?? []);
+
+  return Object.entries(getColumns(entry.table)).flatMap(([propertyKey, column]) => {
+    if (!omittedColumns.has(propertyKey as TableColumnKey<TTable>)) {
+      return [];
+    }
+
+    return [
+      {
+        propertyKey: propertyKey as TableColumnKey<TTable>,
+        columnName: column.name,
+        column,
+      } satisfies ProjectedTableColumn<TTable>,
+    ];
+  });
+}
+
+export function getProjectedColumnNames<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {
+  return getProjectedColumns(entry).map(({ columnName }) => columnName);
+}
+
+export function getOmittedProjectedColumnNames<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {
+  return getOmittedProjectedColumns(entry).map(({ columnName }) => columnName);
+}
+
+export function getLocalSyncedTablePrimaryKeyColumns<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {
+  return [...(entry.clientProjection?.localPrimaryKey?.columns ?? entry.primaryKey.columns)];
 }
 
 export function attachSyncRegistrySchema<TRegistry extends SyncTableRegistry>(registry: TRegistry, schema?: string) {
@@ -190,4 +258,101 @@ function isSyncRegistryDefinition<TRegistry extends SyncTableRegistry>(
 function normalizeSchemaName(schema: string | undefined) {
   const trimmed = schema?.trim();
   return trimmed && trimmed !== "public" ? trimmed : undefined;
+}
+
+function getRegistryEntries<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
+  return Object.values(registry) as Array<SyncTableEntry<AnyPgTable>>;
+}
+
+function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
+  const tableName = getTableConfig(entry.table).name;
+  const columns = Object.entries(getColumns(entry.table)).map(([propertyKey, column]) => ({
+    propertyKey,
+    columnName: column.name,
+    column,
+  }));
+  const columnsByPropertyKey = new Map(columns.map((column) => [column.propertyKey, column]));
+  const columnsByColumnName = new Map(columns.map((column) => [column.columnName, column]));
+  const omitColumns = entry.clientProjection?.omitColumns ?? [];
+  const localPrimaryKeyColumns = entry.clientProjection?.localPrimaryKey?.columns ?? [];
+
+  if (omitColumns.length === 0 && localPrimaryKeyColumns.length === 0) {
+    return;
+  }
+
+  const unknownColumns = omitColumns.filter((propertyKey) => !columnsByPropertyKey.has(propertyKey));
+
+  if (unknownColumns.length > 0) {
+    throw new Error(
+      `clientProjection.omitColumns contains unknown columns for ${tableName}: ${unknownColumns.join(", ")}`,
+    );
+  }
+
+  const unknownLocalPrimaryKeyColumns = localPrimaryKeyColumns.filter(
+    (columnName) => !columnsByColumnName.has(columnName),
+  );
+
+  if (unknownLocalPrimaryKeyColumns.length > 0) {
+    throw new Error(
+      `clientProjection.localPrimaryKey contains unknown columns for ${tableName}: ${unknownLocalPrimaryKeyColumns.join(", ")}`,
+    );
+  }
+
+  if (entry.mode !== "readonly" && localPrimaryKeyColumns.length > 0) {
+    throw new Error(`clientProjection.localPrimaryKey is only supported for readonly table ${tableName}`);
+  }
+
+  const omittedColumnsSet = new Set(omitColumns);
+  const omittedLocalPrimaryKeyColumns = localPrimaryKeyColumns.filter((columnName) =>
+    omittedColumnsSet.has(columnName),
+  );
+
+  if (omittedLocalPrimaryKeyColumns.length > 0) {
+    throw new Error(
+      `clientProjection.localPrimaryKey must not include omitted columns for ${tableName}: ${omittedLocalPrimaryKeyColumns.join(", ")}`,
+    );
+  }
+
+  const primaryKeyOmissions = omitColumns.filter((propertyKey) => {
+    const column = columnsByPropertyKey.get(propertyKey);
+    return column
+      ? entry.primaryKey.columns.includes(column.columnName) || entry.primaryKey.columns.includes(propertyKey)
+      : false;
+  });
+
+  if (primaryKeyOmissions.length > 0) {
+    if (entry.mode === "readonly" && localPrimaryKeyColumns.length > 0) {
+      return;
+    }
+
+    throw new Error(
+      `clientProjection.omitColumns must not omit primary-key columns for ${tableName}: ${primaryKeyOmissions.join(", ")}`,
+    );
+  }
+
+  if (entry.mode === "readonly") {
+    return;
+  }
+
+  const createManagedColumns = new Set(
+    (entry.governance?.managedFields ?? [])
+      .filter((field) => field.applyOn.includes("create"))
+      .map((field) => field.column),
+  );
+
+  const createRequiredOmissions = omitColumns.filter((propertyKey) => {
+    const column = columnsByPropertyKey.get(propertyKey);
+
+    if (!column) {
+      return false;
+    }
+
+    return column.column.notNull && !column.column.hasDefault && !createManagedColumns.has(propertyKey);
+  });
+
+  if (createRequiredOmissions.length > 0) {
+    throw new Error(
+      `clientProjection.omitColumns must only omit create-safe columns for writable table ${tableName}: ${createRequiredOmissions.join(", ")}`,
+    );
+  }
 }

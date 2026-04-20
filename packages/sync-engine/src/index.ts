@@ -34,6 +34,7 @@ export interface StartConfiguredSyncOptions {
 }
 
 type ElectricNamespace = ReturnType<typeof electricSync>;
+type SyncEnginePGlite = PGlite & PGliteInterfaceExtensions<{ electric: ElectricNamespace; sync: ElectricNamespace }>;
 
 export interface ShapeSyncResult {
   unsubscribe: () => void;
@@ -76,10 +77,7 @@ export function createElectricExtension() {
   return electricSync({ debug: false });
 }
 
-export async function startShapeSync(
-  pg: PGlite & PGliteInterfaceExtensions<{ electric: ElectricNamespace }>,
-  input: StartShapeSyncOptions,
-) {
+export async function startShapeSync(pg: SyncEnginePGlite, input: StartShapeSyncOptions) {
   const config = buildShapeConfig({
     electricUrl: input.electricUrl,
     tableName: input.tableName,
@@ -91,7 +89,7 @@ export async function startShapeSync(
 
   const shapeHeaders = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
 
-  return pg.electric.syncShapeToTable(
+  return getElectricNamespace(pg).syncShapeToTable(
     input.onInitialSync
       ? {
           ...config,
@@ -106,7 +104,7 @@ export async function startShapeSync(
 }
 
 export async function startConfiguredSync(
-  pg: PGlite & PGliteInterfaceExtensions<{ electric: ElectricNamespace }>,
+  pg: SyncEnginePGlite,
   input: StartConfiguredSyncOptions,
 ): Promise<StartConfiguredSyncResult> {
   const specs = buildConfiguredShapeSpecs(input.syncConfig);
@@ -149,6 +147,10 @@ export async function startConfiguredSync(
   };
 }
 
+function getElectricNamespace(pg: SyncEnginePGlite) {
+  return pg.electric ?? pg.sync;
+}
+
 function buildConfiguredShapeSpec(
   electricUrl: string,
   localSchema: string | undefined,
@@ -169,7 +171,7 @@ function buildConfiguredShapeSpec(
     tableName: table.clientProjection.syncedTable,
     ...(localSchema ? { schema: localSchema } : {}),
     shapeKey: table.shape.shapeKey,
-    primaryKey: [...table.primaryKey.columns],
+    primaryKey: [...(table.clientProjection.localPrimaryKey?.columns ?? table.primaryKey.columns)],
     electricTable: table.shape.electricTable ?? table.shape.tableName,
   };
 }

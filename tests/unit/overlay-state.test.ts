@@ -1,3 +1,6 @@
+import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+
+import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, demoSyncRegistry } from "@pgxsinkit/demo";
 
 import {
@@ -13,6 +16,28 @@ import { createFreshTestPGlite } from "../support/pglite";
 
 const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const writeUrl = "http://localhost:3001";
+
+const routeOptionalBatchTable = pgTable("route_optional_batch_items", {
+  id: uuid("id").primaryKey(),
+  title: varchar("title", { length: 120 }).notNull(),
+  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+  updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+});
+
+const routeOptionalBatchRegistry = defineSyncRegistry({
+  routeOptionalBatchItems: defineSyncTable({
+    table: routeOptionalBatchTable,
+    mode: "readwrite",
+    primaryKey: { columns: ["id"] },
+    shape: { tableName: "route_optional_batch_items", shapeKey: "route_optional_batch_items" },
+    clientProjection: {
+      syncedTable: "route_optional_batch_items",
+      overlayTable: "route_optional_batch_items_overlay",
+      journalTable: "route_optional_batch_items_mutations",
+      readModel: "route_optional_batch_items_read_model",
+    },
+  }),
+});
 
 async function createOverlayTestContext() {
   const db = await createFreshTestPGlite();
@@ -68,6 +93,29 @@ describe("overlay state helpers", () => {
 
     expect(author.createdAtUs).toMatch(/^[0-9]+$/);
     expect(author.updatedAtUs).toMatch(/^[0-9]+$/);
+  });
+
+  it("allows batch mutation runtime setup without per-table routes", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(generateLocalSchemaSql(routeOptionalBatchRegistry));
+
+    const runtime = createMutationRuntime({
+      db,
+      registry: routeOptionalBatchRegistry,
+      writeUrl,
+      batchWriteUrl: writeUrl,
+    });
+
+    await expect(
+      runtime.create("routeOptionalBatchItems", {
+        id: "01963227-d4c7-72db-b858-f89f6af8f901",
+        title: "Queued without per-table routes",
+        createdAtUs: "100",
+        updatedAtUs: "100",
+      }),
+    ).resolves.toBeUndefined();
+
+    await db.close();
   });
 
   it("updates synthetic perf rows whose record schema includes overlay metadata", async () => {
@@ -486,6 +534,82 @@ describe("overlay state helpers", () => {
     ]);
   });
 
+  it("assigns globally unique mutation sequences in planner order", async () => {
+    const { db, runtime } = await createOverlayTestContext();
+    const firstTodoId = "01963227-d4c7-72db-b858-f89f6af8f944";
+    const secondTodoId = "01963227-d4c7-72db-b858-f89f6af8f945";
+
+    await db.query(
+      `
+        INSERT INTO todos (
+          id,
+          title,
+          description,
+          author_id,
+          status,
+          priority,
+          created_at_us,
+          updated_at_us
+        ) VALUES
+          ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint),
+          ($9, $10, $11, $12, $13, $14, $15::bigint, $16::bigint)
+      `,
+      [
+        firstTodoId,
+        "First seeded todo",
+        null,
+        "01963227-d4c7-72db-b858-f89f6af8f920",
+        "todo",
+        "medium",
+        "100",
+        "100",
+        secondTodoId,
+        "Second seeded todo",
+        null,
+        "01963227-d4c7-72db-b858-f89f6af8f920",
+        "todo",
+        "medium",
+        "100",
+        "100",
+      ],
+    );
+
+    await runtime.batch([
+      {
+        table: "todos",
+        kind: "update",
+        entityKey: { id: firstTodoId },
+        patch: { title: "First planner update" },
+      },
+      {
+        table: "todos",
+        kind: "update",
+        entityKey: { id: secondTodoId },
+        patch: { title: "Second planner update" },
+      },
+      {
+        table: "todos",
+        kind: "update",
+        entityKey: { id: firstTodoId },
+        patch: { status: "done" },
+      },
+    ]);
+
+    const journalRows = await db.query<{ id: string; mutationSeq: number }>(
+      `
+        SELECT id, mutation_seq AS "mutationSeq"
+        FROM todo_mutations
+        ORDER BY mutation_seq ASC
+      `,
+    );
+
+    expect(journalRows.rows).toEqual([
+      { id: firstTodoId, mutationSeq: 1 },
+      { id: secondTodoId, mutationSeq: 2 },
+      { id: firstTodoId, mutationSeq: 3 },
+    ]);
+  });
+
   it("supports create-then-delete chains inside a local batch", async () => {
     const { db, runtime } = await createOverlayTestContext();
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f942";
@@ -603,7 +727,7 @@ describe("overlay state helpers", () => {
           },
         },
       ]),
-    ).rejects.toThrow();
+    ).rejects.toThrow("[");
 
     const [authorOverlay, authorJournal, todoOverlay, todoJournal] = await Promise.all([
       db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM author_overlay"),

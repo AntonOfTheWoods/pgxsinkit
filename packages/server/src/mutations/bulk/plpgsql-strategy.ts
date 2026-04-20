@@ -3,7 +3,13 @@ import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
 
-import type { BatchMutationRequest, RegistryTables, SyncTableEntry, SyncTableRegistry } from "@pgxsinkit/contracts";
+import {
+  getProjectedColumns,
+  type BatchMutationRequest,
+  type RegistryTables,
+  type SyncTableEntry,
+  type SyncTableRegistry,
+} from "@pgxsinkit/contracts";
 
 import type { TransactionClient } from "./types";
 
@@ -40,6 +46,16 @@ function drizzleColumnTypeToPg(columnType: string): string {
   return PG_TYPE_MAP[columnType] ?? "text";
 }
 
+function drizzleColumnToPg(column: { columnType: string; getSQLType?: () => string }): string {
+  const sqlType = column.getSQLType?.();
+
+  if (sqlType && sqlType.length > 0) {
+    return sqlType;
+  }
+
+  return drizzleColumnTypeToPg(column.columnType);
+}
+
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
@@ -73,7 +89,7 @@ function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create"
   const columnMap = new Map(
     Object.entries(columns).map(([propertyKey, column]) => [
       propertyKey,
-      { name: column.name, columnType: column.columnType },
+      { name: column.name, columnType: drizzleColumnToPg(column) },
     ]),
   );
 
@@ -103,23 +119,28 @@ function buildTableBranch(entry: SyncTableEntry): string {
   const { schema } = getTableConfig(entry.table as AnyPgTable);
   const qualifiedTableName = qualifyIdent(schema, tableName);
   const columns = getColumns(entry.table as AnyPgTable);
+  const projectedColumns = getProjectedColumns(entry);
   const primaryKeyColumn = entry.primaryKey.columns[0]!;
   const primaryKeyColumnObject = Object.values(columns).find((column) => column.name === primaryKeyColumn);
-  const primaryKeyType = drizzleColumnTypeToPg(primaryKeyColumnObject?.columnType ?? "PgText");
+  const primaryKeyType = primaryKeyColumnObject
+    ? drizzleColumnToPg(primaryKeyColumnObject)
+    : drizzleColumnTypeToPg("PgText");
 
   const createManagedFields = getManagedFieldsForOperation(entry, "create");
   const updateManagedFields = getManagedFieldsForOperation(entry, "update");
   const createManagedFieldNames = new Set(createManagedFields.map((field) => field.columnName));
   const updateManagedFieldNames = new Set(updateManagedFields.map((field) => field.columnName));
 
-  const allColumnPairs = Object.values(columns)
+  const allColumnPairs = projectedColumns
+    .map(({ column }) => column)
     .filter((column) => !createManagedFieldNames.has(column.name))
-    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(drizzleColumnTypeToPg(column.columnType))}')`)
+    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(drizzleColumnToPg(column))}')`)
     .join(",\n            ");
 
-  const nonPrimaryKeyColumnPairs = Object.values(columns)
+  const nonPrimaryKeyColumnPairs = projectedColumns
+    .map(({ column }) => column)
     .filter((column) => column.name !== primaryKeyColumn && !updateManagedFieldNames.has(column.name))
-    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(drizzleColumnTypeToPg(column.columnType))}')`)
+    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(drizzleColumnToPg(column))}')`)
     .join(",\n            ");
 
   const createManagedColumnsSql = createManagedFields.map((field) => quoteIdent(field.columnName)).join(", ");

@@ -624,3 +624,5 @@ function extractEntityKeyFromRecord(entry: SyncTableEntry, value: unknown): Reco
 
   return entityKey;
 }
+
+export { buildPlpgsqlBatchFunctionDdl } from "./mutations/bulk/plpgsql-strategy";

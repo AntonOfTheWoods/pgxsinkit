@@ -83,7 +83,7 @@ async function startTestSync(localPg: Awaited<ReturnType<typeof createLocalTodoS
     markInitialSyncDone = resolve;
   });
 
-  const sync = await startConfiguredSync(localPg, {
+  const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
     syncConfig: buildDemoSyncConfig(env.electricUrl),
     onInitialSync: () => {
       markInitialSyncDone?.();

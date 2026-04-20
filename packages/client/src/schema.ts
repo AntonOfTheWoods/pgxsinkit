@@ -1,14 +1,15 @@
 import type { AnyPgTable } from "drizzle-orm/pg-core";
-import { getColumns } from "drizzle-orm/utils";
 
 import {
+  getLocalSyncPrimaryKeyColumns,
   getSyncRegistrySchema,
+  getProjectedColumns,
   type ClientProjectionSpec,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
-type TableColumn = ReturnType<typeof getColumns<AnyPgTable>>[string];
+type TableColumn = ReturnType<typeof getProjectedColumns<AnyPgTable>>[number]["column"];
 
 export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
   const statements: string[] = [];
@@ -20,17 +21,9 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
 
   for (const [tableKey, entry] of Object.entries(registry)) {
     const projection = getClientProjection(entry, tableKey, localSchema);
-    const columns = Object.values(getColumns(entry.table));
-    const primaryKeyColumns = entry.primaryKey.columns.map((columnName) => {
-      const column = columns.find((candidate) => candidate.name === columnName);
-
-      if (!column) {
-        throw new Error(`Primary key column ${columnName} was not found on table ${tableKey}`);
-      }
-
-      return column;
-    });
-    const baseColumnsSql = columns.map((column) => buildColumnDefinition(column, entry)).join(",\n  ");
+    const columns = getProjectedColumns(entry).map(({ column }) => column);
+    const syncedTablePrimaryKeyColumns = getLocalSyncPrimaryKeyColumns(entry);
+    const baseColumnsSql = buildTableColumnSql(columns, syncedTablePrimaryKeyColumns);
 
     statements.push(`CREATE TABLE IF NOT EXISTS ${projection.syncedTable} (\n  ${baseColumnsSql}\n);`);
 
@@ -42,12 +35,36 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
       throw new Error(`overlay and journal tables are required for writable table ${tableKey}`);
     }
 
+    const journalTableName = entry.clientProjection?.journalTable;
+
+    if (!journalTableName) {
+      throw new Error(`journal table is required for writable table ${tableKey}`);
+    }
+
+    const primaryKeyColumns = entry.primaryKey.columns.map((columnName) => {
+      const column = columns.find((candidate) => candidate.name === columnName);
+
+      if (!column) {
+        throw new Error(`Primary key column ${columnName} was not found on table ${tableKey}`);
+      }
+
+      return column;
+    });
+    const primaryKeyColumnNames = primaryKeyColumns.map((column) => column.name);
+    const journalSequenceName = buildJournalSequenceName(journalTableName);
+    const qualifiedJournalSequenceName = qualifyIdentifier(localSchema, journalSequenceName);
+
     statements.push(
       `CREATE TABLE IF NOT EXISTS ${projection.overlayTable} (\n  ${[
-        ...columns.map((column) => buildColumnDefinition(column, entry)),
+        ...columns.map((column) => buildColumnDefinition(column, primaryKeyColumnNames)),
         "overlay_kind VARCHAR(24) NOT NULL",
         "local_updated_at_us BIGINT NOT NULL",
+        ...buildCompositePrimaryKeyClauses(primaryKeyColumnNames),
       ].join(",\n  ")}\n);`,
+    );
+
+    statements.push(
+      `CREATE SEQUENCE IF NOT EXISTS ${qualifiedJournalSequenceName} AS integer START WITH 1 INCREMENT BY 1;`,
     );
 
     statements.push(
@@ -55,7 +72,7 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
         "mutation_id UUID PRIMARY KEY",
         ...primaryKeyColumns.map((column) => `${column.name} ${mapColumnType(column)} NOT NULL`),
         "entity_key_json TEXT NOT NULL",
-        "mutation_seq INTEGER NOT NULL",
+        `mutation_seq INTEGER NOT NULL UNIQUE DEFAULT nextval(${quoteSqlStringLiteral(qualifiedJournalSequenceName)})::integer`,
         "mutation_kind VARCHAR(24) NOT NULL",
         "status VARCHAR(24) NOT NULL",
         "payload_json TEXT NOT NULL",
@@ -69,7 +86,6 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
         "sent_at_us BIGINT",
         "acked_at_us BIGINT",
         "updated_at_us BIGINT NOT NULL",
-        "UNIQUE (entity_key_json, mutation_seq)",
       ].join(",\n  ")}\n);`,
     );
 
@@ -111,9 +127,7 @@ function buildReadModelViewSql(
   }
 
   const pkMatch = buildPrimaryKeyMatch(entry.primaryKey.columns);
-  const syncedLocalUpdated = columnNames.includes("updated_at_us")
-    ? "updated_at_us AS local_updated_at_us"
-    : "CAST(0 AS BIGINT) AS local_updated_at_us";
+  const syncedLocalUpdatedExpression = columnNames.includes("updated_at_us") ? "t.updated_at_us" : "CAST(0 AS BIGINT)";
 
   return [
     "SELECT",
@@ -126,7 +140,7 @@ function buildReadModelViewSql(
     "SELECT",
     `  ${columnNames.map((name) => `t.${name}`).join(",\n  ")},`,
     `  'synced' AS overlay_kind,`,
-    `  t.${syncedLocalUpdated}`,
+    `  ${syncedLocalUpdatedExpression} AS local_updated_at_us`,
     `FROM ${projection.syncedTable} AS t`,
     "WHERE NOT EXISTS (",
     "  SELECT 1",
@@ -136,14 +150,46 @@ function buildReadModelViewSql(
   ].join("\n");
 }
 
-function buildColumnDefinition(column: TableColumn, entry: SyncTableEntry<AnyPgTable>) {
+function buildTableColumnSql(columns: TableColumn[], primaryKeyColumns: string[]) {
+  return [
+    ...columns.map((column) => buildColumnDefinition(column, primaryKeyColumns)),
+    ...buildCompositePrimaryKeyClauses(primaryKeyColumns),
+  ].join(",\n  ");
+}
+
+function buildColumnDefinition(column: TableColumn, primaryKeyColumns: string[]) {
   const typeSql = mapColumnType(column);
   const notNullSql = column.notNull ? " NOT NULL" : "";
-  const primaryKeySql = entry.primaryKey.columns.includes(column.name) ? " PRIMARY KEY" : "";
+  const primaryKeySql = primaryKeyColumns.length === 1 && primaryKeyColumns.includes(column.name) ? " PRIMARY KEY" : "";
   return `${column.name} ${typeSql}${notNullSql}${primaryKeySql}`;
 }
 
+function buildCompositePrimaryKeyClauses(primaryKeyColumns: string[]) {
+  if (primaryKeyColumns.length <= 1) {
+    return [];
+  }
+
+  return [`PRIMARY KEY (${primaryKeyColumns.join(", ")})`];
+}
+
 function mapColumnType(column: TableColumn) {
+  const baseTypeSql = readBaseColumnTypeSql(column);
+  const dimensions = readArrayDimensions(column);
+
+  if (dimensions > 0) {
+    return `${baseTypeSql}${"[]".repeat(dimensions)}`;
+  }
+
+  return baseTypeSql;
+}
+
+function readBaseColumnTypeSql(column: TableColumn) {
+  const sqlType = readColumnSqlType(column);
+
+  if (sqlType) {
+    return sqlType;
+  }
+
   switch (column.columnType) {
     case "PgUUID":
       return "UUID";
@@ -160,6 +206,12 @@ function mapColumnType(column: TableColumn) {
       return "INTEGER";
     case "PgBoolean":
       return "BOOLEAN";
+    case "PgJson":
+    case "PgJsonb":
+      return "JSONB";
+    case "PgReal":
+    case "PgDoublePrecision":
+      return "REAL";
     case "PgTimestamp":
     case "PgTimestampString":
       return "TIMESTAMP";
@@ -172,12 +224,33 @@ function mapColumnType(column: TableColumn) {
         return "BIGINT";
       }
 
+      if (column.dataType.includes("json")) {
+        return "JSONB";
+      }
+
+      if (column.dataType.includes("float")) {
+        return "REAL";
+      }
+
       if (column.dataType === "string") {
         return "TEXT";
       }
 
       throw new Error(`Unsupported column type for local schema generation: ${column.columnType}`);
   }
+}
+
+function readColumnSqlType(column: TableColumn) {
+  const candidate = column as TableColumn & {
+    getSQLType?: () => string;
+  };
+
+  return typeof candidate.getSQLType === "function" ? candidate.getSQLType() : undefined;
+}
+
+function readArrayDimensions(column: TableColumn) {
+  const arrayColumn = column as TableColumn & { dimensions?: number };
+  return arrayColumn.dimensions ?? 0;
 }
 
 function readVarcharLength(column: TableColumn) {
@@ -218,4 +291,12 @@ function qualifyIdentifier(schemaName: string, objectName: string) {
 
 function quoteIdentifier(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+function quoteSqlStringLiteral(value: string) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function buildJournalSequenceName(journalTable: string) {
+  return `${journalTable}_mutation_seq`;
 }
