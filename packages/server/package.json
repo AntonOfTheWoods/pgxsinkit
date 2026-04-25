@@ -8,13 +8,8 @@
   },
   "dependencies": {
     "@pgxsinkit/contracts": "workspace:*",
-    "hono": "4.12.14",
+    "drizzle-orm": "1.0.0-beta.22",
+    "hono": "4.12.15",
     "postgres": "3.4.9"
-  },
-  "devDependencies": {
-    "drizzle-orm": "1.0.0-beta.22"
-  },
-  "peerDependencies": {
-    "drizzle-orm": "1.0.0-beta.22"
   }
 }
