@@ -39,7 +39,8 @@
     "test:performance:server": "bun scripts/run-performance-suite.ts tests/performance/artifact-write-load.perf.test.ts",
     "test:unit": "vitest run tests/unit",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "validate": "bun run guard:tmp-files && bun run format && bun run format-check && bun run lint-check && bun run typecheck && bun run test"
+    "validate": "bun run guard:tmp-files && bun run format && bun run format-check && bun run lint-check && bun run typecheck && bun run test",
+    "version:public-packages": "bun scripts/update-public-package-versions.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.4.5",
