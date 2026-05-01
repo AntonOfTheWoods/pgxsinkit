@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 
-import type { MutationEnvelope, RegistryTables, SyncTableRegistry } from "@pgxsinkit/contracts";
+import type { MutationEnvelope, RegistryRelations, SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import type { TransactionClient } from "./types";
 
@@ -75,7 +75,7 @@ $$;
 `.trim();
 
 export async function installDynamicMutationFunction<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
 ): Promise<void> {
   await db.execute(sql.raw(DYNAMIC_MUTATION_FUNCTION_DDL));
 }

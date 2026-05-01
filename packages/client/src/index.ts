@@ -2,10 +2,12 @@ import { PGlite, type PGliteInterfaceExtensions } from "@electric-sql/pglite";
 import { live, type PGliteWithLive } from "@electric-sql/pglite/live";
 import type { PgliteDatabase } from "drizzle-orm/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { defineRelations } from "drizzle-orm/relations";
 
 import type {
   ClientProjectionSpec,
   MutationDiagnostics,
+  RegistryRelations,
   RegistryTables,
   SyncConfigInput,
   SyncRuntimeStatus,
@@ -51,7 +53,7 @@ export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey
 }
 
 export interface SyncClient<TRegistry extends SyncTableRegistry> {
-  drizzle: PgliteDatabase<RegistryTables<TRegistry>>;
+  drizzle: PgliteDatabase<RegistryRelations<TRegistry>>;
   pglite: ClientPGlite;
   tables: {
     [TKey in SyncTableName<TRegistry>]: SyncClientTableHandle<TRegistry, TKey>;
@@ -229,12 +231,14 @@ function createDrizzleDatabase<TRegistry extends SyncTableRegistry>(
   client: ClientPGlite,
   schema: RegistryTables<TRegistry>,
 ) {
+  const relations = defineRelations(schema) as RegistryRelations<TRegistry>;
+
   const createDatabase = drizzle as unknown as (config: {
     client: ClientPGlite;
-    schema: RegistryTables<TRegistry>;
-  }) => PgliteDatabase<RegistryTables<TRegistry>>;
+    relations: RegistryRelations<TRegistry>;
+  }) => PgliteDatabase<RegistryRelations<TRegistry>>;
 
-  return createDatabase({ client, schema });
+  return createDatabase({ client, relations });
 }
 
 function buildSchema<TRegistry extends SyncTableRegistry>(registry: TRegistry) {

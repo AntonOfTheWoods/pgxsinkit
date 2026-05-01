@@ -2,11 +2,13 @@ import { eq, sql } from "drizzle-orm";
 import type { AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { defineRelations } from "drizzle-orm/relations";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import postgres from "postgres";
 
 import type {
+  RegistryRelations,
   RegistryTables,
   ServerRouteSpec,
   SyncRuntimeStatus,
@@ -58,7 +60,7 @@ export interface ServerDiagnostics<TRegistry extends SyncTableRegistry> {
 }
 
 export interface SyncServer<TRegistry extends SyncTableRegistry> {
-  drizzle: PostgresJsDatabase<RegistryTables<TRegistry>>;
+  drizzle: PostgresJsDatabase<RegistryRelations<TRegistry>>;
   fetch: (request: Request) => Promise<Response>;
   request: (path: string, init?: RequestInit) => Promise<Response>;
   start: () => Promise<void>;
@@ -73,7 +75,7 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
 ): SyncServer<TRegistry> {
   const client = createPostgresClient(options.databaseUrl);
   const schema = buildSchema(options.registry);
-  const db = drizzle({ client, schema });
+  const db = createDrizzleDatabase(client, schema);
   const app = new Hono();
   let bunServer: BunServerHandle | undefined;
 
@@ -219,9 +221,23 @@ function buildSchema<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
   ) as RegistryTables<TRegistry>;
 }
 
+function createDrizzleDatabase<TRegistry extends SyncTableRegistry>(
+  client: ReturnType<typeof createPostgresClient>,
+  schema: RegistryTables<TRegistry>,
+) {
+  const relations = defineRelations(schema) as RegistryRelations<TRegistry>;
+
+  const createDatabase = drizzle as unknown as (config: {
+    client: ReturnType<typeof createPostgresClient>;
+    relations: RegistryRelations<TRegistry>;
+  }) => PostgresJsDatabase<RegistryRelations<TRegistry>>;
+
+  return createDatabase({ client, relations });
+}
+
 function registerTableRoutes<TRegistry extends SyncTableRegistry>(
   app: Hono,
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   tableKey: string,
   entry: SyncTableEntry<AnyPgTable>,
   options: {

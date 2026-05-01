@@ -7,7 +7,7 @@ import type { Hono } from "hono";
 import type {
   BatchMutationRequest,
   MutationAck,
-  RegistryTables,
+  RegistryRelations,
   SyncTableEntry,
   SyncTableRegistry,
 } from "@pgxsinkit/contracts";
@@ -30,7 +30,7 @@ import type { BulkMutationBackend, TransactionClient } from "./types";
 
 export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
   app: Hono,
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   registry: TRegistry,
   backend: BulkMutationBackend,
   operationsLogConfig: OperationsLogConfig,
@@ -585,7 +585,7 @@ function quoteIdentifier(identifier: string) {
 }
 
 async function installBulkStartupDdl<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   registry: TRegistry,
   backend: BulkMutationBackend,
 ): Promise<void> {

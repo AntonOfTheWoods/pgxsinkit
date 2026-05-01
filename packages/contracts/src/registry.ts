@@ -1,4 +1,5 @@
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
+import type { ExtractTablesWithRelations } from "drizzle-orm/relations";
 import { getColumns } from "drizzle-orm/utils";
 
 import type {
@@ -102,6 +103,11 @@ export const syncRegistrySchemaSymbol = Symbol.for("@pgxsinkit/contracts/syncReg
 export type RegistryTables<TRegistry extends SyncTableRegistry> = {
   [TKey in keyof TRegistry]: TRegistry[TKey]["table"];
 };
+
+export type RegistryRelations<TRegistry extends SyncTableRegistry> = ExtractTablesWithRelations<
+  {},
+  RegistryTables<TRegistry>
+>;
 
 export type SyncTableName<TRegistry extends SyncTableRegistry> = keyof TRegistry & string;
 

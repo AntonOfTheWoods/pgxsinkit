@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 
-import type { RegistryTables, SyncTableRegistry } from "@pgxsinkit/contracts";
+import type { RegistryRelations, SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import type { OperationsLogConfig } from "./types";
 
@@ -10,7 +10,7 @@ type OperationsLogPresenceRow = {
 };
 
 export async function ensureOperationsLogSchema<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   config: OperationsLogConfig,
 ): Promise<void> {
   if (!config.enabled) {

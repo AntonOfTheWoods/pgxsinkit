@@ -6,7 +6,7 @@ import { getColumns } from "drizzle-orm/utils";
 import {
   getProjectedColumns,
   type BatchMutationRequest,
-  type RegistryTables,
+  type RegistryRelations,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
@@ -309,7 +309,7 @@ $$;
 }
 
 export async function installPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   registry: TRegistry,
   options: {
     functionSchema?: string;
@@ -324,7 +324,7 @@ type FunctionPresenceRow = {
 };
 
 export async function verifyPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   options: {
     functionSchema?: string;
   } = {},
@@ -351,7 +351,7 @@ type AuthHelperPresenceRow = {
 };
 
 export async function verifyArtifactRlsAuthHelpers<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
 ): Promise<void> {
   const result = await db.execute<AuthHelperPresenceRow>(sql`
     SELECT

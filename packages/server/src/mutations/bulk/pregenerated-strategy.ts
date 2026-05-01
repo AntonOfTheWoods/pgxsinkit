@@ -3,7 +3,7 @@ import type { AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
 
-import type { MutationEnvelope, RegistryTables, SyncTableEntry, SyncTableRegistry } from "@pgxsinkit/contracts";
+import type { MutationEnvelope, RegistryRelations, SyncTableEntry, SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import type { TransactionClient } from "./types";
 
@@ -119,7 +119,7 @@ $$;
 }
 
 export async function installPregeneratedMutationFunctions<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
+  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   registry: TRegistry,
 ): Promise<void> {
   for (const [, entry] of Object.entries(registry)) {
