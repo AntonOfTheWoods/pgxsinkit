@@ -11,6 +11,6 @@
     "@pgxsinkit/server": "workspace:*",
     "drizzle-orm": "1.0.0-beta.22",
     "hono": "4.12.16",
-    "zod": "4.4.1"
+    "zod": "4.4.3"
   }
 }
