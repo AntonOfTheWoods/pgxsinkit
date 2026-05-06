@@ -16,12 +16,13 @@ interface BuildResult {
 interface BunBuildApi {
   build(options: {
     entrypoints: string[];
-    outfile: string;
+    outdir: string;
     format: "esm";
     target: "bun";
     sourcemap: "external";
     packages: "external";
     splitting: false;
+    write: true;
   }): Promise<BuildResult>;
 }
 
@@ -67,17 +68,19 @@ async function buildPackage(packageDir: string, entrypoints: readonly string[]):
 
     const outFileRelativePath = entrypointRelativePath.replace(/^src\//, "").replace(/\.ts$/, ".js");
     const outFilePath = resolve(outdir, outFileRelativePath);
+    const outFileDir = dirname(outFilePath);
 
-    mkdirSync(dirname(outFilePath), { recursive: true });
+    mkdirSync(outFileDir, { recursive: true });
 
     const result = await Bun.build({
       entrypoints: [entrypoint],
-      outfile: outFilePath,
+      outdir: outFileDir,
       format: "esm",
       target: "bun",
       sourcemap: "external",
       packages: "external",
       splitting: false,
+      write: true,
     });
 
     if (!result.success) {
@@ -85,6 +88,10 @@ async function buildPackage(packageDir: string, entrypoints: readonly string[]):
         console.error(log.message ?? log);
       }
       throw new Error(`Build failed for ${packageDir} (${entrypointRelativePath})`);
+    }
+
+    if (!existsSync(outFilePath)) {
+      throw new Error(`Build did not emit expected output file: ${outFilePath}`);
     }
   }
 
