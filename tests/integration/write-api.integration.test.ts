@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 
 import { eq, sql } from "drizzle-orm";
 import { pgTable, uuid, varchar } from "drizzle-orm/pg-core";
@@ -809,10 +809,8 @@ describe("write api artifact backend demo auth RLS", () => {
 
     try {
       await provisioningServer.drizzle.execute(ensureTablesSql);
-      await executeSqlFile(
-        provisioningServer.drizzle,
-        "../../drizzle/20260416114759_registry_governance/migration.sql",
-      );
+      const governanceMigrationPath = await resolveLatestGovernanceMigrationSqlPath();
+      await executeSqlFile(provisioningServer.drizzle, governanceMigrationPath);
       await executeSqlFile(provisioningServer.drizzle, "../../infra/sql/functions/pgxsinkit_apply_batch_mutations.sql");
     } finally {
       await provisioningServer.stop();
@@ -1103,6 +1101,22 @@ async function executeSqlFile(
 ): Promise<void> {
   const statement = await readFile(new URL(relativePath, import.meta.url), "utf8");
   await db.execute(sql.raw(statement));
+}
+
+async function resolveLatestGovernanceMigrationSqlPath(): Promise<string> {
+  const drizzleDirectory = new URL("../../drizzle/", import.meta.url);
+  const directories = await readdir(drizzleDirectory, { withFileTypes: true });
+  const governanceMigrationDirectory = directories
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith("_registry_governance"))
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right))
+    .at(-1);
+
+  if (!governanceMigrationDirectory) {
+    throw new Error("No governance migration directory ending with _registry_governance found under drizzle/.");
+  }
+
+  return `../../drizzle/${governanceMigrationDirectory}/migration.sql`;
 }
 
 function buildBatchMutation(input: {

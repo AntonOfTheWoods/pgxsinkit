@@ -1,17 +1,17 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "e2253405-8ba8-47e5-a206-b8e768353857",
-  "prevIds": ["784449f8-d617-436b-8474-7ca31f7b78b5"],
+  "id": "70e71504-f9c8-476f-8e8c-f577cc2758d3",
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "ddl": [
     {
-      "isRlsEnabled": false,
+      "isRlsEnabled": true,
       "name": "authors",
       "entityType": "tables",
       "schema": "public"
     },
     {
-      "isRlsEnabled": false,
+      "isRlsEnabled": true,
       "name": "todos",
       "entityType": "tables",
       "schema": "public"
@@ -592,6 +592,108 @@
       "schema": "public",
       "table": "operations_log",
       "entityType": "pks"
+    },
+    {
+      "superuser": false,
+      "createDb": false,
+      "createRole": false,
+      "inherit": true,
+      "canLogin": false,
+      "replication": false,
+      "bypassRls": false,
+      "connLimit": -1,
+      "password": null,
+      "validUntil": null,
+      "name": "authenticated",
+      "entityType": "roles"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "SELECT",
+      "roles": ["authenticated"],
+      "using": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "withCheck": null,
+      "name": "authors_select_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "authors"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "INSERT",
+      "roles": ["authenticated"],
+      "using": null,
+      "withCheck": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "name": "authors_insert_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "authors"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "UPDATE",
+      "roles": ["authenticated"],
+      "using": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "withCheck": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "name": "authors_update_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "authors"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "DELETE",
+      "roles": ["authenticated"],
+      "using": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "withCheck": null,
+      "name": "authors_delete_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "authors"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "SELECT",
+      "roles": ["authenticated"],
+      "using": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "withCheck": null,
+      "name": "todos_select_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "todos"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "INSERT",
+      "roles": ["authenticated"],
+      "using": null,
+      "withCheck": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "name": "todos_insert_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "todos"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "UPDATE",
+      "roles": ["authenticated"],
+      "using": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "withCheck": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "name": "todos_update_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "todos"
+    },
+    {
+      "as": "PERMISSIVE",
+      "for": "DELETE",
+      "roles": ["authenticated"],
+      "using": "\n  owner_id = coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n  OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      COALESCE(\n        (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ),\n        '[]'::jsonb\n      )\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )\n",
+      "withCheck": null,
+      "name": "todos_delete_owner_or_admin",
+      "entityType": "policies",
+      "schema": "public",
+      "table": "todos"
     }
   ],
   "renames": []

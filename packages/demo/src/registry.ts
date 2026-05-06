@@ -1,4 +1,9 @@
-import { defineSyncRegistry, defineSyncTable, defineTableGovernance } from "@pgxsinkit/contracts";
+import {
+  buildSupabaseOwnerOrAdminGovernancePolicies,
+  defineSyncRegistry,
+  defineSyncTable,
+  defineTableGovernance,
+} from "@pgxsinkit/contracts";
 
 import { authorTableSpec } from "./author-config";
 import { authorsTable, todosTable } from "./schema";
@@ -38,42 +43,10 @@ export const demoSyncRegistry = defineSyncRegistry({
       rls: {
         enabled: true,
         force: false,
-        policies: [
-          {
-            name: "authors_select_owner_or_admin",
-            command: "select",
-            as: "permissive",
-            roles: ["authenticated"],
-            using: "owner_id = auth.uid() OR auth.has_role('admin')",
-            usingColumns: ["ownerId"],
-          },
-          {
-            name: "authors_insert_owner_or_admin",
-            command: "insert",
-            as: "permissive",
-            roles: ["authenticated"],
-            withCheck: "owner_id = auth.uid() OR auth.has_role('admin')",
-            withCheckColumns: ["ownerId"],
-          },
-          {
-            name: "authors_update_owner_or_admin",
-            command: "update",
-            as: "permissive",
-            roles: ["authenticated"],
-            using: "owner_id = auth.uid() OR auth.has_role('admin')",
-            withCheck: "owner_id = auth.uid() OR auth.has_role('admin')",
-            usingColumns: ["ownerId"],
-            withCheckColumns: ["ownerId"],
-          },
-          {
-            name: "authors_delete_owner_or_admin",
-            command: "delete",
-            as: "permissive",
-            roles: ["authenticated"],
-            using: "owner_id = auth.uid() OR auth.has_role('admin')",
-            usingColumns: ["ownerId"],
-          },
-        ],
+        policies: buildSupabaseOwnerOrAdminGovernancePolicies({
+          tableName: "authors",
+          ownerField: "ownerId" as const,
+        }),
       },
     }),
     schemas: authorTableSpec.schemas,
@@ -119,42 +92,10 @@ export const demoSyncRegistry = defineSyncRegistry({
       rls: {
         enabled: true,
         force: false,
-        policies: [
-          {
-            name: "todos_select_owner_or_admin",
-            command: "select",
-            as: "permissive",
-            roles: ["authenticated"],
-            using: "owner_id = auth.uid() OR auth.has_role('admin')",
-            usingColumns: ["ownerId"],
-          },
-          {
-            name: "todos_insert_owner_or_admin",
-            command: "insert",
-            as: "permissive",
-            roles: ["authenticated"],
-            withCheck: "owner_id = auth.uid() OR auth.has_role('admin')",
-            withCheckColumns: ["ownerId"],
-          },
-          {
-            name: "todos_update_owner_or_admin",
-            command: "update",
-            as: "permissive",
-            roles: ["authenticated"],
-            using: "owner_id = auth.uid() OR auth.has_role('admin')",
-            withCheck: "owner_id = auth.uid() OR auth.has_role('admin')",
-            usingColumns: ["ownerId"],
-            withCheckColumns: ["ownerId"],
-          },
-          {
-            name: "todos_delete_owner_or_admin",
-            command: "delete",
-            as: "permissive",
-            roles: ["authenticated"],
-            using: "owner_id = auth.uid() OR auth.has_role('admin')",
-            usingColumns: ["ownerId"],
-          },
-        ],
+        policies: buildSupabaseOwnerOrAdminGovernancePolicies({
+          tableName: "todos",
+          ownerField: "ownerId" as const,
+        }),
       },
     }),
     schemas: todoTableSpec.schemas,

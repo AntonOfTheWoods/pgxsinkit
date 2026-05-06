@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -148,19 +149,6 @@ function hasFlag(argv: string[], flag: string): boolean {
 
 function normalizeMigrationName(name: string): string {
   return name.replace(/\s+/g, "_").toLowerCase();
-}
-
-function toMigrationTimestamp(date: Date): string {
-  const parts = [
-    date.getUTCFullYear().toString().padStart(4, "0"),
-    (date.getUTCMonth() + 1).toString().padStart(2, "0"),
-    date.getUTCDate().toString().padStart(2, "0"),
-    date.getUTCHours().toString().padStart(2, "0"),
-    date.getUTCMinutes().toString().padStart(2, "0"),
-    date.getUTCSeconds().toString().padStart(2, "0"),
-  ];
-
-  return parts.join("");
 }
 
 function quoteIdent(identifier: string): string {
@@ -358,6 +346,61 @@ async function findLatestGeneratedMigrationFile(migrationsDir: string, migration
   return path.join(migrationsDir, latestDir, "migration.sql");
 }
 
+async function findLatestGeneratedMigrationDir(migrationsDir: string, migrationName: string): Promise<string | null> {
+  const normalizedMigrationName = normalizeMigrationName(migrationName);
+
+  let entries: string[];
+
+  try {
+    entries = await readdir(migrationsDir, { encoding: "utf8" });
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: string }).code === "ENOENT"
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+
+  const migrationDirs = entries
+    .filter((entry) => entry.endsWith(`_${normalizedMigrationName}`))
+    .sort((left, right) => left.localeCompare(right));
+
+  const latestDir = migrationDirs.at(-1);
+
+  if (!latestDir) {
+    return null;
+  }
+
+  return path.join(migrationsDir, latestDir);
+}
+
+async function runDrizzleCustomMigrationGenerate(migrationName: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const command = spawn("bun", ["x", "drizzle-kit", "generate", "--custom", "--name", migrationName], {
+      cwd: process.cwd(),
+      stdio: "inherit",
+    });
+
+    command.once("error", (error) => {
+      reject(error);
+    });
+
+    command.once("close", (exitCode) => {
+      if (exitCode === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`bun x drizzle-kit generate --custom failed with exit code ${exitCode ?? -1}.`));
+    });
+  });
+}
+
 async function readExistingFileIfPresent(filePath: string): Promise<string | null> {
   try {
     return await readFile(filePath, "utf8");
@@ -379,7 +422,6 @@ async function main() {
   const argv = process.argv.slice(2);
   const migrationsDir = readArg(argv, "--migrations-dir") ?? DEFAULT_MIGRATIONS_DIR;
   const migrationName = readArg(argv, "--name") ?? DEFAULT_MIGRATION_NAME;
-  const timestamp = readArg(argv, "--timestamp") ?? toMigrationTimestamp(new Date());
   const explicitMigrationDir = readArg(argv, "--migration-dir");
   const allowOverwrite = hasFlag(argv, "--overwrite");
   const forceNew = hasFlag(argv, "--force-new");
@@ -404,13 +446,30 @@ async function main() {
     }
   }
 
-  const migrationDir =
-    explicitMigrationDir ?? path.join(migrationsDir, `${timestamp}_${normalizeMigrationName(migrationName)}`);
+  let migrationDir = explicitMigrationDir;
+
+  if (!migrationDir) {
+    await runDrizzleCustomMigrationGenerate(migrationName);
+    const latestGeneratedMigrationDir = await findLatestGeneratedMigrationDir(migrationsDir, migrationName);
+
+    if (!latestGeneratedMigrationDir) {
+      throw new Error(`Unable to locate generated migration directory for name ${migrationName}.`);
+    }
+
+    migrationDir = latestGeneratedMigrationDir;
+  }
+
+  if (!migrationDir) {
+    throw new Error(`Unable to resolve migration directory for ${migrationName}.`);
+  }
+
   const migrationFile = path.join(migrationDir, "migration.sql");
 
-  await mkdir(migrationDir, { recursive: true });
+  if (explicitMigrationDir) {
+    await mkdir(migrationDir, { recursive: true });
+  }
 
-  if (!allowOverwrite) {
+  if (explicitMigrationDir && !allowOverwrite) {
     try {
       await access(migrationFile);
       throw new Error(`Migration file already exists: ${migrationFile}. Pass --overwrite to replace it.`);

@@ -77,8 +77,7 @@ This document defines the canonical path from Drizzle table definitions to provi
 
 1. The artifact backend transaction path executes SET CONSTRAINTS ALL DEFERRED.
 2. This only affects constraints declared DEFERRABLE in PostgreSQL.
-3. The todos->authors FK DEFERRABLE migration is generated from typed registry governance metadata via `bun run db:generate:governance` and currently lives at:
-   - drizzle/20260416144500_deferrable_todos_author_fk/migration.sql
+3. The todos->authors FK DEFERRABLE migration is generated from typed registry governance metadata via `bun run db:generate:governance` and is included in the latest `drizzle/*_registry_governance/migration.sql`.
 
 ## Supabase-compatible auth helpers
 
