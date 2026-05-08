@@ -1,4 +1,15 @@
-import { bigint, integer, jsonb, pgEnum, pgTable, primaryKey, real, uuid, varchar } from "drizzle-orm/pg-core";
+import {
+  bigint,
+  integer,
+  jsonb,
+  pgEnum,
+  pgSchema,
+  pgTable,
+  primaryKey,
+  real,
+  uuid,
+  varchar,
+} from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, buildSyntheticRegistrySchemaName, demoSyncRegistry } from "@pgxsinkit/demo";
@@ -33,6 +44,13 @@ const compositeReadonlyTable = pgTable(
 const fallbackReadModelTable = pgTable("fallback_read_model_items", {
   id: uuid("id").primaryKey(),
   title: varchar("title", { length: 120 }).notNull(),
+});
+
+const workspaceLocalSchema = pgSchema("workspace_local");
+const workspaceReadonlyStatusEnum = workspaceLocalSchema.enum("workspace_readonly_status", ["queued", "done"]);
+const workspaceReadonlyTable = workspaceLocalSchema.table("workspace_readonly_items", {
+  id: uuid("id").primaryKey(),
+  status: workspaceReadonlyStatusEnum("status").notNull(),
 });
 
 const projectedClientRegistry = defineSyncRegistry({
@@ -85,6 +103,22 @@ const fallbackReadModelRegistry = defineSyncRegistry({
       readModel: "fallback_read_model_items_read_model",
     },
   }),
+});
+
+const workspaceReadonlyRegistry = defineSyncRegistry({
+  schema: "workspace_local",
+  tables: {
+    workspaceReadonlyItems: defineSyncTable({
+      table: workspaceReadonlyTable,
+      mode: "readonly",
+      primaryKey: { columns: ["id"] },
+      shape: { tableName: "workspace_readonly_items", shapeKey: "workspace_readonly_items" },
+      clientProjection: {
+        syncedTable: "workspace_readonly_items",
+        readModel: "workspace_readonly_items",
+      },
+    }),
+  },
 });
 
 describe("client local schema generation", () => {
@@ -147,7 +181,13 @@ describe("client local schema generation", () => {
 
   it("preserves SQL column types and composite readonly primary keys", () => {
     const sql = generateLocalSchemaSql(compositeReadonlyRegistry);
+    const enumTypeSql = "CREATE TYPE readonly_status AS ENUM ('queued', 'done');";
+    const enumTypeSqlIndex = sql.indexOf(enumTypeSql);
+    const tableSqlIndex = sql.indexOf("CREATE TABLE IF NOT EXISTS composite_readonly_items");
 
+    expect(enumTypeSqlIndex).toBeGreaterThanOrEqual(0);
+    expect(tableSqlIndex).toBeGreaterThan(enumTypeSqlIndex);
+    expect(sql).toContain("n.nspname = 'public'");
     expect(sql).toContain("status readonly_status NOT NULL");
     expect(sql).toContain("words integer[]");
     expect(sql).toContain("payload jsonb");
@@ -163,5 +203,15 @@ describe("client local schema generation", () => {
     expect(sql).toContain("CAST(0 AS BIGINT) AS local_updated_at_us");
     expect(sql).not.toContain("CAST(0 AS BIGINT) AS local_updated_at_us AS local_updated_at_us");
     expect(sql).not.toContain("t.CAST(0 AS BIGINT)");
+  });
+
+  it("creates and qualifies enum types for non-public local schemas", () => {
+    const sql = generateLocalSchemaSql(workspaceReadonlyRegistry);
+
+    expect(sql).toContain('CREATE SCHEMA IF NOT EXISTS "workspace_local";');
+    expect(sql).toContain("WHERE t.typname = 'workspace_readonly_status'");
+    expect(sql).toContain("AND n.nspname = 'workspace_local'");
+    expect(sql).toContain("CREATE TYPE \"workspace_local\".\"workspace_readonly_status\" AS ENUM ('queued', 'done');");
+    expect(sql).toContain('status "workspace_local"."workspace_readonly_status" NOT NULL');
   });
 });
