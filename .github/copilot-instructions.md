@@ -14,6 +14,8 @@
 - **Root Directory**: NEVER create log files or temporary files at the project root. Do not create files in the repository root unless explicitly asked for configuration files (e.g., `package.json`).
 - **System /tmp**: Never use the global `/tmp` directory. Use the project-local `./tmp/`.
 - **/dev/null**: Never write to `/dev/null`. If you need to discard output, use a project-local file in `./tmp/` instead.
+- **Hard-stop Enforcement**: Before creating any non-source artifact, verify the target path is under `./tmp/` (prefer `./tmp/agents/` for assistant artifacts). If not, do not create the file.
+- **Immediate Remediation**: If a temporary file is accidentally created outside `./tmp/`, delete or move it into `./tmp/` before running any further commands.
 
 ## Prohibitions
 
