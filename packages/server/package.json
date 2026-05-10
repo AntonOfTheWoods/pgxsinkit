@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/server",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "files": [
     "dist",
     "src",
@@ -13,10 +13,6 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./dist/index.js"
-    },
-    "./experimental": {
-      "types": "./src/experimental/index.ts",
-      "default": "./dist/experimental/index.js"
     }
   },
   "publishConfig": {
@@ -26,7 +22,7 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.7"
+    "@pgxsinkit/contracts": "^0.1.8"
   },
   "peerDependencies": {
     "drizzle-orm": "1.0.0-rc.2",

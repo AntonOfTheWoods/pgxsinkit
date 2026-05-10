@@ -323,14 +323,12 @@ describe("write api implementation integration", () => {
     }
   });
 
-  it("returns an empty todo list", async () => {
-    const response = await server.request("/api/todos");
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual([]);
+  it("returns an empty todo list via direct DB query", async () => {
+    const rows = await server.drizzle.select().from(todosTable);
+    expect(rows).toEqual([]);
   });
 
-  it("creates and lists authors", async () => {
+  it("creates via /api/mutations and verifies via direct DB query", async () => {
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f920";
     const createResponse = await postBatchMutations(server, [
       buildBatchMutation({
@@ -348,9 +346,8 @@ describe("write api implementation integration", () => {
 
     expect(createResponse.status).toBe(200);
 
-    const listResponse = await server.request("/api/authors");
-    expect(listResponse.status).toBe(200);
-    expect(await listResponse.json()).toEqual([
+    const rows = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId));
+    expect(rows).toEqual([
       expect.objectContaining({
         id: authorId,
         name: "Ada Lovelace",
@@ -881,7 +878,7 @@ describe("write api artifact backend demo auth RLS", () => {
     await expectResponseStatus(response, 401);
   });
 
-  it("rejects non-batch CRUD writes in bulk-plpgsql-artifact mode", async () => {
+  it("per-table CRUD routes are not registered in bulk-plpgsql-artifact mode", async () => {
     const createResponse = await server.request("/api/authors", {
       method: "POST",
       headers: {
@@ -890,15 +887,31 @@ describe("write api artifact backend demo auth RLS", () => {
       },
       body: JSON.stringify({
         id: "9531dc53-78c6-4e1e-a0a1-1db2b48e0127",
-        name: "Should be rejected",
+        name: "Should not exist",
       }),
     });
 
-    await expectResponseStatus(createResponse, 405);
-    expect(await createResponse.json()).toEqual({
-      message:
-        "CRUD POST routes are disabled for authors when WRITE_API_BACKEND=bulk-plpgsql-artifact. Use POST /api/mutations instead.",
+    expect(createResponse.status).toBe(404);
+
+    const patchResponse = await server.request("/api/todos/any-id", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DEMO_JWT_USER1}`,
+      },
+      body: JSON.stringify({ title: "No route" }),
     });
+
+    expect(patchResponse.status).toBe(404);
+
+    const deleteResponse = await server.request("/api/todos/any-id", {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${DEMO_JWT_USER1}`,
+      },
+    });
+
+    expect(deleteResponse.status).toBe(404);
   });
 
   it("applies owner and audit fields from demo jwt claims for authors and todos", async () => {

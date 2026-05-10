@@ -74,7 +74,7 @@ function readWriteApiBackend(rawValue: string | undefined): "bulk-plpgsql-artifa
   }
 
   throw new Error(
-    `Invalid WRITE_API_BACKEND=${value}. Stable write-api mode is bulk-plpgsql-artifact only. Use @pgxsinkit/server/experimental for legacy backends.`,
+    `Invalid WRITE_API_BACKEND=${value}. Only bulk-plpgsql-artifact is supported. Legacy backends have been removed.`,
   );
 }
 

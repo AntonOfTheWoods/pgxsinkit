@@ -49,12 +49,6 @@ describe("server facade contract", () => {
       modes: {
         projects: "readwrite",
       },
-      routes: {
-        projects: {
-          basePath: "/api/projects",
-          allowBatch: false,
-        },
-      },
     });
 
     const response = await server.fetch(new Request("http://localhost/health"));
@@ -184,17 +178,17 @@ describe("server facade contract", () => {
     });
   });
 
-  it("rejects CRUD write routes and keeps list route read-only", async () => {
+  it("per-table CRUD routes are not registered — all writes go through /api/mutations", async () => {
     const createResponse = await server.request("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: "02000001-0000-4006-8006-000000000006",
-        name: "Should be rejected",
+        name: "Should not exist",
       }),
     });
 
-    expect(createResponse.status).toBe(405);
+    expect(createResponse.status).toBe(404);
 
     await server.drizzle.insert(projectsTable).values({
       id: "02000001-0000-4007-8007-000000000007",
@@ -204,24 +198,19 @@ describe("server facade contract", () => {
     const patchResponse = await server.request("/api/projects/02000001-0000-4007-8007-000000000007", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Rejected patch" }),
+      body: JSON.stringify({ name: "No route" }),
     });
 
-    expect(patchResponse.status).toBe(405);
+    expect(patchResponse.status).toBe(404);
 
     const deleteResponse = await server.request("/api/projects/02000001-0000-4007-8007-000000000007", {
       method: "DELETE",
     });
 
-    expect(deleteResponse.status).toBe(405);
+    expect(deleteResponse.status).toBe(404);
 
     const listResponse = await server.request("/api/projects");
-    expect(listResponse.status).toBe(200);
-    expect(await listResponse.json()).toEqual([
-      expect.objectContaining({
-        id: "02000001-0000-4007-8007-000000000007",
-      }),
-    ]);
+    expect(listResponse.status).toBe(404);
   });
 
   it("returns 400 for unknown table names", async () => {

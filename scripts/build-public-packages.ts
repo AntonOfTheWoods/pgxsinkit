@@ -46,11 +46,11 @@ const publicPackages = [
   },
   {
     packageDir: "packages/client",
-    entrypoints: ["src/index.ts", "src/experimental/index.ts"],
+    entrypoints: ["src/index.ts"],
   },
   {
     packageDir: "packages/server",
-    entrypoints: ["src/index.ts", "src/experimental/index.ts"],
+    entrypoints: ["src/index.ts"],
   },
 ] as const;
 

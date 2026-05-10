@@ -215,7 +215,10 @@ export const syncConfigSchema = z
 
 export type TableMode = z.infer<typeof tableModeSchema>;
 export type PrimaryKeySpec = z.infer<typeof primaryKeySpecSchema>;
-export type ShapeSpec = z.infer<typeof shapeSpecSchema>;
+export type ShapeSpecBase = z.infer<typeof shapeSpecSchema>;
+export interface ShapeSpec extends ShapeSpecBase {
+  rowFilter?: RowFilterSpec;
+}
 export type ServerRouteSpec = z.infer<typeof serverRouteSpecSchema>;
 export type ClientProjectionSpec = z.infer<typeof clientProjectionSpecSchema>;
 export type DeferrableConstraintSpec = z.infer<typeof deferrableConstraintSpecSchema>;
@@ -262,4 +265,96 @@ export function getLocalSyncPrimaryKeyColumns(source: {
   clientProjection?: Pick<ClientProjectionSpec, "localPrimaryKey">;
 }) {
   return [...getLocalSyncPrimaryKey(source).columns];
+}
+
+// RowFilterSpec is defined as a pure TypeScript type (not Zod) because it contains
+// function-typed fields (customWhere, sharedUserId) that Zod cannot represent.
+export interface RowFilterSpec {
+  /** WHERE "column" = auth.uid() — ownership-based row filtering. */
+  ownership?: {
+    column: string;
+  };
+  /** OR clause for shared content: adds rows owned by sharedUserId. */
+  shared?: {
+    /** Column used for owner comparison. Defaults to ownership.column. */
+    ownerColumn?: string;
+    /** If set, also requires "sharedColumn" = true. */
+    sharedColumn?: string;
+    /** Static UUID or a function that returns a UUID given runtime params. */
+    sharedUserId: string | ((params: Record<string, unknown>) => string);
+  };
+  /** Escape hatch: returns a raw SQL fragment ANDed with other filters. */
+  customWhere?: (claims: Record<string, unknown>, params?: Record<string, unknown>) => string;
+  /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
+  columns?: string[];
+}
+
+function escapeSqlLiteral(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+/**
+ * Composes ownership, shared, and customWhere filters into a single
+ * SQL WHERE clause suitable for Electric shape requests.
+ *
+ * Returns null if no filters apply (all rows visible).
+ */
+export function buildRowFilterWhere(
+  filter: RowFilterSpec,
+  claims: Record<string, unknown> | null,
+  params?: Record<string, unknown>,
+): string | null {
+  const parts: string[] = [];
+  const { ownership, shared, customWhere } = filter;
+
+  // Ownership
+  if (ownership && claims?.sub) {
+    const userId = escapeSqlLiteral(String(claims.sub as string | number | bigint | boolean));
+    parts.push(`"${ownership.column}" = '${userId}'`);
+  } else if (ownership && !claims?.sub) {
+    // No authenticated user — block all rows
+    return "1 = 0";
+  }
+
+  // Shared content
+  if (shared) {
+    const ownerCol = shared.ownerColumn ?? ownership?.column;
+    if (!ownerCol) {
+      throw new Error("shared.ownerColumn or ownership.column is required for shared row filter");
+    }
+
+    const sharedUserId =
+      typeof shared.sharedUserId === "function" ? shared.sharedUserId(params ?? {}) : shared.sharedUserId;
+    const escapedSharedUserId = escapeSqlLiteral(sharedUserId);
+
+    let sharedClause: string;
+    if (shared.sharedColumn) {
+      sharedClause = `("${shared.sharedColumn}" = true AND "${ownerCol}" = '${escapedSharedUserId}')`;
+    } else {
+      sharedClause = `"${ownerCol}" = '${escapedSharedUserId}'`;
+    }
+
+    if (parts.length > 0) {
+      parts.push(`OR ${sharedClause}`);
+    } else {
+      parts.push(sharedClause);
+    }
+  }
+
+  // Custom where
+  if (customWhere) {
+    const custom = customWhere(claims ?? {}, params);
+    if (custom) {
+      if (parts.length > 0) {
+        return `(${parts.join(" ")}) AND (${custom})`;
+      }
+      return custom;
+    }
+  }
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return parts.length > 1 ? `(${parts.join(" ")})` : parts[0]!;
 }
