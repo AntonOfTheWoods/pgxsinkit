@@ -13,6 +13,9 @@ export const shapeSpecSchema = z
     tableName: z.string().trim().min(1),
     shapeKey: z.string().trim().min(1),
     electricTable: z.string().trim().min(1).optional(),
+    // rowFilter is a runtime-only TypeScript type (contains function fields Zod can't represent).
+    // Declared as z.unknown() passthrough so Zod doesn't strip it during .strict() validation.
+    rowFilter: z.unknown().optional(),
   })
   .strict();
 
