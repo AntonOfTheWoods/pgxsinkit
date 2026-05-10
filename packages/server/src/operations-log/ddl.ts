@@ -9,21 +9,40 @@ type OperationsLogPresenceRow = {
   tableName: string | null;
 };
 
+/**
+ * Ensures the operations_log table exists in the database.
+ *
+ * Returns `true` if the table is present, `false` if missing.
+ * Consumers should include `operationsLogTable` from `@pgxsinkit/server`
+ * in their Drizzle schema so `drizzle-kit generate`/`push` creates it.
+ */
 export async function ensureOperationsLogSchema<TRegistry extends SyncTableRegistry>(
   db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   config: OperationsLogConfig,
-): Promise<void> {
+): Promise<boolean> {
   if (!config.enabled) {
-    return;
+    return false;
   }
 
-  const result = await db.execute<OperationsLogPresenceRow>(sql`
+  try {
+    const result = await db.execute<OperationsLogPresenceRow>(sql`
     SELECT to_regclass('public.operations_log')::text AS "tableName"
   `);
 
-  const row = Array.from(result, (entry) => entry as OperationsLogPresenceRow)[0];
+    const row = Array.from(result, (entry) => entry as OperationsLogPresenceRow)[0];
 
-  if (!row?.tableName) {
-    throw new Error("operations_log table is missing. Run bun run db:push before starting the write API.");
+    if (!row?.tableName) {
+      console.warn(
+        "operations_log table is missing. Add operationsLogTable from @pgxsinkit/server " +
+          "to your Drizzle schema and run drizzle-kit generate/push to create it. " +
+          "Operation logging will be disabled until the table exists.",
+      );
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.warn("Unable to verify operations_log table:", (error as Error)?.message ?? error);
+    return false;
   }
 }

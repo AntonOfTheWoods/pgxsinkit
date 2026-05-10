@@ -103,7 +103,7 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
 
   let address: SyncServerAddress | null = null;
   const operationsLogConfig = resolveOperationsLogConfig(options.operationsLog);
-  const operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig);
+  const operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig).then(() => {});
   const backend = options.backend ?? "bulk-plpgsql-artifact";
 
   if (ownsApp) {
@@ -272,5 +272,6 @@ function resolveOperationsLogConfig(options?: { enabled?: boolean }): Operations
 export { registerBulkMutationRoute } from "./mutations/bulk/route";
 export { buildPlpgsqlBatchFunctionDdl } from "./mutations/bulk/plpgsql-strategy";
 export { ensureOperationsLogSchema } from "./operations-log/ddl";
+export { operationsLogTable } from "./operations-log/schema";
 export { proxyElectricShapeRequest } from "./electric-proxy";
 export type { ElectricProxyOptions } from "./electric-proxy";

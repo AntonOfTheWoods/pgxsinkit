@@ -21,21 +21,27 @@ export async function proxyElectricShapeRequest(
 ): Promise<Response> {
   const targetUrl = buildProxyTargetUrl(request, claims, options);
 
-  const response = await fetch(targetUrl, {
+  const response = await fetch(targetUrl.toString(), {
     method: "GET",
-    headers: buildForwardHeaders(request.headers),
     signal: request.signal,
+  }).catch((error: unknown) => {
+    if (isAbortError(error)) {
+      // Client disconnected — no meaningful response can be sent.
+      // Return a 499 (client closed request) to avoid a 500 in logs.
+      return new Response(null, { status: 499, statusText: "Client Closed Request" });
+    }
+    throw error;
   });
 
-  const headers = new Headers(response.headers);
-  headers.set("Cache-Control", "private, no-store, no-cache, must-revalidate, max-age=0");
-  headers.set("Pragma", "no-cache");
-  headers.set("Expires", "0");
-  headers.set("Vary", appendVaryHeader(headers.get("Vary"), "Authorization"));
+  const responseHeaders = new Headers(response.headers);
+  // Strip encoding/length since the response body may be re-serialized
+  // (column omission path) or streamed through a new Response object.
+  responseHeaders.delete("content-encoding");
+  responseHeaders.delete("content-length");
 
   const table = new URL(request.url).searchParams.get("table");
   const omittedColumns = table ? getOmittedProjectedColumnsForTable(options.registry, table) : [];
-  const contentType = headers.get("content-type") ?? "";
+  const contentType = responseHeaders.get("content-type") ?? "";
 
   if (omittedColumns.length > 0 && contentType.includes("application/json")) {
     const payload = await response
@@ -48,7 +54,7 @@ export async function proxyElectricShapeRequest(
       return new Response(JSON.stringify(stripped), {
         status: response.status,
         statusText: response.statusText,
-        headers,
+        headers: responseHeaders,
       });
     }
   }
@@ -56,7 +62,7 @@ export async function proxyElectricShapeRequest(
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
-    headers,
+    headers: responseHeaders,
   });
 }
 
@@ -126,40 +132,6 @@ function getOmittedProjectedColumnsForTable(registry: SyncTableRegistry, table: 
   return entry ? getOmittedProjectedColumnNames(entry) : [];
 }
 
-function buildForwardHeaders(headers: Headers): Headers {
-  const next = new Headers();
-
-  for (const [name, value] of headers.entries()) {
-    const lower = name.toLowerCase();
-
-    if (lower === "host" || lower === "authorization") {
-      continue;
-    }
-
-    next.set(name, value);
-  }
-
-  return next;
-}
-
-function appendVaryHeader(existingValue: string | null, nextValue: string): string {
-  if (!existingValue) {
-    return nextValue;
-  }
-
-  const values = existingValue
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-
-  if (values.includes(nextValue)) {
-    return values.join(", ");
-  }
-
-  values.push(nextValue);
-  return values.join(", ");
-}
-
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -189,6 +161,16 @@ function stripOmittedColumnsFromShapeLogEntries(payload: unknown[], omittedColum
 
     return currentEntry;
   });
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "AbortError" ||
+      // Bun wraps aborted fetch as DOMException with numeric code
+      (typeof (error as unknown as { code?: unknown }).code === "number" &&
+        (error as unknown as { code: number }).code === 20))
+  );
 }
 
 function omitColumnsFromRow(row: Record<string, unknown>, omittedColumns: readonly string[]): Record<string, unknown> {

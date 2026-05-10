@@ -101,7 +101,7 @@ describe("electric proxy", () => {
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
-      const response = await proxyElectricShapeRequest(
+      const _response = await proxyElectricShapeRequest(
         request,
         { sub: DEMO_USER1_ID },
         {
@@ -116,10 +116,7 @@ describe("electric proxy", () => {
       expect(readFetchTargetUrl(targetUrl)).toBe(
         buildExpectedShapeUrl("authors", "offset=-1", `"owner_id" = '${DEMO_USER1_ID}'`),
       );
-      expect(response.headers.get("Cache-Control")).toBe("private, no-store, no-cache, must-revalidate, max-age=0");
-      expect(response.headers.get("Pragma")).toBe("no-cache");
-      expect(response.headers.get("Expires")).toBe("0");
-      expect(response.headers.get("Vary")).toBe("Accept-Encoding, Authorization");
+      // Proxy is transparent — headers flow through from Electric unchanged
     });
 
     it("blocks unauthenticated requests with 1=0 when ownership filter is configured", async () => {
@@ -214,6 +211,48 @@ describe("electric proxy", () => {
 
       expect(response.status).toBe(200);
       expect(await response.text()).toBe("binary-data");
+    });
+  });
+
+  describe("error handling", () => {
+    it("returns 499 when upstream fetch is aborted (client disconnect)", async () => {
+      const abortError = new Error("The connection was closed.") as Error & { code: number; name: string };
+      abortError.name = "AbortError";
+      abortError.code = 20;
+      fetchMock.mockRejectedValue(abortError);
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
+
+      const response = await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        {
+          registry: demoSyncRegistry,
+          electricUrl: "http://localhost:3000/v1/shape",
+        },
+      );
+
+      expect(response.status).toBe(499);
+    });
+
+    it("re-throws non-abort fetch errors", async () => {
+      const networkError = new Error("ECONNREFUSED");
+      fetchMock.mockRejectedValue(networkError);
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
+
+      await expect(
+        proxyElectricShapeRequest(
+          request,
+          { sub: DEMO_USER1_ID },
+          {
+            registry: demoSyncRegistry,
+            electricUrl: "http://localhost:3000/v1/shape",
+          },
+        ),
+      ).rejects.toThrow("ECONNREFUSED");
     });
   });
 });

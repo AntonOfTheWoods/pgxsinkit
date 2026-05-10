@@ -15,19 +15,12 @@ export async function proxyElectricShapeRequest(
 
   const response = await fetch(targetUrl, {
     method: "GET",
-    headers: buildForwardHeaders(request.headers),
     signal: request.signal,
   });
 
-  const headers = new Headers(response.headers);
-  headers.set("Cache-Control", "private, no-store, no-cache, must-revalidate, max-age=0");
-  headers.set("Pragma", "no-cache");
-  headers.set("Expires", "0");
-  headers.set("Vary", appendVaryHeader(headers.get("Vary"), "Authorization"));
-
   return new Response(response.body, {
     status: response.status,
-    headers,
+    headers: response.headers,
   });
 }
 
@@ -35,7 +28,11 @@ function buildProxyTargetUrl(request: Request, claims: DemoJwtClaims | null, ele
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(electricUrl);
 
-  targetUrl.search = requestUrl.search;
+  // Merge incoming request params into the electric URL, preserving
+  // any pre-existing params (e.g. secret API token from electricUrl).
+  requestUrl.searchParams.forEach((value, key) => {
+    targetUrl.searchParams.set(key, value);
+  });
 
   const table = targetUrl.searchParams.get("table");
 
@@ -57,40 +54,6 @@ function buildProxyTargetUrl(request: Request, claims: DemoJwtClaims | null, ele
 
   targetUrl.searchParams.set("where", `(${existingWhere}) AND (${ownershipFilter})`);
   return targetUrl.toString();
-}
-
-function buildForwardHeaders(headers: Headers): Headers {
-  const next = new Headers();
-
-  for (const [name, value] of headers.entries()) {
-    const lower = name.toLowerCase();
-
-    if (lower === "host" || lower === "authorization") {
-      continue;
-    }
-
-    next.set(name, value);
-  }
-
-  return next;
-}
-
-function appendVaryHeader(existingValue: string | null, nextValue: string): string {
-  if (!existingValue) {
-    return nextValue;
-  }
-
-  const values = existingValue
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-
-  if (values.includes(nextValue)) {
-    return values.join(", ");
-  }
-
-  values.push(nextValue);
-  return values.join(", ");
 }
 
 function escapeSqlLiteral(value: string): string {
