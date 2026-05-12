@@ -125,15 +125,6 @@ export function computeNextRetryAtUs(nowUs: string, attemptCount: number) {
   return (BigInt(nowUs) + BigInt(computeBackoffDelayMs(attemptCount)) * 1000n).toString();
 }
 
-export function shouldClearOverlayRow(syncedUpdatedAtUs: string, serverUpdatedAtUs: string | null) {
-  console.log("Comparing timestamps for overlay clearing:", { syncedUpdatedAtUs, serverUpdatedAtUs });
-  if (serverUpdatedAtUs === null) {
-    return false;
-  }
-
-  return BigInt(syncedUpdatedAtUs) >= BigInt(serverUpdatedAtUs);
-}
-
 export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   options: CreateMutationRuntimeOptions<TRegistry>,
 ): MutationRuntime<TRegistry> {
@@ -403,7 +394,6 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   };
 
   const runFlush = async (table?: SyncTableName<TRegistry>) => {
-    console.log(`Running runFlush for table: ${table ?? "all tables"}`);
     if (options.batchWriteUrl) {
       const affectedContexts = new Map<string, TableContext>();
       let processedCount = 0;
@@ -483,7 +473,6 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       });
     },
     flush: async (table) => {
-      console.log(`Initiating flush for table: ${table ?? "all tables"}`);
       const nextFlush = flushQueue.then(() => runFlush(table));
       flushQueue = nextFlush.catch(() => undefined);
       await nextFlush;
