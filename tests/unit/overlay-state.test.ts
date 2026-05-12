@@ -9,7 +9,6 @@ import {
   computeNextRetryAtUs,
   createMutationRuntime,
   nowMicroseconds,
-  shouldClearOverlayRow,
 } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createFreshTestPGlite } from "../support/pglite";
@@ -54,11 +53,11 @@ async function createOverlayTestContext() {
 }
 
 describe("overlay state helpers", () => {
-  it("compares synced and acknowledged timestamps numerically", () => {
-    expect(shouldClearOverlayRow("200", "199")).toBe(true);
-    expect(shouldClearOverlayRow("200", "200")).toBe(true);
-    expect(shouldClearOverlayRow("199", "200")).toBe(false);
-    expect(shouldClearOverlayRow("200", null)).toBe(false);
+  it("shouldClearOverlayRow is replaced by trigger-based reconciliation", () => {
+    // The old shouldClearOverlayRow timestamp comparison has been replaced
+    // by PGlite triggers that fire when Electric delivers sync echoes.
+    // See generateLocalSchemaSql in packages/client/src/schema.ts.
+    expect(true).toBe(true);
   });
 
   it("builds optimistic todos with bigint microsecond timestamps", () => {

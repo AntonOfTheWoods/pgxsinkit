@@ -1557,6 +1557,24 @@ function resolveBatchMutationUrl(batchWriteUrl: string): string {
   return `${trimmed}/mutations`;
 }
 
+function stripManagedFields(
+  context: TableContext,
+  payload: Record<string, unknown>,
+  operation: "create" | "update",
+): Record<string, unknown> {
+  const managedColumns = new Set<string>();
+
+  for (const mf of context.entry.governance?.managedFields ?? []) {
+    if (mf.applyOn.includes(operation)) {
+      managedColumns.add(mf.column);
+    }
+  }
+
+  if (managedColumns.size === 0) return payload;
+
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !managedColumns.has(key)));
+}
+
 function toSqlColumnPayload(context: TableContext, payload: Record<string, unknown>): Record<string, unknown> {
   const normalized: Record<string, unknown> = {};
 
@@ -1593,23 +1611,6 @@ function filterProjectedPayload(context: TableContext, payload: Record<string, u
   return normalized;
 }
 
-function stripManagedFields(
-  context: TableContext,
-  payload: Record<string, unknown>,
-  operation: "create" | "update",
-): Record<string, unknown> {
-  const managedColumns = new Set<string>();
-
-  for (const mf of context.entry.governance?.managedFields ?? []) {
-    if (mf.applyOn.includes(operation)) {
-      managedColumns.add(mf.column);
-    }
-  }
-
-  if (managedColumns.size === 0) return payload;
-
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => !managedColumns.has(key)));
-}
 
 async function flushTable(
   db: MutationDb,
@@ -1850,7 +1851,7 @@ async function sendMutationRequest(
       return fetch(`${writeUrl}${context.routeBasePath}`, {
         method: "POST",
         headers: buildRequestHeaders(bearerToken),
-        body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.value))),
+        body: JSON.stringify(filterProjectedPayload(context, stripManagedFields(context, ensureRecord(payload.value), "create"))),
       });
     case "update":
       return fetch(
@@ -1858,7 +1859,7 @@ async function sendMutationRequest(
         {
           method: "PATCH",
           headers: buildRequestHeaders(bearerToken),
-          body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.patch))),
+          body: JSON.stringify(filterProjectedPayload(context, stripManagedFields(context, ensureRecord(payload.patch), "update"))),
         },
       );
     case "delete":
