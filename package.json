@@ -49,6 +49,7 @@
     "@vitejs/plugin-react": "6.0.1",
     "@vitest/coverage-v8": "4.1.6",
     "drizzle-kit": "1.0.0-rc.2",
+    "drizzle-orm": "1.0.0-rc.2",
     "hono": "4.12.18",
     "oxfmt": "0.49.0",
     "oxlint": "1.64.0",
