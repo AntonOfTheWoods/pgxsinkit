@@ -1,4 +1,4 @@
-import { bigint, getTableConfig, pgSchema, pgTable, type AnyPgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, getTableConfig, pgSchema, type AnyPgTable, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 import { getColumns } from "drizzle-orm/utils";
 import { z } from "zod";
@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   attachSyncRegistrySchema,
   buildSupabaseOwnerOrAdminNativePolicies,
+  defineSyncTable,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
@@ -103,27 +104,23 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
 
   for (let tableIndex = 0; tableIndex < options.tableCount; tableIndex += 1) {
     const tableName = `perf_items_${tableIndex.toString().padStart(3, "0")}`;
-    const table = buildSyntheticTable(syntheticSchema, tableName, options.extraColumnCount);
+    const makeColumns = () => buildSyntheticColumns(options.extraColumnCount);
     const electricTable = options.schemaName ? `${options.schemaName}.${tableName}` : tableName;
-
-    registry[tableName] = {
-      table,
+    const entry = defineSyncTable({
+      tableName,
+      makeColumns,
+      policies: buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
+      ...(syntheticSchema ? { schema: syntheticSchema } : {}),
       mode: "readwrite",
-      primaryKey: { columns: ["id"] },
       shape: {
         tableName,
         shapeKey: electricTable,
         ...(electricTable === tableName ? {} : { electricTable }),
       },
-      routes: {
-        basePath: `/api/${tableName}`,
-        allowBatch: true,
-      },
       clientProjection: {
         syncedTable: tableName,
         overlayTable: `${tableName}_overlay`,
         journalTable: `${tableName}_mutations`,
-        readModel: `${tableName}_read_model`,
       },
       governance: {
         managedFields: [
@@ -153,7 +150,9 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
       adapters: {
         toEntityKey: (record) => ({ id: String(record.id) }),
       },
-    };
+    });
+
+    registry[tableName] = entry;
 
     tableNames.push(tableName);
   }
@@ -386,11 +385,7 @@ function buildSchemas(extraColumnCount: number) {
   };
 }
 
-function buildSyntheticTable(
-  syntheticSchema: ReturnType<typeof pgSchema> | null,
-  tableName: string,
-  extraColumnCount: number,
-) {
+function buildSyntheticColumns(extraColumnCount: number) {
   const columns: Record<string, ReturnType<typeof varchar> | ReturnType<typeof uuid> | ReturnType<typeof bigint>> = {
     id: uuid("id").primaryKey(),
     ownerId: uuid("owner_id"),
@@ -404,19 +399,11 @@ function buildSyntheticTable(
   for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
     columns[`field${columnIndex.toString().padStart(2, "0")}`] = varchar(
       `field_${columnIndex.toString().padStart(2, "0")}`,
-      {
-        length: 128,
-      },
+      { length: 128 },
     ).notNull();
   }
 
-  return syntheticSchema
-    ? syntheticSchema.table(tableName, columns, () =>
-        buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
-      )
-    : pgTable(tableName, columns, () =>
-        buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
-      );
+  return columns;
 }
 
 function buildServerColumnSql(columnName: string, columnType: string, notNull: boolean, entry: SyncTableEntry): string {

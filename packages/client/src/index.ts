@@ -5,7 +5,6 @@ import { drizzle } from "drizzle-orm/pglite";
 import { defineRelations } from "drizzle-orm/relations";
 
 import type {
-  ClientProjectionSpec,
   MutationDiagnostics,
   RegistryRelations,
   RegistryTables,
@@ -33,7 +32,6 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   registry: TRegistry;
   electricUrl: string;
   writeUrl: string;
-  batchWriteUrl?: string;
   getAuthToken?: () => Promise<string | undefined>;
   syncEnabled?: boolean;
   dataDir?: string;
@@ -160,7 +158,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     db: pglite,
     registry: options.registry,
     writeUrl: options.writeUrl,
-    batchWriteUrl: options.batchWriteUrl ?? options.writeUrl,
     ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
   });
 
@@ -282,12 +279,11 @@ function buildSyncTableInput(entry: SyncTableEntry, tableKey: string) {
     mode: entry.mode,
     primaryKey: entry.primaryKey,
     shape: entry.shape,
-    routes: entry.routes,
     clientProjection,
   };
 }
 
-function getClientProjection(entry: SyncTableEntry, tableKey: string): ClientProjectionSpec {
+function getClientProjection(entry: SyncTableEntry, tableKey: string) {
   if (!entry.clientProjection) {
     throw new Error(`clientProjection is required for client table ${tableKey}`);
   }

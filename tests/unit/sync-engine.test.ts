@@ -37,15 +37,10 @@ describe("sync-engine", () => {
             tableName: "projects",
             shapeKey: "projects-shape",
           },
-          routes: {
-            basePath: "/api/projects",
-            allowBatch: true,
-          },
           clientProjection: {
             syncedTable: "projects_local",
             overlayTable: "projects_overlay",
             journalTable: "projects_mutations",
-            readModel: "projects_read_model",
           },
         },
         activity_feed: {
@@ -60,7 +55,6 @@ describe("sync-engine", () => {
           },
           clientProjection: {
             syncedTable: "activity_feed_local",
-            readModel: "activity_feed_local",
           },
         },
         write_audit: {

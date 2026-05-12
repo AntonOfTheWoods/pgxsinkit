@@ -27,7 +27,6 @@ describe("performance: client local optimistic views", () => {
         registry,
         electricUrl: "http://127.0.0.1:1/v1/shape",
         writeUrl: "http://127.0.0.1:1",
-        batchWriteUrl: "http://127.0.0.1:1",
         syncEnabled: false,
         dataDir: `memory://perf-client-${Date.now()}`,
       });

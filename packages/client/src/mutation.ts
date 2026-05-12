@@ -1,4 +1,4 @@
-import type { AnyPgTable } from "drizzle-orm/pg-core";
+import { getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import { ZodObject } from "zod";
 
 import type {
@@ -66,7 +66,6 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
   db: MutationDb;
   registry: TRegistry;
   writeUrl: string;
-  batchWriteUrl?: string;
   getAuthToken?: () => Promise<string | undefined>;
 }
 
@@ -78,7 +77,6 @@ interface TableContext {
   overlayTable: string;
   journalTable: string;
   journalSequence: string;
-  routeBasePath?: string;
   pkColumnNames: string[];
   pkPropertyKeys: string[];
   recordIncludesOverlayState: boolean;
@@ -136,7 +134,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     return undefined;
   };
 
-  const tableContexts = buildTableContexts(options.registry, options.batchWriteUrl === undefined);
+  const tableContexts = buildTableContexts(options.registry);
   let flushQueue = Promise.resolve();
 
   const getTableContext = (table: SyncTableName<TRegistry>) => {
@@ -394,41 +392,27 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   };
 
   const runFlush = async (table?: SyncTableName<TRegistry>) => {
-    if (options.batchWriteUrl) {
-      const affectedContexts = new Map<string, TableContext>();
-      let processedCount = 0;
+    const affectedContexts = new Map<string, TableContext>();
+    let processedCount = 0;
 
-      do {
-        const batchResult = await flushBatch(
-          options.db,
-          tableContexts as Record<string, TableContext>,
-          options.batchWriteUrl,
-          table,
-          resolveAuthToken,
-        );
+    do {
+      const batchResult = await flushBatch(
+        options.db,
+        tableContexts as Record<string, TableContext>,
+        options.writeUrl,
+        table,
+        resolveAuthToken,
+      );
 
-        processedCount = batchResult.processedCount;
+      processedCount = batchResult.processedCount;
 
-        for (const context of batchResult.affectedContexts) {
-          affectedContexts.set(context.key, context);
-        }
-      } while (processedCount > 0);
-
-      for (const context of affectedContexts.values()) {
-        await reconcileTable(options.db, context);
+      for (const context of batchResult.affectedContexts) {
+        affectedContexts.set(context.key, context);
       }
-    } else {
-      let processedCount = 0;
+    } while (processedCount > 0);
 
-      do {
-        processedCount = 0;
-
-        const contexts = filterContexts(tableContexts, table);
-
-        for (const context of contexts) {
-          processedCount += await flushTable(options.db, context, options.writeUrl, resolveAuthToken);
-        }
-      } while (processedCount > 0);
+    for (const context of affectedContexts.values()) {
+      await reconcileTable(options.db, context);
     }
   };
 
@@ -723,28 +707,19 @@ type NormalizedBatchItem =
       order: number;
     };
 
-function buildTableContexts<TRegistry extends SyncTableRegistry>(registry: TRegistry, requireRouteBasePath: boolean) {
+function buildTableContexts<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
   const localSchema = getSyncRegistrySchema(registry);
 
   return Object.fromEntries(
     Object.entries(registry)
       .filter(([, entry]) => entry.mode !== "readonly")
-      .map(([key, entry]) => [key, buildTableContext(key, entry, localSchema, requireRouteBasePath)]),
+      .map(([key, entry]) => [key, buildTableContext(key, entry, localSchema)]),
   ) as Partial<Record<SyncTableName<TRegistry>, TableContext>>;
 }
 
-function buildTableContext(
-  key: string,
-  entry: SyncTableEntry<AnyPgTable>,
-  localSchema: string,
-  requireRouteBasePath: boolean,
-): TableContext {
+function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, localSchema: string): TableContext {
   if (!entry.clientProjection?.overlayTable || !entry.clientProjection.journalTable) {
     throw new Error(`overlay and journal tables are required for writable table ${key}`);
-  }
-
-  if (requireRouteBasePath && !entry.routes?.basePath) {
-    throw new Error(`routes.basePath is required for writable table ${key}`);
   }
 
   const columns = getProjectedTableColumns(entry).map(({ propertyKey, column }) => ({
@@ -765,12 +740,14 @@ function buildTableContext(
   return {
     key,
     entry,
-    readModel: qualifyLocalIdentifier(localSchema, entry.clientProjection.readModel),
+    readModel: qualifyLocalIdentifier(
+      localSchema,
+      entry.view != null ? getViewConfig(entry.view).name : entry.clientProjection.syncedTable,
+    ),
     syncedTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.syncedTable),
     overlayTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.overlayTable),
     journalTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.journalTable),
     journalSequence: qualifyLocalIdentifier(localSchema, buildJournalSequenceName(entry.clientProjection.journalTable)),
-    ...(entry.routes?.basePath ? { routeBasePath: entry.routes.basePath } : {}),
     pkColumnNames: [...entry.primaryKey.columns],
     pkPropertyKeys,
     recordIncludesOverlayState: recordSchemaIncludesOverlayState(entry.schemas?.recordSchema),
@@ -1532,158 +1509,6 @@ function toSqlColumnPayload(context: TableContext, payload: Record<string, unkno
   return normalized;
 }
 
-function filterProjectedPayload(context: TableContext, payload: Record<string, unknown>) {
-  const normalized: Record<string, unknown> = {};
-
-  for (const { propertyKey, column } of context.columns) {
-    if (Object.prototype.hasOwnProperty.call(payload, propertyKey)) {
-      normalized[propertyKey] = payload[propertyKey];
-      continue;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(payload, column.name)) {
-      normalized[column.name] = payload[column.name];
-    }
-  }
-
-  return normalized;
-}
-
-async function flushTable(
-  db: MutationDb,
-  context: TableContext,
-  writeUrl: string,
-  getAuthToken?: () => Promise<string | undefined>,
-) {
-  const result = await db.query<MutationRow>(
-    `
-      SELECT
-        mutation_id AS "mutationId",
-        entity_key_json AS "entityKeyJson",
-        mutation_seq AS "mutationSeq",
-        mutation_kind AS "mutationKind",
-        status,
-        payload_json AS "payloadJson",
-        attempt_count AS "attemptCount",
-        last_http_status AS "lastHttpStatus",
-        last_error AS "lastError",
-        conflict_reason AS "conflictReason",
-        next_retry_at_us::text AS "nextRetryAtUs",
-        server_updated_at_us::text AS "serverUpdatedAtUs"
-      FROM ${context.journalTable}
-      WHERE status IN ('pending', 'failed')
-        AND COALESCE(next_retry_at_us, 0) <= $1::bigint
-        AND NOT EXISTS (
-          SELECT 1
-          FROM ${context.journalTable} AS earlier
-          WHERE earlier.entity_key_json = ${context.journalTable}.entity_key_json
-            AND earlier.mutation_seq < ${context.journalTable}.mutation_seq
-            AND earlier.status IN ('pending', 'failed', 'sending')
-        )
-      ORDER BY enqueued_at_us ASC, mutation_seq ASC
-      LIMIT ${DEFAULT_FLUSH_BATCH_SIZE}
-    `,
-    [nowMicroseconds()],
-  );
-
-  if (result.rows.length === 0) {
-    return 0;
-  }
-
-  for (const mutation of result.rows) {
-    const sentAtUs = nowMicroseconds();
-    await setMutationStatus(db, context, mutation.mutationId, "sending", {
-      attemptCount: mutation.attemptCount + 1,
-      sentAtUs,
-      updatedAtUs: sentAtUs,
-      lastError: null,
-      nextRetryAtUs: null,
-      lastHttpStatus: null,
-      conflictReason: null,
-    });
-
-    try {
-      const entityKey = JSON.parse(mutation.entityKeyJson) as Record<string, string>;
-      const payload = JSON.parse(mutation.payloadJson) as Record<string, unknown>;
-      let response = await sendMutationRequest(writeUrl, context, entityKey, payload, await getAuthToken?.());
-
-      if ([401, 403].includes(response.status) && getAuthToken) {
-        response = await sendMutationRequest(writeUrl, context, entityKey, payload, await getAuthToken());
-      }
-
-      const responseText = await response.text();
-      const responseJson = responseText.length > 0 ? JSON.parse(responseText) : null;
-
-      if (!response.ok) {
-        const errorMessage =
-          responseJson && typeof responseJson.message === "string"
-            ? responseJson.message
-            : `Write API responded with ${response.status}`;
-
-        if (mutation.mutationKind === "delete" && response.status === 404) {
-          await markDeleteAcknowledged(db, context, mutation.mutationId);
-          continue;
-        }
-
-        throw new MutationRequestError(errorMessage, response.status);
-      }
-
-      const ackedAtUs = nowMicroseconds();
-
-      if (mutation.mutationKind === "delete") {
-        await markDeleteAcknowledged(db, context, mutation.mutationId);
-      } else {
-        const created = parseRecord(context, responseJson);
-        const createdRecord = ensureRecord(created);
-        const serverUpdatedAtUs = toOptionalString(createdRecord.updatedAtUs);
-
-        await db.query(
-          `
-            UPDATE ${context.journalTable}
-            SET
-              status = 'acked',
-              acked_at_us = $2::bigint,
-              updated_at_us = $2::bigint,
-              server_updated_at_us = $3::bigint,
-              last_error = NULL,
-              last_http_status = 200,
-              conflict_reason = NULL,
-              next_retry_at_us = NULL
-            WHERE mutation_id = $1
-          `,
-          [mutation.mutationId, ackedAtUs, serverUpdatedAtUs],
-        );
-
-        if (!(await hasLaterMutations(db, context, mutation.entityKeyJson, mutation.mutationSeq))) {
-          await updateOverlayTimestamps(db, context, entityKey, createdRecord, ackedAtUs);
-        }
-      }
-    } catch (error) {
-      const failedAtUs = nowMicroseconds();
-      const attemptCount = mutation.attemptCount + 1;
-      const nextRetryAtUs = computeNextRetryAtUs(failedAtUs, attemptCount);
-      const lastHttpStatus = error instanceof MutationRequestError ? error.status : null;
-      const conflictReason =
-        lastHttpStatus === 404 || lastHttpStatus === 409
-          ? error instanceof Error
-            ? error.message
-            : "Server conflict"
-          : null;
-
-      await setMutationStatus(db, context, mutation.mutationId, "failed", {
-        attemptCount,
-        updatedAtUs: failedAtUs,
-        lastError: error instanceof Error ? error.message : "Unknown write failure",
-        nextRetryAtUs,
-        lastHttpStatus,
-        conflictReason,
-      });
-    }
-  }
-
-  return result.rows.length;
-}
-
 async function reconcileTable(db: MutationDb, context: TableContext) {
   // PK-match only — no timestamp gate. The trigger on the synced table
   // handles real-time cleanup; this is a bulk recovery/fallback path.
@@ -1764,50 +1589,6 @@ async function reconcileTable(db: MutationDb, context: TableContext) {
   }
 }
 
-async function sendMutationRequest(
-  writeUrl: string,
-  context: TableContext,
-  entityKey: Record<string, string>,
-  payload: Record<string, unknown>,
-  bearerToken?: string,
-) {
-  if (!context.routeBasePath) {
-    throw new Error(`routes.basePath is required for direct mutation requests on table ${context.key}`);
-  }
-
-  switch (payload.kind) {
-    case "create":
-      return fetch(`${writeUrl}${context.routeBasePath}`, {
-        method: "POST",
-        headers: buildRequestHeaders(bearerToken),
-        body: JSON.stringify(
-          filterProjectedPayload(context, stripManagedFields(context, ensureRecord(payload.value), "create")),
-        ),
-      });
-    case "update":
-      return fetch(
-        `${writeUrl}${context.routeBasePath}/${encodeURIComponent(getSingleEntityKeyValue(context, entityKey))}`,
-        {
-          method: "PATCH",
-          headers: buildRequestHeaders(bearerToken),
-          body: JSON.stringify(
-            filterProjectedPayload(context, stripManagedFields(context, ensureRecord(payload.patch), "update")),
-          ),
-        },
-      );
-    case "delete":
-      return fetch(
-        `${writeUrl}${context.routeBasePath}/${encodeURIComponent(getSingleEntityKeyValue(context, entityKey))}`,
-        {
-          method: "DELETE",
-          headers: buildRequestHeaders(bearerToken),
-        },
-      );
-    default:
-      throw new Error(`Unknown mutation kind for table ${context.key}`);
-  }
-}
-
 function buildRequestHeaders(bearerToken?: string): Record<string, string> {
   if (!bearerToken) {
     return {
@@ -1819,57 +1600,6 @@ function buildRequestHeaders(bearerToken?: string): Record<string, string> {
     "Content-Type": "application/json",
     Authorization: `Bearer ${bearerToken}`,
   };
-}
-
-function getSingleEntityKeyValue(context: TableContext, entityKey: Record<string, string>) {
-  if (context.pkPropertyKeys.length !== 1) {
-    throw new Error(`Only single-column primary keys are supported for routes on table ${context.key}`);
-  }
-
-  return entityKey[context.pkPropertyKeys[0]!]!;
-}
-
-async function setMutationStatus(
-  db: MutationDb,
-  context: TableContext,
-  mutationId: string,
-  status: MutationStatus,
-  options: {
-    attemptCount: number;
-    updatedAtUs: string;
-    sentAtUs?: string | null;
-    nextRetryAtUs?: string | null;
-    lastError?: string | null;
-    lastHttpStatus?: number | null;
-    conflictReason?: string | null;
-  },
-) {
-  await db.query(
-    `
-      UPDATE ${context.journalTable}
-      SET
-        status = $2,
-        attempt_count = $3,
-        sent_at_us = COALESCE($4::bigint, sent_at_us),
-        updated_at_us = $5::bigint,
-        last_error = $6,
-        next_retry_at_us = $7::bigint,
-        last_http_status = $8,
-        conflict_reason = $9
-      WHERE mutation_id = $1
-    `,
-    [
-      mutationId,
-      status,
-      options.attemptCount,
-      options.sentAtUs ?? null,
-      options.updatedAtUs,
-      options.lastError ?? null,
-      options.nextRetryAtUs ?? null,
-      options.lastHttpStatus ?? null,
-      options.conflictReason ?? null,
-    ],
-  );
 }
 
 async function applyMutationStatusUpdates(db: MutationDb, context: TableContext, updates: MutationStatusUpdate[]) {
@@ -1992,68 +1722,6 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
   );
 }
 
-async function markDeleteAcknowledged(db: MutationDb, context: TableContext, mutationId: string) {
-  const ackedAtUs = nowMicroseconds();
-
-  await db.query(
-    `
-      UPDATE ${context.journalTable}
-      SET
-        status = 'acked',
-        acked_at_us = $2::bigint,
-        updated_at_us = $2::bigint,
-        last_error = NULL,
-        last_http_status = 204,
-        conflict_reason = NULL,
-        next_retry_at_us = NULL
-      WHERE mutation_id = $1
-    `,
-    [mutationId, ackedAtUs],
-  );
-}
-
-async function hasLaterMutations(db: MutationDb, context: TableContext, entityKeyJson: string, mutationSeq: number) {
-  const result = await db.query<{ count: number }>(
-    `
-      SELECT COUNT(*)::int AS count
-      FROM ${context.journalTable}
-      WHERE entity_key_json = $1
-        AND mutation_seq > $2
-    `,
-    [entityKeyJson, mutationSeq],
-  );
-
-  return (result.rows[0]?.count ?? 0) > 0;
-}
-
-async function updateOverlayTimestamps(
-  db: MutationDb,
-  context: TableContext,
-  entityKey: Record<string, string>,
-  record: Record<string, unknown>,
-  localUpdatedAtUs: string,
-) {
-  if (!hasProperty(context, "createdAtUs") || !hasProperty(context, "updatedAtUs")) {
-    return;
-  }
-
-  await db.query(
-    `
-      UPDATE ${context.overlayTable}
-      SET
-        created_at_us = $${context.pkPropertyKeys.length + 1}::bigint,
-        updated_at_us = $${context.pkPropertyKeys.length + 2}::bigint,
-        local_updated_at_us = $${context.pkPropertyKeys.length + 3}::bigint
-      WHERE ${buildWhereClause(context)}
-    `,
-    [...buildWhereParams(context, entityKey), String(record.createdAtUs), String(record.updatedAtUs), localUpdatedAtUs],
-  );
-}
-
-function buildWhereClause(context: TableContext) {
-  return context.pkColumnNames.map((columnName, index) => `${columnName} = $${index + 1}`).join(" AND ");
-}
-
 function buildColumnEquality(columnNames: string[], leftAlias: string, rightAlias: string) {
   return columnNames.map((columnName) => `${leftAlias}.${columnName} = ${rightAlias}.${columnName}`).join(" AND ");
 }
@@ -2078,10 +1746,6 @@ function escapeSqlString(value: string) {
   return value.replace(/'/g, "''");
 }
 
-function buildWhereParams(context: TableContext, entityKey: Record<string, string>) {
-  return context.pkPropertyKeys.map((propertyKey) => entityKey[propertyKey]);
-}
-
 function formatSqlValuePlaceholder(position: number, columnName: string) {
   return /_at_us$/.test(columnName) ? `$${position}::bigint` : `$${position}`;
 }
@@ -2104,23 +1768,6 @@ function extractRecordFromState(context: TableContext, state: CurrentRecordState
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function toOptionalString(value: unknown) {
-  if (value === undefined || value === null) {
-    return null;
-  }
-
-  switch (typeof value) {
-    case "string":
-      return value;
-    case "number":
-    case "boolean":
-    case "bigint":
-      return String(value);
-    default:
-      return JSON.stringify(value);
-  }
 }
 
 class MutationRequestError extends Error {

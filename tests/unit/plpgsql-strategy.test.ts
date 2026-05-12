@@ -1,30 +1,27 @@
-import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 
-const projectedPlpgsqlTable = pgTable("projected_plpgsql_items", {
-  id: uuid("id").primaryKey(),
-  ownerId: uuid("owner_id").notNull(),
-  internalNote: varchar("internal_note", { length: 120 }),
-  title: varchar("title", { length: 120 }).notNull(),
-  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
-  updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
-});
-
 const projectedPlpgsqlRegistry = defineSyncRegistry({
   projectedItems: defineSyncTable({
-    table: projectedPlpgsqlTable,
+    tableName: "projected_plpgsql_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      ownerId: uuid("owner_id").notNull(),
+      internalNote: varchar("internal_note", { length: 120 }),
+      title: varchar("title", { length: 120 }).notNull(),
+      createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
     mode: "readwrite",
-    primaryKey: { columns: ["id"] },
     shape: { tableName: "projected_plpgsql_items", shapeKey: "projected_plpgsql_items" },
     clientProjection: {
       syncedTable: "projected_plpgsql_items",
       overlayTable: "projected_plpgsql_items_overlay",
       journalTable: "projected_plpgsql_items_mutations",
-      readModel: "projected_plpgsql_items_read_model",
       omitColumns: ["ownerId", "internalNote"],
     },
     governance: {

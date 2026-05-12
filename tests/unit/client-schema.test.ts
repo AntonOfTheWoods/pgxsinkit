@@ -1,69 +1,28 @@
-import {
-  bigint,
-  integer,
-  jsonb,
-  pgEnum,
-  pgSchema,
-  pgTable,
-  primaryKey,
-  real,
-  uuid,
-  varchar,
-} from "drizzle-orm/pg-core";
+import { bigint, integer, jsonb, pgEnum, pgSchema, real, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, buildSyntheticRegistrySchemaName, demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 
-const projectedClientTable = pgTable("projected_client_items", {
-  id: uuid("id").primaryKey(),
-  ownerId: uuid("owner_id").notNull(),
-  modifiedBy: uuid("modified_by"),
-  title: varchar("title", { length: 120 }).notNull(),
-  notes: varchar("notes", { length: 255 }),
-  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
-  updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
-});
-
-const readonlyStatusEnum = pgEnum("readonly_status", ["queued", "done"]);
-
-const compositeReadonlyTable = pgTable(
-  "composite_readonly_items",
-  {
-    id: uuid("id").notNull(),
-    ownerId: uuid("owner_id").notNull(),
-    status: readonlyStatusEnum("status").notNull(),
-    words: integer("words").array(),
-    payload: jsonb("payload"),
-    efactor: real("efactor").notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.id, table.ownerId] })],
-);
-
-const fallbackReadModelTable = pgTable("fallback_read_model_items", {
-  id: uuid("id").primaryKey(),
-  title: varchar("title", { length: 120 }).notNull(),
-});
-
-const workspaceLocalSchema = pgSchema("workspace_local");
-const workspaceReadonlyStatusEnum = workspaceLocalSchema.enum("workspace_readonly_status", ["queued", "done"]);
-const workspaceReadonlyTable = workspaceLocalSchema.table("workspace_readonly_items", {
-  id: uuid("id").primaryKey(),
-  status: workspaceReadonlyStatusEnum("status").notNull(),
-});
-
 const projectedClientRegistry = defineSyncRegistry({
   projectedItems: defineSyncTable({
-    table: projectedClientTable,
+    tableName: "projected_client_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      ownerId: uuid("owner_id").notNull(),
+      modifiedBy: uuid("modified_by"),
+      title: varchar("title", { length: 120 }).notNull(),
+      notes: varchar("notes", { length: 255 }),
+      createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
     mode: "readwrite",
-    primaryKey: { columns: ["id"] },
     shape: { tableName: "projected_client_items", shapeKey: "projected_client_items" },
     clientProjection: {
       syncedTable: "projected_client_items",
       overlayTable: "projected_client_items_overlay",
       journalTable: "projected_client_items_mutations",
-      readModel: "projected_client_items_read_model",
       omitColumns: ["ownerId", "modifiedBy", "notes"],
     },
     governance: {
@@ -77,30 +36,43 @@ const projectedClientRegistry = defineSyncRegistry({
   }),
 });
 
+const readonlyStatusEnum = pgEnum("readonly_status", ["queued", "done"]);
+
 const compositeReadonlyRegistry = defineSyncRegistry({
   compositeReadonlyItems: defineSyncTable({
-    table: compositeReadonlyTable,
-    mode: "readonly",
-    primaryKey: { columns: ["id", "owner_id"] },
+    tableName: "composite_readonly_items",
+    makeColumns: () => ({
+      id: uuid("id").notNull(),
+      ownerId: uuid("owner_id").notNull(),
+      status: readonlyStatusEnum("status").notNull(),
+      words: integer("words").array(),
+      payload: jsonb("payload"),
+      efactor: real("efactor").notNull(),
+    }),
+    primaryKey: ["id", "owner_id"],
     shape: { tableName: "composite_readonly_items", shapeKey: "composite_readonly_items" },
     clientProjection: {
       syncedTable: "composite_readonly_items",
-      readModel: "composite_readonly_items",
     },
   }),
 });
 
+const workspaceLocalSchema = pgSchema("workspace_local");
+const workspaceReadonlyStatusEnum = workspaceLocalSchema.enum("workspace_readonly_status", ["queued", "done"]);
+
 const fallbackReadModelRegistry = defineSyncRegistry({
   fallbackReadModelItems: defineSyncTable({
-    table: fallbackReadModelTable,
+    tableName: "fallback_read_model_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+    }),
     mode: "readwrite",
-    primaryKey: { columns: ["id"] },
     shape: { tableName: "fallback_read_model_items", shapeKey: "fallback_read_model_items" },
     clientProjection: {
       syncedTable: "fallback_read_model_items",
       overlayTable: "fallback_read_model_items_overlay",
       journalTable: "fallback_read_model_items_mutations",
-      readModel: "fallback_read_model_items_read_model",
     },
   }),
 });
@@ -109,13 +81,15 @@ const workspaceReadonlyRegistry = defineSyncRegistry({
   schema: "workspace_local",
   tables: {
     workspaceReadonlyItems: defineSyncTable({
-      table: workspaceReadonlyTable,
-      mode: "readonly",
-      primaryKey: { columns: ["id"] },
+      tableName: "workspace_readonly_items",
+      makeColumns: () => ({
+        id: uuid("id").primaryKey(),
+        status: workspaceReadonlyStatusEnum("status").notNull(),
+      }),
+      schema: workspaceLocalSchema,
       shape: { tableName: "workspace_readonly_items", shapeKey: "workspace_readonly_items" },
       clientProjection: {
         syncedTable: "workspace_readonly_items",
-        readModel: "workspace_readonly_items",
       },
     }),
   },
@@ -131,11 +105,11 @@ describe("client local schema generation", () => {
       "CREATE SEQUENCE IF NOT EXISTS author_mutations_mutation_seq AS integer START WITH 1 INCREMENT BY 1;",
     );
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS author_mutations");
-    expect(sql).toContain("CREATE OR REPLACE VIEW author_read_model AS");
+    expect(sql).toContain("CREATE OR REPLACE VIEW authors_read_model AS");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS todos");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS todo_overlay");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS todo_mutations");
-    expect(sql).toContain("CREATE OR REPLACE VIEW todo_read_model AS");
+    expect(sql).toContain("CREATE OR REPLACE VIEW todos_read_model AS");
     expect(sql).toContain("entity_key_json TEXT NOT NULL");
     expect(sql).toContain(
       "mutation_seq INTEGER NOT NULL UNIQUE DEFAULT nextval('author_mutations_mutation_seq')::integer",

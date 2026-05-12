@@ -1,4 +1,4 @@
-import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, demoSyncRegistry } from "@pgxsinkit/schema";
@@ -16,24 +16,21 @@ import { createFreshTestPGlite } from "../support/pglite";
 const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const writeUrl = "http://localhost:3001";
 
-const routeOptionalBatchTable = pgTable("route_optional_batch_items", {
-  id: uuid("id").primaryKey(),
-  title: varchar("title", { length: 120 }).notNull(),
-  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
-  updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
-});
-
 const routeOptionalBatchRegistry = defineSyncRegistry({
   routeOptionalBatchItems: defineSyncTable({
-    table: routeOptionalBatchTable,
+    tableName: "route_optional_batch_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+      createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
     mode: "readwrite",
-    primaryKey: { columns: ["id"] },
     shape: { tableName: "route_optional_batch_items", shapeKey: "route_optional_batch_items" },
     clientProjection: {
       syncedTable: "route_optional_batch_items",
       overlayTable: "route_optional_batch_items_overlay",
       journalTable: "route_optional_batch_items_mutations",
-      readModel: "route_optional_batch_items_read_model",
     },
   }),
 });
@@ -95,7 +92,6 @@ describe("overlay state helpers", () => {
       db,
       registry: routeOptionalBatchRegistry,
       writeUrl,
-      batchWriteUrl: writeUrl,
     });
 
     await expect(
@@ -199,7 +195,7 @@ describe("overlay state helpers", () => {
 
     const authorRows = await db.query<{ name: string; overlayKind: string }>(`
       SELECT name, overlay_kind AS "overlayKind"
-      FROM author_read_model
+      FROM authors_read_model
       WHERE id = '01963227-d4c7-72db-b858-f89f6af8f931'
     `);
 
@@ -386,7 +382,7 @@ describe("overlay state helpers", () => {
     const stats = await runtime.readMutationStats("todos");
     expect(stats.pendingCount).toBe(2);
 
-    const visibleRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_read_model");
+    const visibleRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_read_model");
     expect(visibleRows.rows[0]?.count).toBe(0);
 
     const overlays = await db.query<{ overlayKind: string }>(
@@ -429,11 +425,11 @@ describe("overlay state helpers", () => {
     ]);
 
     const authorRows = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM author_read_model WHERE id = $1`,
+      `SELECT overlay_kind AS "overlayKind" FROM authors_read_model WHERE id = $1`,
       ["01963227-d4c7-72db-b858-f89f6af8f937"],
     );
     const todoRows = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM todo_read_model WHERE id = $1`,
+      `SELECT overlay_kind AS "overlayKind" FROM todos_read_model WHERE id = $1`,
       ["01963227-d4c7-72db-b858-f89f6af8f938"],
     );
 
@@ -606,7 +602,7 @@ describe("overlay state helpers", () => {
     expect(stats.pendingCount).toBe(2);
 
     const visibleRows = await db.query<{ count: number }>(
-      "SELECT COUNT(*)::int AS count FROM todo_read_model WHERE id = $1",
+      "SELECT COUNT(*)::int AS count FROM todos_read_model WHERE id = $1",
       [todoId],
     );
     expect(visibleRows.rows[0]?.count).toBe(0);
@@ -847,7 +843,7 @@ describe("overlay state helpers", () => {
     });
 
     const visibleRows = await db.query<{ title: string; status: string; overlayKind: string }>(
-      `SELECT title, status, overlay_kind AS "overlayKind" FROM todo_read_model WHERE id = $1`,
+      `SELECT title, status, overlay_kind AS "overlayKind" FROM todos_read_model WHERE id = $1`,
       ["01963227-d4c7-72db-b858-f89f6af8f909"],
     );
 
@@ -960,73 +956,6 @@ describe("overlay state helpers", () => {
     expect(mutations[0]?.conflictReason).toBeNull();
   });
 
-  it("flushes parent author mutations before child todo mutations", async () => {
-    const { runtime } = await createOverlayTestContext();
-    const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn<typeof fetch>(async (input, _init) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-
-      if (url.endsWith("/api/authors")) {
-        return new Response(
-          JSON.stringify({
-            id: "01963227-d4c7-72db-b858-f89f6af8f932",
-            name: "Grace Hopper",
-            createdAtUs: "100",
-            updatedAtUs: "100",
-          }),
-          { status: 201, headers: { "Content-Type": "application/json" } },
-        );
-      }
-
-      return new Response(
-        JSON.stringify({
-          id: "01963227-d4c7-72db-b858-f89f6af8f933",
-          title: "Child todo",
-          description: null,
-          authorId: "01963227-d4c7-72db-b858-f89f6af8f932",
-          status: "todo",
-          priority: "medium",
-          createdAtUs: "101",
-          updatedAtUs: "101",
-        }),
-        { status: 201, headers: { "Content-Type": "application/json" } },
-      );
-    });
-
-    globalThis.fetch = fetchMock;
-
-    try {
-      await runtime.create("authors", {
-        id: "01963227-d4c7-72db-b858-f89f6af8f932",
-        name: "Grace Hopper",
-      });
-      await runtime.create("todos", {
-        id: "01963227-d4c7-72db-b858-f89f6af8f933",
-        title: "Child todo",
-        description: null,
-        authorId: "01963227-d4c7-72db-b858-f89f6af8f932",
-        status: "todo",
-        priority: "medium",
-      });
-
-      await runtime.flush("authors");
-      await runtime.flush("todos");
-
-      expect(fetchMock).toHaveBeenNthCalledWith(
-        1,
-        "http://localhost:3001/api/authors",
-        expect.objectContaining({ method: "POST" }),
-      );
-      expect(fetchMock).toHaveBeenNthCalledWith(
-        2,
-        "http://localhost:3001/api/todos",
-        expect.objectContaining({ method: "POST" }),
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   it("forwards auth headers on batch mutation flushes", async () => {
     const db = await createFreshTestPGlite();
     await db.exec(overlaySchemaSql);
@@ -1035,7 +964,6 @@ describe("overlay state helpers", () => {
       db,
       registry: demoSyncRegistry,
       writeUrl,
-      batchWriteUrl: writeUrl,
       getAuthToken: async () => "demo-token",
     });
 
@@ -1099,7 +1027,6 @@ describe("overlay state helpers", () => {
       db,
       registry: demoSyncRegistry,
       writeUrl,
-      batchWriteUrl: writeUrl,
     });
 
     const originalFetch = globalThis.fetch;
@@ -1164,7 +1091,6 @@ describe("overlay state helpers", () => {
       db,
       registry: demoSyncRegistry,
       writeUrl,
-      batchWriteUrl: "http://localhost:3001/mutations",
     });
 
     const originalFetch = globalThis.fetch;
@@ -1214,7 +1140,6 @@ describe("overlay state helpers", () => {
       db,
       registry: demoSyncRegistry,
       writeUrl,
-      batchWriteUrl: writeUrl,
     });
 
     const originalFetch = globalThis.fetch;
@@ -1270,7 +1195,6 @@ describe("overlay state helpers", () => {
       db,
       registry: demoSyncRegistry,
       writeUrl,
-      batchWriteUrl: writeUrl,
     });
     const mutationCount = DEFAULT_FLUSH_BATCH_SIZE + 1;
 
@@ -1338,7 +1262,6 @@ describe("overlay state helpers", () => {
       db,
       registry: demoSyncRegistry,
       writeUrl,
-      batchWriteUrl: writeUrl,
     });
 
     const originalFetch = globalThis.fetch;

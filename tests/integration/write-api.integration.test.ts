@@ -1,13 +1,8 @@
 import { eq, sql } from "drizzle-orm";
-import { pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
-import {
-  buildSupabaseOwnerOrAdminNativePolicies,
-  defineSyncRegistry,
-  defineSyncTable,
-  defineTableGovernance,
-} from "@pgxsinkit/contracts";
+import { buildSupabaseOwnerOrAdminNativePolicies, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import {
   authorsTable,
   demoSyncRegistry,
@@ -65,34 +60,34 @@ const ensureTablesSql = sql.raw(`
   ALTER TABLE todos ADD COLUMN IF NOT EXISTS modified_by UUID;
 `);
 
-const fkParentsTable = pgTable("fk_parents", {
-  id: uuid("id").primaryKey(),
-  name: varchar("name", { length: 120 }).notNull(),
+const fkParentsSyncEntry = defineSyncTable({
+  tableName: "fk_parents",
+  makeColumns: () => ({
+    id: uuid("id").primaryKey(),
+    name: varchar("name", { length: 120 }).notNull(),
+  }),
+  mode: "readwrite",
+  shape: { tableName: "fk_parents", shapeKey: "fk_parents" },
 });
+const fkParentsTable = fkParentsSyncEntry.table;
 
-const fkChildrenTable = pgTable("fk_children", {
-  id: uuid("id").primaryKey(),
-  name: varchar("name", { length: 120 }).notNull(),
-  parentId: uuid("parent_id")
-    .notNull()
-    .references(() => fkParentsTable.id),
+const fkChildrenSyncEntry = defineSyncTable({
+  tableName: "fk_children",
+  makeColumns: () => ({
+    id: uuid("id").primaryKey(),
+    name: varchar("name", { length: 120 }).notNull(),
+    parentId: uuid("parent_id")
+      .notNull()
+      .references(() => fkParentsTable.id),
+  }),
+  mode: "readwrite",
+  shape: { tableName: "fk_children", shapeKey: "fk_children" },
 });
+const fkChildrenTable = fkChildrenSyncEntry.table;
 
 const fkSyncRegistry = defineSyncRegistry({
-  fk_parents: defineSyncTable({
-    table: fkParentsTable,
-    mode: "readwrite",
-    primaryKey: { columns: ["id"] },
-    shape: { tableName: "fk_parents", shapeKey: "fk_parents" },
-    routes: { basePath: "/api/fk-parents", allowBatch: false },
-  }),
-  fk_children: defineSyncTable({
-    table: fkChildrenTable,
-    mode: "readwrite",
-    primaryKey: { columns: ["id"] },
-    shape: { tableName: "fk_children", shapeKey: "fk_children" },
-    routes: { basePath: "/api/fk-children", allowBatch: false },
-  }),
+  fk_parents: fkParentsSyncEntry,
+  fk_children: fkChildrenSyncEntry,
 });
 
 const ensureFkTablesSql = sql.raw(`
@@ -125,30 +120,25 @@ const ensureFkConstraintDeferrableSql = sql.raw(`
   DEFERRABLE INITIALLY IMMEDIATE;
 `);
 
-const rlsTodosTable = pgTable(
-  "rls_todos",
-  {
+const rlsTodosSyncEntry = defineSyncTable({
+  tableName: "rls_todos",
+  makeColumns: () => ({
     id: uuid("id").primaryKey(),
     title: varchar("title", { length: 120 }).notNull(),
     ownerId: uuid("owner_id"),
-  },
-  () =>
-    buildSupabaseOwnerOrAdminNativePolicies({
-      tableName: "rls_todos",
-      role: authenticatedRole,
-      ownerSqlColumn: "owner_id",
-    }),
-);
+  }),
+  policies: buildSupabaseOwnerOrAdminNativePolicies({
+    tableName: "rls_todos",
+    role: authenticatedRole,
+    ownerSqlColumn: "owner_id",
+  }),
+  mode: "readwrite",
+  shape: { tableName: "rls_todos", shapeKey: "rls_todos" },
+});
+const rlsTodosTable = rlsTodosSyncEntry.table;
 
 const rlsSyncRegistry = defineSyncRegistry({
-  rls_todos: defineSyncTable({
-    table: rlsTodosTable,
-    mode: "readwrite",
-    primaryKey: { columns: ["id"] },
-    shape: { tableName: "rls_todos", shapeKey: "rls_todos" },
-    routes: { basePath: "/api/rls-todos", allowBatch: false },
-    governance: defineTableGovernance(rlsTodosTable, {}),
-  }),
+  rls_todos: rlsTodosSyncEntry,
 });
 
 // Supabase-compatible DB provides auth.uid() and authenticated role.

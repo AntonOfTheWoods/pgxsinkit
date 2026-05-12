@@ -134,6 +134,23 @@ describe("electric proxy", () => {
       expect(readFetchTargetUrl(targetUrl)).toBe(buildExpectedShapeUrl("authors", "offset=-1", "1 = 0"));
     });
 
+    it("does not add ownership WHERE for admin users", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
+
+      await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID, app_metadata: { roles: ["admin"] } },
+        { registry: demoSyncRegistry, electricUrl: "http://localhost:3000/v1/shape" },
+      );
+
+      const [targetUrl] = fetchMock.mock.calls[0]!;
+      const urlStr = readFetchTargetUrl(targetUrl);
+      expect(urlStr).not.toContain("where=");
+    });
+
     it("merges registry rowFilter with existing WHERE clause from client", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
       globalThis.fetch = fetchMock as typeof fetch;

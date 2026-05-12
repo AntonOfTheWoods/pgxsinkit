@@ -34,7 +34,6 @@ describe("perf-lab pglite loader", () => {
             syncedTable: "perf_items_000",
             overlayTable: "perf_items_000_overlay",
             journalTable: "perf_items_000_mutations",
-            readModel: "perf_items_000_read_model",
           },
         },
       } as any,
@@ -42,7 +41,6 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "live",
         writeUrl: "http://127.0.0.1:3101",
-        batchWriteUrl: "http://127.0.0.1:3101",
         electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
         getAuthToken: async () => "token-user1",
         syncEnabled: true,
@@ -72,7 +70,6 @@ describe("perf-lab pglite loader", () => {
             syncedTable: "perf_items_000",
             overlayTable: "perf_items_000_overlay",
             journalTable: "perf_items_000_mutations",
-            readModel: "perf_items_000_read_model",
           },
         },
       } as any,
@@ -80,7 +77,6 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "offline",
         writeUrl: "http://127.0.0.1:3101",
-        batchWriteUrl: "http://127.0.0.1:3101",
         electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
         syncEnabled: true,
       },
@@ -108,7 +104,6 @@ describe("perf-lab pglite loader", () => {
             syncedTable: "perf_items_000",
             overlayTable: "perf_items_000_overlay",
             journalTable: "perf_items_000_mutations",
-            readModel: "perf_items_000_read_model",
           },
         },
       } as any,
@@ -116,7 +111,6 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "live",
         writeUrl: "http://127.0.0.1:3101",
-        batchWriteUrl: "http://127.0.0.1:3101",
         electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
         getAuthToken: async () => "token-user1",
         syncEnabled: true,
@@ -143,7 +137,6 @@ describe("perf-lab pglite loader", () => {
             syncedTable: "perf_items_000",
             overlayTable: "perf_items_000_overlay",
             journalTable: "perf_items_000_mutations",
-            readModel: "perf_items_000_read_model",
           },
         },
       } as any,
@@ -151,7 +144,6 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "live",
         writeUrl: "http://127.0.0.1:3101",
-        batchWriteUrl: "http://127.0.0.1:3101",
         electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
         getAuthToken: async () => "token-user1",
         syncEnabled: true,

@@ -63,7 +63,6 @@ type FailedMutationSample = {
 type ConnectionInput = {
   mode: PerfLabConnectionMode;
   writeUrl: string;
-  batchWriteUrl: string;
   electricUrl: string;
   authIdentity: DemoAuthIdentity;
   syncEnabled: boolean;
@@ -119,7 +118,6 @@ const defaultPresetKey =
 const defaultConnection: ConnectionInput = {
   mode: "live",
   writeUrl: connectionDefaults.liveWriteUrl,
-  batchWriteUrl: connectionDefaults.liveBatchWriteUrl,
   electricUrl: connectionDefaults.liveElectricUrl,
   authIdentity: "user1",
   syncEnabled: true,
@@ -493,7 +491,6 @@ export function App() {
         {
           mode: nextConnection.mode,
           writeUrl: nextConnection.writeUrl,
-          batchWriteUrl: nextConnection.batchWriteUrl,
           electricUrl: nextConnection.electricUrl,
           getAuthToken: async () => authToken,
           syncEnabled: nextConnection.syncEnabled,
@@ -716,13 +713,6 @@ export function App() {
                 onChange={(value) => updateConnection("writeUrl", value)}
                 disabled={connection.mode === "offline"}
                 placeholder={connectionDefaults.liveWriteUrl}
-              />
-              <TextField
-                label="Batch write URL"
-                value={connection.batchWriteUrl}
-                onChange={(value) => updateConnection("batchWriteUrl", value)}
-                disabled={connection.mode === "offline"}
-                placeholder={connectionDefaults.liveBatchWriteUrl}
               />
               <TextField
                 label="Electric URL"

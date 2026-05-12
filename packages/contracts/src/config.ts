@@ -19,19 +19,11 @@ export const shapeSpecSchema = z
   })
   .strict();
 
-export const serverRouteSpecSchema = z
-  .object({
-    basePath: z.string().trim().min(1),
-    allowBatch: z.boolean().default(false),
-  })
-  .strict();
-
 export const clientProjectionSpecSchema = z
   .object({
     syncedTable: z.string().trim().min(1),
     overlayTable: z.string().trim().min(1).optional(),
     journalTable: z.string().trim().min(1).optional(),
-    readModel: z.string().trim().min(1),
     omitColumns: z.array(z.string().trim().min(1)).optional(),
     localPrimaryKey: primaryKeySpecSchema.optional(),
   })
@@ -97,7 +89,6 @@ export const tableSpecInputSchema = z
     shape: shapeSpecSchema.optional(),
     clientProjection: clientProjectionSpecSchema.optional(),
     governance: tableGovernanceSpecSchema.optional(),
-    routes: serverRouteSpecSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -173,7 +164,6 @@ export type ShapeSpecBase = z.infer<typeof shapeSpecSchema>;
 export interface ShapeSpec extends ShapeSpecBase {
   rowFilter?: RowFilterSpec;
 }
-export type ServerRouteSpec = z.infer<typeof serverRouteSpecSchema>;
 export type ClientProjectionSpec = z.infer<typeof clientProjectionSpecSchema>;
 export type DeferrableConstraintSpec = z.infer<typeof deferrableConstraintSpecSchema>;
 export type ManagedFieldApplyOn = z.infer<typeof managedFieldApplyOnSchema>;
@@ -183,17 +173,17 @@ export type TableGovernanceSpec = z.infer<typeof tableGovernanceSpecSchema>;
 export type TableSpecInput = z.infer<typeof tableSpecInputSchema>;
 export type SyncConfigInput = z.infer<typeof syncConfigSchema>;
 
-export interface TableSchemas<TCreate, TUpdate, TRecord> {
+export interface TableSchemas<TCreate, TUpdate, TRecord = unknown> {
   createSchema: z.ZodType<TCreate>;
   updateSchema: z.ZodType<TUpdate>;
-  recordSchema: z.ZodType<TRecord>;
+  recordSchema?: z.ZodType<TRecord>;
 }
 
 export interface TableAdapters {
   toEntityKey?: (record: Record<string, unknown>) => Record<string, string>;
 }
 
-export interface TableSpec<TCreate, TUpdate, TRecord> extends TableSpecInput {
+export interface TableSpec<TCreate, TUpdate, TRecord = unknown> extends TableSpecInput {
   schemas: TableSchemas<TCreate, TUpdate, TRecord>;
   adapters?: TableAdapters;
 }
@@ -233,8 +223,11 @@ export interface RowFilterSpec {
     /** Static UUID or a function that returns a UUID given runtime params. */
     sharedUserId: string | ((params: Record<string, unknown>) => string);
   };
-  /** Escape hatch: returns a raw SQL fragment ANDed with other filters. */
-  customWhere?: (claims: Record<string, unknown>, params?: Record<string, unknown>) => string;
+  /**
+   * Escape hatch: returns a raw SQL fragment ANDed with other filters.
+   * Return `null` to bypass all filters (e.g. admin access).
+   */
+  customWhere?: (claims: Record<string, unknown>, params?: Record<string, unknown>) => string | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
 }

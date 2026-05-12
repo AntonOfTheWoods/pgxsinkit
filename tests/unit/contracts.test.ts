@@ -1,4 +1,4 @@
-import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
 import {
   defineSyncRegistry,
@@ -9,18 +9,14 @@ import {
   syncConfigSchema,
 } from "@pgxsinkit/contracts";
 import {
-  authorRecordSchema,
-  authorTableSpec,
   buildDemoSyncConfig,
   buildSyntheticRegistry,
   buildSyntheticRegistrySchemaName,
   createTodoInputSchema,
-  todoRecordSchema,
-  todoTableSpec,
   updateTodoInputSchema,
 } from "@pgxsinkit/schema";
 
-const projectedContractsTable = pgTable("projected_contracts_items", {
+const makeProjectedContractsColumns = () => ({
   id: uuid("id").primaryKey(),
   ownerId: uuid("owner_id").notNull(),
   modifiedBy: uuid("modified_by"),
@@ -29,17 +25,6 @@ const projectedContractsTable = pgTable("projected_contracts_items", {
 });
 
 describe("todo contracts", () => {
-  it("parses a serialized author row", () => {
-    const result = authorRecordSchema.parse({
-      id: "01963227-d4c7-72db-b858-f89f6af8f920",
-      name: "Ada Lovelace",
-      createdAtUs: "1713088800000000",
-      updatedAtUs: "1713088800000000",
-    });
-
-    expect(result.name).toBe("Ada Lovelace");
-  });
-
   it("accepts a valid create payload", () => {
     const result = createTodoInputSchema.parse({
       id: "01963227-d4c7-72db-b858-f89f6af8f999",
@@ -70,21 +55,6 @@ describe("todo contracts", () => {
     expect(() => updateTodoInputSchema.parse({})).toThrow(/At least one field must be provided/);
   });
 
-  it("parses a serialized todo row", () => {
-    const result = todoRecordSchema.parse({
-      id: "01963227-d4c7-72db-b858-f89f6af8f999",
-      title: "Validate shape sync",
-      description: null,
-      authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
-      status: "done",
-      priority: "low",
-      createdAtUs: "1713088800000000",
-      updatedAtUs: "1713088800000000",
-    });
-
-    expect(result.status).toBe("done");
-  });
-
   it("accepts a generic sync config", () => {
     const result = syncConfigSchema.parse({
       electricUrl: "http://localhost:3000/v1/shape",
@@ -100,15 +70,10 @@ describe("todo contracts", () => {
             tableName: "projects",
             shapeKey: "projects-shape",
           },
-          routes: {
-            basePath: "/api/projects",
-            allowBatch: true,
-          },
           clientProjection: {
             syncedTable: "projects",
             overlayTable: "projects_overlay",
             journalTable: "projects_mutations",
-            readModel: "projects_read_model",
             omitColumns: ["ownerId"],
           },
           governance: {
@@ -161,7 +126,6 @@ describe("todo contracts", () => {
             syncedTable: "projects",
             overlayTable: "projects_overlay",
             journalTable: "projects_mutations",
-            readModel: "projects_read_model",
           },
         },
       },
@@ -208,9 +172,6 @@ describe("todo contracts", () => {
   });
 
   it("exports a shared todo table spec and demo sync config", () => {
-    expect(authorTableSpec.routes?.basePath).toBe("/api/authors");
-    expect(todoTableSpec.routes?.basePath).toBe("/api/todos");
-
     const result = syncConfigSchema.parse(buildDemoSyncConfig("http://localhost:3000/v1/shape"));
 
     expect(result.tables.authors?.clientProjection?.syncedTable).toBe("authors");
@@ -232,10 +193,6 @@ describe("todo contracts", () => {
               tableName: "projects",
               shapeKey: "projects-shape",
             },
-            routes: {
-              basePath: "/api/projects",
-              allowBatch: true,
-            },
           },
         },
       }),
@@ -245,16 +202,14 @@ describe("todo contracts", () => {
   it("rejects omitting primary-key columns from the client projection", () => {
     expect(() =>
       defineSyncTable({
-        table: projectedContractsTable,
+        tableName: "projected_contracts_items",
+        makeColumns: makeProjectedContractsColumns,
         mode: "readwrite",
-        primaryKey: { columns: ["id"] },
         shape: { tableName: "projected_contracts_items", shapeKey: "projected_contracts_items" },
-        routes: { basePath: "/api/projected-contracts-items", allowBatch: false },
         clientProjection: {
           syncedTable: "projected_contracts_items",
           overlayTable: "projected_contracts_items_overlay",
           journalTable: "projected_contracts_items_mutations",
-          readModel: "projected_contracts_items_read_model",
           omitColumns: ["id"],
         },
       }),
@@ -264,16 +219,14 @@ describe("todo contracts", () => {
   it("rejects omitting required unmanaged create columns from writable tables", () => {
     expect(() =>
       defineSyncTable({
-        table: projectedContractsTable,
+        tableName: "projected_contracts_items",
+        makeColumns: makeProjectedContractsColumns,
         mode: "readwrite",
-        primaryKey: { columns: ["id"] },
         shape: { tableName: "projected_contracts_items", shapeKey: "projected_contracts_items" },
-        routes: { basePath: "/api/projected-contracts-items", allowBatch: false },
         clientProjection: {
           syncedTable: "projected_contracts_items",
           overlayTable: "projected_contracts_items_overlay",
           journalTable: "projected_contracts_items_mutations",
-          readModel: "projected_contracts_items_read_model",
           omitColumns: ["title"],
         },
       }),

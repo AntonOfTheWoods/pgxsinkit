@@ -1,13 +1,20 @@
-import type { AnyPgTable } from "drizzle-orm/pg-core";
+import { getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import {
   getLocalSyncPrimaryKeyColumns,
   getSyncRegistrySchema,
   getProjectedColumns,
-  type ClientProjectionSpec,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
+
+/** Internal fully-qualified projection used within schema generation. */
+interface ResolvedProjection {
+  syncedTable: string;
+  overlayTable?: string;
+  journalTable?: string;
+  readModel: string;
+}
 
 type TableColumn = ReturnType<typeof getProjectedColumns<AnyPgTable>>[number]["column"];
 
@@ -160,7 +167,7 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
 
 function buildReadModelViewSql(
   entry: SyncTableEntry<AnyPgTable>,
-  projection: ClientProjectionSpec,
+  projection: ResolvedProjection,
   columnNames: string[],
 ) {
   if (!projection.overlayTable) {
@@ -408,14 +415,15 @@ function buildPrimaryKeyMatch(primaryKeyColumns: string[]) {
   return primaryKeyColumns.map((column) => `o.${column} = t.${column}`).join(" AND ");
 }
 
-function getClientProjection(entry: SyncTableEntry, tableKey: string, localSchema: string): ClientProjectionSpec {
+function getClientProjection(entry: SyncTableEntry, tableKey: string, localSchema: string): ResolvedProjection {
   const projection = baseProjection(entry, tableKey);
+  const readModelName = entry.view != null ? getViewConfig(entry.view).name : projection.syncedTable;
 
   return {
     syncedTable: qualifyIdentifier(localSchema, projection.syncedTable),
     ...(projection.overlayTable ? { overlayTable: qualifyIdentifier(localSchema, projection.overlayTable) } : {}),
     ...(projection.journalTable ? { journalTable: qualifyIdentifier(localSchema, projection.journalTable) } : {}),
-    readModel: qualifyIdentifier(localSchema, projection.readModel),
+    readModel: qualifyIdentifier(localSchema, readModelName),
   };
 }
 

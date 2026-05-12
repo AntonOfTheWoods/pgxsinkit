@@ -9,7 +9,6 @@ export type PerfLabConnectionMode = "live" | "offline";
 export interface PerfLabConnectionOptions {
   mode: PerfLabConnectionMode;
   writeUrl: string;
-  batchWriteUrl: string;
   electricUrl: string;
   getAuthToken?: () => Promise<string | null | undefined>;
   syncEnabled?: boolean;
@@ -17,10 +16,8 @@ export interface PerfLabConnectionOptions {
 
 export interface PerfLabConnectionDefaults {
   liveWriteUrl: string;
-  liveBatchWriteUrl: string;
   liveElectricUrl: string;
   offlineWriteUrl: string;
-  offlineBatchWriteUrl: string;
   offlineElectricUrl: string;
 }
 
@@ -31,18 +28,15 @@ export interface LoadPerfClientOptions {
 
 const offlineConnectionDefaults = {
   offlineWriteUrl: "http://127.0.0.1:1",
-  offlineBatchWriteUrl: "http://127.0.0.1:1",
   offlineElectricUrl: "http://127.0.0.1:1/v1/shape",
 } as const;
 
 export function getPerfLabConnectionDefaults(): PerfLabConnectionDefaults {
   const liveWriteUrl = import.meta.env.VITE_WRITE_API_URL ?? "http://127.0.0.1:3101";
-  const liveBatchWriteUrl = import.meta.env.VITE_BATCH_WRITE_URL ?? liveWriteUrl;
   const liveElectricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${liveWriteUrl}/v1/electric-proxy`;
 
   return {
     liveWriteUrl,
-    liveBatchWriteUrl,
     liveElectricUrl,
     ...offlineConnectionDefaults,
   };
@@ -59,7 +53,6 @@ export async function loadPerfClient(
     registry,
     electricUrl: resolved.electricUrl,
     writeUrl: resolved.writeUrl,
-    batchWriteUrl: resolved.batchWriteUrl,
     ...(resolved.getAuthToken ? { getAuthToken: resolved.getAuthToken } : {}),
     syncEnabled: resolved.syncEnabled,
     ...(resolved.syncEnabled ? { resetSubscriptionKeys: getRegistryShapeKeys(registry) } : {}),
@@ -86,7 +79,6 @@ async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOpti
   if (connectionOptions.mode === "offline") {
     return {
       writeUrl: offlineConnectionDefaults.offlineWriteUrl,
-      batchWriteUrl: offlineConnectionDefaults.offlineBatchWriteUrl,
       electricUrl: offlineConnectionDefaults.offlineElectricUrl,
       getAuthToken: undefined,
       syncEnabled: false,
@@ -94,7 +86,6 @@ async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOpti
   }
 
   const writeUrl = connectionOptions.writeUrl.trim();
-  const batchWriteUrl = connectionOptions.batchWriteUrl.trim() || writeUrl;
   const electricUrl = connectionOptions.electricUrl.trim() || `${writeUrl}/v1/electric-proxy`;
   const getAuthToken = connectionOptions.getAuthToken
     ? async () => {
@@ -106,7 +97,6 @@ async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOpti
 
   return {
     writeUrl,
-    batchWriteUrl,
     electricUrl,
     getAuthToken,
     syncEnabled: Boolean(connectionOptions.syncEnabled && initialAuthToken),

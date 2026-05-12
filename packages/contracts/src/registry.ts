@@ -1,4 +1,15 @@
-import { getTableConfig, type AnyPgTable, type PgView } from "drizzle-orm/pg-core";
+import type { ColumnBuilderBase } from "drizzle-orm";
+import {
+  bigint,
+  getTableConfig,
+  pgTable,
+  pgView,
+  type AnyPgTable,
+  type PgPolicy,
+  type PgView,
+} from "drizzle-orm/pg-core";
+import type { pgSchema } from "drizzle-orm/pg-core";
+import { varchar } from "drizzle-orm/pg-core";
 import type { ExtractTablesWithRelations } from "drizzle-orm/relations";
 import { getColumns } from "drizzle-orm/utils";
 
@@ -9,13 +20,14 @@ import type {
   ManagedFieldSpec,
   ManagedFieldStrategy,
   PrimaryKeySpec,
-  ServerRouteSpec,
   ShapeSpec,
   TableGovernanceSpec as TableGovernanceSpecBase,
   TableAdapters,
   TableMode,
   TableSchemas,
 } from "./config";
+
+type PgSchemaType = ReturnType<typeof pgSchema>;
 
 // PgView is generic; this alias covers any pg view instance.
 // biome-ignore lint: intentional any
@@ -74,12 +86,64 @@ export interface SyncTableEntry<
   mode: TableMode;
   primaryKey: PrimaryKeySpec;
   shape?: ShapeSpec;
-  routes?: ServerRouteSpec;
   clientProjection?: ClientProjectionSpecForTable<TTable>;
   governance?: TableGovernanceSpecForTable<TTable>;
   schemas?: TableSchemas<TCreate, TUpdate, TRecord>;
   adapters?: TableAdapters;
 }
+
+/** Column property key names from a `makeColumns` factory function. */
+type ColumnKeys<TColumns extends Record<string, ColumnBuilderBase>> = keyof TColumns & string;
+
+/** Governance spec for `defineSyncTable` — columns are typed from `makeColumns`. */
+export type SyncTableInputGovernance<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
+  TableGovernanceSpecBase,
+  "deferrableConstraints" | "managedFields"
+> & {
+  deferrableConstraints?: Array<Omit<DeferrableConstraintSpec, "columns"> & { columns: Array<ColumnKeys<TColumns>> }>;
+  managedFields?: Array<Omit<ManagedFieldSpec, "column"> & { column: ColumnKeys<TColumns> }>;
+};
+
+/** Projection spec for `defineSyncTable` — omitColumns typed from `makeColumns`. */
+export type SyncTableInputProjection<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
+  ClientProjectionSpec,
+  "omitColumns"
+> & {
+  omitColumns?: Array<ColumnKeys<TColumns>>;
+};
+
+/**
+ * Input for `defineSyncTable`. Supply `tableName + makeColumns` — the Drizzle table
+ * (and, for `readwrite` mode, the read-model view) are created internally.
+ *
+ * Access the built objects via `.table` and `.view` on the returned entry.
+ */
+export type SyncTableInput<
+  TName extends string,
+  TColumns extends Record<string, ColumnBuilderBase>,
+  TCreate = unknown,
+  TUpdate = unknown,
+  TRecord = unknown,
+> = {
+  tableName: TName;
+  makeColumns: () => TColumns;
+  /** RLS policies (or other table extras) attached to the Postgres table. */
+  policies?: PgPolicy[];
+  /** Place the table in this schema (e.g. for perf-lab schemed tables). */
+  schema?: PgSchemaType;
+  /** @default "readonly" */
+  mode?: TableMode;
+  /**
+   * Primary key column names. Defaults to `["id"]`.
+   * Use an array with multiple entries for composite keys.
+   */
+  primaryKey?: string[];
+  shape?: ShapeSpec;
+  clientProjection?: SyncTableInputProjection<TColumns>;
+  governance?: SyncTableInputGovernance<TColumns>;
+  schemas?: TableSchemas<TCreate, TUpdate, TRecord>;
+  adapters?: TableAdapters;
+};
 
 export type SyncTableRegistry = Record<string, SyncTableEntry>;
 
@@ -114,20 +178,59 @@ export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey exten
   TRegistry[TKey] extends SyncTableEntry<any, any, infer TUpdate, any> ? TUpdate : never;
 
 export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<any, any, any, infer TRecord> ? TRecord : never;
+  TRegistry[TKey] extends SyncTableEntry<infer TTable, any, any, any>
+    ? TTable extends { readonly $inferSelect: infer TSelect }
+      ? TSelect
+      : never
+    : never;
 
-export function defineSyncTable<const TTable extends AnyPgTable, TCreate, TUpdate, TRecord>(
-  entry: SyncTableEntry<TTable, TCreate, TUpdate, TRecord>,
-) {
-  validateSyncTableEntry(entry);
+/**
+ * Defines a sync table entry. Provide `tableName` and `makeColumns` — the Drizzle
+ * `pgTable` (and, for `readwrite` mode, the `_read_model` view) are created here.
+ *
+ * Access the built objects via `.table` and `.view` on the returned entry.
+ */
+export function defineSyncTable<
+  const TName extends string,
+  const TColumns extends Record<string, ColumnBuilderBase>,
+  TCreate = unknown,
+  TUpdate = unknown,
+  TRecord = unknown,
+>(input: SyncTableInput<TName, TColumns, TCreate, TUpdate, TRecord>) {
+  const { tableName, makeColumns, policies, schema, mode, primaryKey, governance, clientProjection, ...otherRest } =
+    input;
+
+  const resolvedMode: TableMode = mode ?? "readonly";
+  const resolvedPrimaryKey: PrimaryKeySpec = { columns: primaryKey ?? ["id"] };
+
+  // biome-ignore lint: intentional any for policy/extras passthrough
+  const extrasFn = policies ? () => policies as any : undefined;
+  const table = schema
+    ? schema.table(tableName, makeColumns(), extrasFn as any)
+    : pgTable(tableName, makeColumns(), extrasFn as any);
+
+  const view =
+    resolvedMode === "readwrite"
+      ? pgView(`${tableName}_read_model`, {
+          ...makeColumns(),
+          overlay_kind: varchar("overlay_kind", { length: 24 }).notNull(),
+          local_updated_at_us: bigint("local_updated_at_us", { mode: "bigint" }).notNull(),
+        }).existing()
+      : undefined;
+
+  // biome-ignore lint: governance and clientProjection use string column-keys at input time;
+  // SyncTableEntry expects column objects — runtime correctness is ensured by validateSyncTableEntry
+  const entry = {
+    ...otherRest,
+    mode: resolvedMode,
+    primaryKey: resolvedPrimaryKey,
+    ...(governance != null ? { governance: governance as any } : {}),
+    ...(clientProjection != null ? { clientProjection: clientProjection as any } : {}),
+    table,
+    ...(view != null ? { view } : {}),
+  };
+  validateSyncTableEntry(entry as unknown as SyncTableEntry<AnyPgTable>);
   return entry;
-}
-
-export function defineTableGovernance<const TTable extends AnyPgTable>(
-  _table: TTable,
-  governance: TableGovernanceSpecForTable<TTable>,
-) {
-  return governance;
 }
 
 export function defineSyncRegistry<
@@ -268,6 +371,7 @@ function getRegistryEntries<TRegistry extends SyncTableRegistry>(registry: TRegi
 
 function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
   const tableName = getTableConfig(entry.table).name;
+
   const columns = Object.entries(getColumns(entry.table)).map(([propertyKey, column]) => ({
     propertyKey,
     columnName: column.name,

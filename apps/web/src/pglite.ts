@@ -27,7 +27,6 @@ const sharedDatabases = new Map<string, SharedDatabaseEntry>();
 
 export async function loadPGlite(options?: LoadPGliteOptions): Promise<LoadedDatabase> {
   const writeUrl = import.meta.env.VITE_WRITE_API_URL ?? "http://localhost:3001";
-  const batchWriteUrl = import.meta.env.VITE_BATCH_WRITE_URL ?? writeUrl;
   const electricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${writeUrl}/v1/electric-proxy`;
   const getAuthToken = options?.getAuthToken
     ? async () => {
@@ -46,7 +45,6 @@ export async function loadPGlite(options?: LoadPGliteOptions): Promise<LoadedDat
         registry: demoSyncRegistry,
         electricUrl,
         writeUrl,
-        batchWriteUrl,
         ...(getAuthToken ? { getAuthToken } : {}),
         syncEnabled: initialAuthToken !== undefined,
         dataDir,

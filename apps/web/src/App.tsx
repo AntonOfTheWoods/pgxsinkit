@@ -6,16 +6,13 @@ import { v7 as uuidv7 } from "uuid";
 import type { MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 import {
-  authorListSchema,
   authorsView,
   createAuthorInputSchema,
   createTodoInputSchema,
   demoAuthTokenByIdentity,
-  todoListSchema,
   todosView,
   type demoSyncRegistry,
   type DemoAuthIdentity,
-  type TodoRecord,
 } from "@pgxsinkit/schema";
 
 import { loadPGlite, type AppClient } from "./pglite";
@@ -168,9 +165,8 @@ function TodoApp({
           priority: todosView.priority,
           overlayKind: todosView.overlay_kind,
           localUpdatedAtUs: sql<string>`${todosView.local_updated_at_us}::text`,
-          // createdAtUs: sql<string>`${todosView.createdAtUs}::text`,
           createdAtUs: todosView.createdAtUs,
-          updatedAtUs: sql<string>`${todosView.updatedAtUs}::text`,
+          updatedAtUs: todosView.updatedAtUs,
         })
         .from(todosView)
         .orderBy(todosView.createdAtUs),
@@ -182,8 +178,8 @@ function TodoApp({
         .select({
           id: authorsView.id,
           name: authorsView.name,
-          createdAtUs: sql<string>`${authorsView.createdAtUs}::text`,
-          updatedAtUs: sql<string>`${authorsView.updatedAtUs}::text`,
+          createdAtUs: authorsView.createdAtUs,
+          updatedAtUs: authorsView.updatedAtUs,
         })
         .from(authorsView)
         .orderBy(authorsView.createdAtUs),
@@ -224,13 +220,10 @@ function TodoApp({
     };
   }, [client]);
 
-  const authors = useMemo(() => authorListSchema.parse(rawAuthorRows), [rawAuthorRows]);
+  const authors = rawAuthorRows;
 
   const todos = useMemo(
-    () =>
-      todoListSchema.parse(
-        rawTodoRows.map(({ overlayKind: _overlayKind, localUpdatedAtUs: _localUpdatedAtUs, ...todo }) => todo),
-      ),
+    () => rawTodoRows.map(({ overlayKind: _overlayKind, localUpdatedAtUs: _localUpdatedAtUs, ...todo }) => todo),
     [rawTodoRows],
   );
 
@@ -336,12 +329,12 @@ function TodoApp({
     }
   }
 
-  function handleToggleStatus(todo: TodoRecord) {
+  function handleToggleStatus(todo: (typeof todos)[number]) {
     const nextStatus = todo.status === "done" ? "todo" : "done";
     void processQueuedWork(() => client.tables.todos.update({ id: todo.id }, { status: nextStatus }));
   }
 
-  function handleDelete(todo: TodoRecord) {
+  function handleDelete(todo: (typeof todos)[number]) {
     void processQueuedWork(() => client.tables.todos.delete({ id: todo.id }));
   }
 

@@ -107,14 +107,14 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
   const backend = options.backend ?? "bulk-plpgsql-artifact";
 
   if (ownsApp) {
-    app.use(
-      "/api/*",
-      cors({
-        origin: options.allowedOrigins ?? defaultAllowedOrigins,
-        allowMethods: ["GET", "POST", "OPTIONS"],
-        allowHeaders: ["Content-Type", "Authorization"],
-      }),
-    );
+    const corsMiddleware = cors({
+      origin: options.allowedOrigins ?? defaultAllowedOrigins,
+      allowMethods: ["GET", "POST", "OPTIONS"],
+      allowHeaders: ["Content-Type", "Authorization"],
+    });
+
+    app.use("/api/*", corsMiddleware);
+    app.use("/mutations", corsMiddleware);
 
     app.onError((error, context) => {
       status.phase = "degraded";

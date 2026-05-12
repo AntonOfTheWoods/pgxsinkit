@@ -2,11 +2,10 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 
 import { demoSyncRegistry } from "@pgxsinkit/schema";
-import { createSyncServer } from "@pgxsinkit/server";
+import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
 
 import { composeCredentials } from "../../../infra/compose-credentials";
 import { parseDemoAuthClaimsFromRequest } from "./demo-auth";
-import { proxyElectricShapeRequest } from "./electric-proxy";
 
 const databaseUrl = process.env.DATABASE_URL ?? composeCredentials.DEFAULT_DATABASE_URL;
 const electricUrl = process.env.ELECTRIC_URL ?? "http://localhost:3000/v1/shape";
@@ -47,7 +46,10 @@ app.use(
 app.get("/v1/electric-proxy", async (context) => {
   try {
     const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
-    return await proxyElectricShapeRequest(context.req.raw, claims, { electricUrl });
+    return await proxyElectricShapeRequest(context.req.raw, claims as Record<string, unknown> | null, {
+      registry: demoSyncRegistry,
+      electricUrl,
+    });
   } catch (error) {
     return context.json(
       {

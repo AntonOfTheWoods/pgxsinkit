@@ -438,7 +438,6 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
         registry,
         electricUrl: env.electricUrl,
         writeUrl,
-        batchWriteUrl: writeUrl,
         getAuthToken: async () => assignment.token,
         dataDir,
       });
@@ -956,7 +955,6 @@ export async function runConcurrentMixedLoadWorker(
     registry,
     electricUrl: env.electricUrl,
     writeUrl,
-    batchWriteUrl: writeUrl,
     getAuthToken: async () => assignment.token,
     dataDir,
   });

@@ -1,91 +1,39 @@
-import { defineSyncRegistry, defineSyncTable, defineTableGovernance } from "@pgxsinkit/contracts";
+import { defineSyncRegistry } from "@pgxsinkit/contracts";
 
 import { authorTableSpec } from "./author-config";
-import { authorsTable, authorsView, todosTable, todosView } from "./schema";
+import { authorsSyncEntry, todosSyncEntry } from "./schema";
 import { todoTableSpec } from "./todo-config";
 
+function escapeSqlLiteral(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function isAdmin(claims: Record<string, unknown>): boolean {
+  const meta = claims.app_metadata;
+  if (typeof meta !== "object" || meta === null) return false;
+  const roles = (meta as Record<string, unknown>).roles;
+  return Array.isArray(roles) && roles.includes("admin");
+}
+
+function ownershipRowFilter(claims: Record<string, unknown>): string | null {
+  if (isAdmin(claims)) {
+    return null;
+  }
+
+  if (typeof claims.sub === "string" && claims.sub) {
+    return `"owner_id" = '${escapeSqlLiteral(claims.sub)}'`;
+  }
+
+  return "1 = 0";
+}
+
 export const demoSyncRegistry = defineSyncRegistry({
-  authors: defineSyncTable({
-    table: authorsTable,
-    view: authorsView,
-    mode: authorTableSpec.mode,
-    primaryKey: authorTableSpec.primaryKey,
-    shape: {
-      ...authorTableSpec.shape,
-      rowFilter: { ownership: { column: "owner_id" } },
-    },
-    routes: authorTableSpec.routes,
-    clientProjection: authorTableSpec.clientProjection,
-    governance: defineTableGovernance(authorsTable, {
-      managedFields: [
-        {
-          column: "ownerId",
-          applyOn: ["create"],
-          strategy: "authUid",
-        },
-        {
-          column: "modifiedBy",
-          applyOn: ["create", "update"],
-          strategy: "authUid",
-        },
-        {
-          column: "createdAtUs",
-          applyOn: ["create"],
-          strategy: "nowMicroseconds",
-        },
-        {
-          column: "updatedAtUs",
-          applyOn: ["create", "update"],
-          strategy: "nowMicroseconds",
-        },
-      ],
-    }),
-    schemas: authorTableSpec.schemas,
-    adapters: authorTableSpec.adapters,
-  }),
-  todos: defineSyncTable({
-    table: todosTable,
-    view: todosView,
-    mode: todoTableSpec.mode,
-    primaryKey: todoTableSpec.primaryKey,
-    shape: {
-      ...todoTableSpec.shape,
-      rowFilter: { ownership: { column: "owner_id" } },
-    },
-    routes: todoTableSpec.routes,
-    clientProjection: todoTableSpec.clientProjection,
-    governance: defineTableGovernance(todosTable, {
-      deferrableConstraints: [
-        {
-          constraintName: "todos_author_id_authors_id_fkey",
-          columns: ["authorId"],
-          initiallyDeferred: false,
-        },
-      ],
-      managedFields: [
-        {
-          column: "ownerId",
-          applyOn: ["create"],
-          strategy: "authUid",
-        },
-        {
-          column: "modifiedBy",
-          applyOn: ["create", "update"],
-          strategy: "authUid",
-        },
-        {
-          column: "createdAtUs",
-          applyOn: ["create"],
-          strategy: "nowMicroseconds",
-        },
-        {
-          column: "updatedAtUs",
-          applyOn: ["create", "update"],
-          strategy: "nowMicroseconds",
-        },
-      ],
-    }),
-    schemas: todoTableSpec.schemas,
-    adapters: todoTableSpec.adapters,
-  }),
+  authors: {
+    ...authorsSyncEntry,
+    shape: { ...authorTableSpec.shape, rowFilter: { customWhere: ownershipRowFilter } },
+  },
+  todos: {
+    ...todosSyncEntry,
+    shape: { ...todoTableSpec.shape, rowFilter: { customWhere: ownershipRowFilter } },
+  },
 });
