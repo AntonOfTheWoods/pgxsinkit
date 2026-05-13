@@ -14,6 +14,7 @@ const publishOrder = [
   "packages/sync-engine",
   "packages/client",
   "packages/server",
+  "packages/react",
 ] as const;
 
 interface PublishOptions {

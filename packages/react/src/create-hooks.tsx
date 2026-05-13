@@ -27,7 +27,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
 
   // ─── Provider ────────────────────────────────────────────────────────────
 
-  function SyncClientProvider({ client, children }: { client: SyncClient<TRegistry>; children: ReactNode }) {
+  function SyncClientProvider({ client, children }: { client: SyncClient<TRegistry> | null; children: ReactNode }) {
     return <SyncClientContext.Provider value={client}>{children}</SyncClientContext.Provider>;
   }
 

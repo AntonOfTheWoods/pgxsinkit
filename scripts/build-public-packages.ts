@@ -52,6 +52,10 @@ const publicPackages = [
     packageDir: "packages/server",
     entrypoints: ["src/index.ts"],
   },
+  {
+    packageDir: "packages/react",
+    entrypoints: ["src/index.ts"],
+  },
 ] as const;
 
 async function buildPackage(packageDir: string, entrypoints: readonly string[]): Promise<void> {

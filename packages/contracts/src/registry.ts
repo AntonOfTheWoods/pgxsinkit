@@ -185,6 +185,18 @@ export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends ke
     : never;
 
 /**
+ * Filters a columns object, omitting keys in `omitSet`, while preserving TypeScript column types.
+ * When `omitSet` is empty the original object is returned unchanged (no copy, no type loss).
+ */
+function viewColumnsForProjection<TColumns extends Record<string, ColumnBuilderBase>>(
+  columns: TColumns,
+  omitSet: Set<string>,
+): TColumns {
+  if (omitSet.size === 0) return columns;
+  return Object.fromEntries(Object.entries(columns).filter(([key]) => !omitSet.has(key))) as TColumns;
+}
+
+/**
  * Defines a sync table entry. Provide `tableName` and `makeColumns` — the Drizzle
  * `pgTable` (and, for `readwrite` mode, the `_read_model` view) are created here.
  *
@@ -209,10 +221,12 @@ export function defineSyncTable<
     ? schema.table(tableName, makeColumns(), extrasFn as any)
     : pgTable(tableName, makeColumns(), extrasFn as any);
 
+  const omitSet = new Set<string>(clientProjection?.omitColumns ?? []);
+  const viewColumns = viewColumnsForProjection(makeColumns(), omitSet);
   const view =
     resolvedMode === "readwrite"
       ? pgView(`${tableName}_read_model`, {
-          ...makeColumns(),
+          ...viewColumns,
           overlay_kind: varchar("overlay_kind", { length: 24 }).notNull(),
           local_updated_at_us: bigint("local_updated_at_us", { mode: "bigint" }).notNull(),
         }).existing()
