@@ -76,6 +76,12 @@ export type TableGovernanceSpecForTable<TTable extends AnyPgTable> = Omit<
   managedFields?: Array<ManagedFieldSpecForTable<TTable>>;
 };
 
+declare const syncTableInputGovernanceSymbol: unique symbol;
+
+type SyncTableInputGovernanceMarker<TGovernance> = {
+  [syncTableInputGovernanceSymbol]?: TGovernance;
+};
+
 export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTable extends AnyPgTable = TTable> {
   table: TTable;
   /**
@@ -178,14 +184,36 @@ export type RegistryRelations<TRegistry extends SyncTableRegistry> = ExtractTabl
 
 export type SyncTableName<TRegistry extends SyncTableRegistry> = keyof TRegistry & string;
 
-export type SyncTableCreateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<any, infer TLocalTable extends AnyPgTable>
-    ? InferInsertModel<TLocalTable>
+type GovernanceShapeForEntry<TEntry> =
+  TEntry extends SyncTableInputGovernanceMarker<infer TGovernance>
+    ? TGovernance
+    : TEntry extends { governance?: infer TGovernance }
+      ? TGovernance
+      : never;
+
+type ManagedFieldColumnKeysForOperation<TEntry, TOperation extends ManagedFieldApplyOn> =
+  GovernanceShapeForEntry<TEntry> extends {
+    managedFields?: ReadonlyArray<infer TField>;
+  }
+    ? TField extends {
+        column: infer TColumn extends string;
+        applyOn: ReadonlyArray<ManagedFieldApplyOn>;
+      }
+      ? TOperation extends TField["applyOn"][number]
+        ? TColumn
+        : never
+      : never
     : never;
 
-export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> = Partial<
-  SyncTableCreateInput<TRegistry, TKey>
->;
+export type SyncTableCreateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
+  TRegistry[TKey] extends SyncTableEntry<any, infer TLocalTable extends AnyPgTable>
+    ? Omit<InferInsertModel<TLocalTable>, ManagedFieldColumnKeysForOperation<TRegistry[TKey], "create">>
+    : never;
+
+export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
+  TRegistry[TKey] extends SyncTableEntry<any, infer TLocalTable extends AnyPgTable>
+    ? Partial<Omit<InferInsertModel<TLocalTable>, ManagedFieldColumnKeysForOperation<TRegistry[TKey], "update">>>
+    : never;
 
 export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
   TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable, any> ? InferSelectModel<TTable> : never;
@@ -219,7 +247,8 @@ export function defineSyncTable<
   const TName extends string,
   const TColumns extends Record<string, ColumnBuilderBase>,
   const TOmittedColumns extends readonly ColumnKeys<TColumns>[] = [],
->(input: SyncTableInput<TName, TColumns, TOmittedColumns>) {
+  const TGovernance extends SyncTableInputGovernance<TColumns> | undefined = undefined,
+>(input: Omit<SyncTableInput<TName, TColumns, TOmittedColumns>, "governance"> & { governance?: TGovernance }) {
   const {
     tableName,
     makeColumns,
@@ -287,8 +316,6 @@ export function defineSyncTable<
         }).existing()
       : undefined;
 
-  // biome-ignore lint: governance and clientProjection use string column-keys at input time;
-  // SyncTableEntry expects column objects — runtime correctness is ensured by validateSyncTableEntry
   const entry = {
     ...otherRest,
     mode: resolvedMode,
@@ -301,7 +328,7 @@ export function defineSyncTable<
     ...(view != null ? { view } : {}),
   };
   validateSyncTableEntry(entry as unknown as SyncTableEntry<AnyPgTable>);
-  return entry;
+  return entry as typeof entry & SyncTableInputGovernanceMarker<TGovernance>;
 }
 
 export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any> }>(

@@ -1,4 +1,4 @@
-import { uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { createSyncClient } from "@pgxsinkit/client";
 import {
@@ -28,6 +28,25 @@ const projectedRegistry = defineSyncRegistry({
   }),
 });
 
+const locallyManagedRegistry = defineSyncRegistry({
+  locallyManagedItems: defineSyncTable({
+    tableName: "locally_managed_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+      createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
+    mode: "readwrite",
+    governance: {
+      managedFields: [
+        { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
+        { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+      ],
+    },
+  }),
+});
+
 const validInput: SyncTableCreateInput<typeof demoSyncRegistry, "todos"> = {
   id: "01963227-d4c7-72db-b858-f89f6af8f999",
   title: "valid",
@@ -44,6 +63,15 @@ const validProjectedInput: SyncTableCreateInput<typeof projectedRegistry, "proje
 
 const validProjectedPatch: SyncTableUpdateInput<typeof projectedRegistry, "projectedItems"> = {
   title: "updated projected",
+};
+
+const validLocallyManagedInput: SyncTableCreateInput<typeof locallyManagedRegistry, "locallyManagedItems"> = {
+  id: "01963227-d4c7-72db-b858-f89f6af8f118",
+  title: "managed timestamps",
+};
+
+const validLocallyManagedPatch: SyncTableUpdateInput<typeof locallyManagedRegistry, "locallyManagedItems"> = {
+  title: "patched managed timestamps",
 };
 
 // @ts-expect-error registry keys must stay literal
@@ -72,6 +100,26 @@ const invalidProjectedPatch: SyncTableUpdateInput<typeof projectedRegistry, "pro
   ownerId: "01963227-d4c7-72db-b858-f89f6af8f115",
 };
 
+const invalidLocallyManagedInput: SyncTableCreateInput<typeof locallyManagedRegistry, "locallyManagedItems"> = {
+  id: "01963227-d4c7-72db-b858-f89f6af8f119",
+  title: "should fail",
+  // @ts-expect-error locally retained create-managed fields must still be omitted from create input
+  createdAtUs: 1n,
+};
+
+const invalidLocallyManagedCreateTimestamp: SyncTableCreateInput<typeof locallyManagedRegistry, "locallyManagedItems"> =
+  {
+    id: "01963227-d4c7-72db-b858-f89f6af8f120",
+    title: "should also fail",
+    // @ts-expect-error locally retained update-managed fields must still be omitted from create input
+    updatedAtUs: 2n,
+  };
+
+const invalidLocallyManagedPatch: SyncTableUpdateInput<typeof locallyManagedRegistry, "locallyManagedItems"> = {
+  // @ts-expect-error locally retained update-managed fields must be omitted from update input
+  updatedAtUs: 3n,
+};
+
 async function check() {
   const client = await createSyncClient({
     registry: demoSyncRegistry,
@@ -85,8 +133,15 @@ async function check() {
     writeUrl: "http://localhost:3001",
   });
 
+  const locallyManagedClient = await createSyncClient({
+    registry: locallyManagedRegistry,
+    electricUrl: "http://localhost:3000/v1/shape",
+    writeUrl: "http://localhost:3001",
+  });
+
   await client.tables.todos.create(validInput);
   await projectedClient.tables.projectedItems.create(validProjectedInput);
+  await locallyManagedClient.tables.locallyManagedItems.create(validLocallyManagedInput);
 
   // @ts-expect-error unknown table names must fail
   await client.tables.doesnt_exist.create({ id: "x" });
@@ -110,7 +165,12 @@ void badInput;
 void badProjectedInput;
 void invalidProjectedField;
 void invalidProjectedPatch;
+void invalidLocallyManagedInput;
+void invalidLocallyManagedCreateTimestamp;
+void invalidLocallyManagedPatch;
 void validInput;
+void validLocallyManagedInput;
+void validLocallyManagedPatch;
 void validProjectedInput;
 void validProjectedPatch;
 void check;
