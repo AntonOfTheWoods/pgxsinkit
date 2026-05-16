@@ -33,21 +33,17 @@ Canonical timestamps are stored as bigint microseconds since unix epoch and cros
 5. `bun run dev:api`
 6. `bun run dev:web`
 
-`bun run infra:up` now applies schema, the latest committed governance migration, and the committed sync function artifact.
+`bun run infra:up` now applies the latest committed infra/drizzle migration history, including governance and sync-function migrations.
 
 ## Provisioning workflow
 
-1. Edit schema sources in `packages/demo/src/schema.ts` and/or `packages/server/src/operations-log/schema.ts`.
+1. Edit schema sources in `packages/schema/src/schema.ts`, `packages/schema/src/integration.ts`, and/or `packages/server/src/operations-log/schema.ts`.
 2. Generate schema migrations: `bun run db:generate`.
 3. Generate governance SQL when needed: `bun run db:generate:governance`.
-   - If the generated SQL matches the latest `*_registry_governance` migration, the command is a no-op and does not create a new directory.
 4. Regenerate sync function artifact when registry/strategy changes: `bun run sync:function:generate`.
-5. Review generated SQL under `drizzle/`.
-6. Apply schema: `bun run db:push` (or `bun run infra:up`).
-7. Apply governance SQL when RLS/auth helper state is needed outside `infra:up`: `bun run db:apply:governance`.
-8. Apply and verify the sync function artifact when needed outside `infra:up`:
-   - `bun run db:apply:sync-function`
-   - `bun run db:verify:sync-function`
+5. Review generated SQL under `infra/drizzle/`.
+6. Apply the committed migration history: `bun run db:migrate` (or `bun run infra:up`).
+7. Commit governance and sync-function migrations alongside the related code changes; there is no separate apply step for them.
 
 See `docs/migrations.md` and `docs/function-artifacts.md`.
 

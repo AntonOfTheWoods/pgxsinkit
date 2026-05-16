@@ -5,11 +5,13 @@ This document defines the canonical path from Drizzle table definitions to provi
 ## Ownership model
 
 1. Drizzle schema files own relational structures (tables, columns, indexes):
-   - packages/demo/src/schema.ts
+   - packages/schema/src/schema.ts
+   - packages/schema/src/integration.ts
    - packages/server/src/operations-log/schema.ts
-2. Drizzle migration SQL in drizzle/ is the deployable history for schema changes.
-3. Sync support functions for bulk-plpgsql-artifact are SQL artifacts generated from the registry and committed to infra/sql/functions/.
-4. Runtime startup checks in the write API verify prerequisites, but are not the primary deployment mechanism for staging/prod.
+2. Drizzle migration SQL in infra/drizzle/ is the deployable history for schema changes.
+3. Governance-only PostgreSQL changes that Drizzle schema generation does not emit directly, such as DEFERRABLE constraints and conditional table grants, are generated from typed registry metadata and committed into the same infra/drizzle/ history.
+4. Sync support functions for bulk-plpgsql-artifact are SQL artifacts generated from the registry and committed to infra/sql/functions/.
+5. Runtime startup checks in the write API verify prerequisites, but are not the primary deployment mechanism for staging/prod.
 
 ## End-to-end workflow
 
@@ -18,31 +20,29 @@ This document defines the canonical path from Drizzle table definitions to provi
    - Command: bun run db:generate
 3. Generate governance migration SQL from typed registry metadata when needed.
    - Command: bun run db:generate:governance
-   - If the generated SQL matches the latest governance migration for the same name, the command skips creating a new migration directory.
-4. Review generated migration SQL under drizzle/.
+   - Use this when changing typed governance metadata such as DEFERRABLE constraints or conditional grants.
+4. Review generated migration SQL under infra/drizzle/.
 5. Regenerate sync function artifacts when registry or mutation strategy changes.
    - Command: bun run sync:function:generate
+   - This writes a custom sync-function migration into infra/drizzle/.
 6. Commit schema files, migration SQL, registry metadata changes, and function artifacts in one changeset.
 7. Apply migrations to target database.
-   - Dev/local: bun run db:push
-   - Staging/prod: apply the same migration set via your deployment runner.
-8. Apply governance SQL when auth helpers / RLS policies are required and not already provisioned by your environment bootstrap.
-   - Command: bun run db:apply:governance
-9. For bulk-plpgsql-artifact deployments, apply function artifact SQL.
-   - Command: bun run db:apply:sync-function
-10. Verify artifact function is installed before starting write-api in artifact mode.
-
-- Command: bun run db:verify:sync-function
-
-11. Start write-api with backend matching provisioned state.
+   - Dev/local: bun run db:migrate
+   - Staging/prod: apply the same committed infra/drizzle/ history via your deployment runner.
+8. Ensure the latest committed governance migration has been applied when governance metadata changed.
+   - This uses the same bun run db:migrate path because governance migrations are committed into infra/drizzle/.
+9. Ensure the latest committed sync-function migration has been applied when the artifact function changes.
+   - This also uses the same bun run db:migrate path because sync-function DDL is committed into infra/drizzle/.
+10. Start write-api with backend matching provisioned state.
     - Example: WRITE_API_BACKEND=bulk-plpgsql-artifact bun run dev:api
-12. If governance RLS is enabled for any registry table, provide validated JWT claims to createSyncServer via resolveAuthClaims.
-13. Expect POST /api/mutations to return 401 in artifact mode when RLS is enabled but claims are missing.
-14. Expect POST /api/mutations to return a clear 500 about missing auth helpers when governance SQL has not been applied.
-15. Run validation and integration checks.
+11. If governance RLS is enabled for any registry table, provide validated JWT claims to createSyncServer via resolveAuthClaims.
+12. Expect POST /api/mutations to return 401 in artifact mode when RLS is enabled but claims are missing.
+13. Expect POST /api/mutations to return a clear 500 about missing auth helpers when the environment bootstrap is incomplete.
+14. Run validation and integration checks.
     - Commands:
-      - bun run format-check
-      - bun run lint-check
+      - bun run validate
+      - bun run format:check
+      - bun run lint:check
       - bun run typecheck
       - bun run test:integration:contract
       - bun run test:integration:implementation
@@ -53,23 +53,23 @@ This document defines the canonical path from Drizzle table definitions to provi
    - owner_id and modified_by on authors and todos
    - user_id and index on operations_log
 2. Governance migration generation now emits:
-   - Supabase-compatible auth helper functions
-   - best-effort authenticated role bootstrap
-   - RLS policies for demo tables using owner or admin checks
-3. If role switching is not permitted in a target environment, auth helper SQL falls back gracefully and still sets JWT claim settings used by auth.uid()/auth.jwt().
+   - DEFERRABLE constraint alterations from typed registry governance metadata
+   - conditional grants for roles such as authenticated when table governance requires them
+3. Native RLS policies for demo and integration tables are emitted by the normal Drizzle schema migration path.
+4. Supabase-compatible auth helpers are expected to come from the environment bootstrap in local/dev and from the target platform in staging/prod.
 
 ## Environment rollout contract
 
 1. Dev:
-   - Use bun run infra:up to bootstrap infra, apply schema, and apply the latest committed governance migration.
+   - Use bun run infra:up to bootstrap infra and apply the latest committed infra/drizzle/ history.
    - Prefer bulk-plpgsql for iteration speed, or bulk-plpgsql-artifact when validating prod parity.
 2. Staging:
    - Apply the exact migration set intended for prod.
-   - Apply and verify sync function artifact if staging uses artifact backend.
+   - Ensure the latest committed sync-function migration is included if staging uses artifact backend.
    - Run contract integration suite before promotion.
 3. Prod:
    - Apply migrations first.
-   - Apply and verify sync function artifact.
+   - Ensure the latest committed sync-function migration is included.
    - Deploy write-api with WRITE_API_BACKEND=bulk-plpgsql-artifact.
    - Keep staging and prod backend modes aligned.
 
@@ -77,12 +77,13 @@ This document defines the canonical path from Drizzle table definitions to provi
 
 1. The artifact backend transaction path executes SET CONSTRAINTS ALL DEFERRED.
 2. This only affects constraints declared DEFERRABLE in PostgreSQL.
-3. The todos->authors FK DEFERRABLE migration is generated from typed registry governance metadata via `bun run db:generate:governance` and is included in the latest `drizzle/*_registry_governance/migration.sql`.
+3. DEFERRABLE FK alterations such as todos->authors are generated from typed registry governance metadata via bun run db:generate:governance and committed into infra/drizzle/\*\_registry_governance/migration.sql.
 
 ## Supabase-compatible auth helpers
 
-1. Governance generation emits auth helper SQL when any governance RLS config is enabled.
-2. The artifact batch function calls validates claims when p_rls_enabled=true.
+1. Governance migration generation does not currently emit auth helper SQL.
+2. The artifact batch function validates claims when p_rls_enabled=true.
+3. Missing auth.uid()/auth.jwt() behavior indicates incomplete environment bootstrap, not a missing separate governance-apply step.
 
 ## Proof coverage
 

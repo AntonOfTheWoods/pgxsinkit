@@ -43,7 +43,7 @@ Legacy backend/transport utilities are isolated under experimental exports (`@pg
 
 The write API also supports startup-time control of server-side operations logging via `WRITE_API_OPS_LOG_ENABLED`. This flag is read at process start and requires a restart to change.
 
-The `operations_log` table is a Drizzle-managed internal server table included in drizzle-kit migration generation. Startup no longer creates this table at runtime. Provision database schema with `bun run db:push` (or generated migrations) before starting the write API.
+The `operations_log` table is a Drizzle-managed internal server table included in drizzle-kit migration generation. Startup no longer creates this table at runtime. Provision database schema with committed migrations via `bun run db:migrate` before starting the write API.
 
 `WRITE_API_OPS_LOG_ENABLED` controls whether logging rows are written. It does not control table creation.
 

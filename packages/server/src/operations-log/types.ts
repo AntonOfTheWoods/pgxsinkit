@@ -1,4 +1,5 @@
 import type { SQLWrapper } from "drizzle-orm";
+import type { AnyPgTable } from "drizzle-orm/pg-core";
 
 export type OpsLogSource = "crud" | "batch";
 
@@ -29,4 +30,7 @@ export interface OpsLogEntry {
 
 export interface SqlExecutor {
   execute: (query: string | SQLWrapper<unknown>) => Promise<unknown>;
+  insert: (table: AnyPgTable) => {
+    values: (values: Record<string, unknown>) => PromiseLike<unknown>;
+  };
 }

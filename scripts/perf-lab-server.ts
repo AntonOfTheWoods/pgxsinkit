@@ -1,6 +1,6 @@
-import { sql } from "drizzle-orm";
-import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
-import { drizzle } from "drizzle-orm/postgres-js";
+import { and, eq, sql } from "drizzle-orm";
+import { type AnyPgTable } from "drizzle-orm/pg-core";
+import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
 import { createSchemaFactory } from "drizzle-orm/zod";
 import { Hono } from "hono";
@@ -46,6 +46,8 @@ import {
 const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
   coerce: { date: true },
 });
+
+type PerfLabReadQueryClient = Pick<PostgresJsDatabase<any>, "select">;
 
 const allowedOrigins = ["http://localhost:5174", "http://127.0.0.1:5174"];
 
@@ -262,11 +264,7 @@ app.post("/api/mutations", async (context) => {
 
       for (const mutation of sanitizedBatch.mutations) {
         const entry = currentRegistry.registry[mutation.tableName] as SyncTableEntry;
-        const serverUpdatedAtUs = await readServerUpdatedAtUs(
-          tx as unknown as TransactionClient,
-          entry,
-          mutation.entityKey,
-        );
+        const serverUpdatedAtUs = await readServerUpdatedAtUs(tx, entry, mutation.entityKey);
 
         responseAcks.push({
           tableName: mutation.tableName,
@@ -343,7 +341,7 @@ const server = Bun.serve({
 console.log(`Perf-lab write server ready on http://${host}:${port}`);
 
 async function installSharedAuthHelpers() {
-  await adminClient.unsafe(buildSyntheticGovernanceSql({} as SyncTableRegistry));
+  await adminDb.execute(sql.raw(buildSyntheticGovernanceSql({} as SyncTableRegistry)));
 }
 
 async function prebuildKnownScenarioSchemas() {
@@ -361,7 +359,7 @@ async function activateRegistry(tableCount: number, extraColumnCount: number) {
   const truncateSql = buildSyntheticTruncateSql(preparedRegistry.registry);
 
   if (truncateSql.length > 0) {
-    await adminClient.unsafe(truncateSql);
+    await adminDb.execute(sql.raw(truncateSql));
   }
 
   console.log(
@@ -399,12 +397,14 @@ async function ensurePreparedRegistry(options: { tableCount: number; extraColumn
     `Preparing perf-lab schema ${schemaName} (${options.tableCount} tables, ${options.extraColumnCount} extra columns)`,
   );
 
-  await adminClient.unsafe(buildSyntheticServerSchemaSql(bundle.registry));
-  await adminClient.unsafe(buildSyntheticGovernanceSql(bundle.registry));
-  await adminClient.unsafe(
-    buildPlpgsqlBatchFunctionDdl(bundle.registry, {
-      functionSchema: schemaName,
-    }),
+  await adminDb.execute(sql.raw(buildSyntheticServerSchemaSql(bundle.registry)));
+  await adminDb.execute(sql.raw(buildSyntheticGovernanceSql(bundle.registry)));
+  await adminDb.execute(
+    sql.raw(
+      buildPlpgsqlBatchFunctionDdl(bundle.registry, {
+        functionSchema: schemaName,
+      }),
+    ),
   );
 
   const preparedRegistry: PreparedPerfRegistry = {
@@ -435,15 +435,9 @@ async function seedRegistryRows(preparedRegistry: PreparedPerfRegistry, rowCount
 
     for (let start = 0; start < rowCount; start += batchSize) {
       const batchEnd = Math.min(rowCount, start + batchSize);
-      const sqlText = buildSeedInsertSql(
-        entry,
-        tableIndex,
-        start,
-        batchEnd,
-        preparedRegistry.extraColumnCount,
-        claims.sub,
-      );
-      await adminClient.unsafe(sqlText);
+      const rows = buildSeedInsertRows(tableIndex, start, batchEnd, preparedRegistry.extraColumnCount, claims.sub);
+
+      await adminDb.insert(entry.table as AnyPgTable).values(rows);
     }
   }
 
@@ -452,47 +446,38 @@ async function seedRegistryRows(preparedRegistry: PreparedPerfRegistry, rowCount
   );
 }
 
-function buildSeedInsertSql(
-  entry: SyncTableEntry,
+function buildSeedInsertRows(
   tableIndex: number,
   start: number,
   end: number,
   extraColumnCount: number,
   ownerId: string,
 ) {
-  const tableConfig = getTableConfig(entry.table as AnyPgTable);
-  const qualifiedTableName = qualifyIdent(tableConfig.schema, tableConfig.name);
-  const columns = [
-    "id",
-    ...Array.from({ length: extraColumnCount }, (_, index) => `field_${index.toString().padStart(2, "0")}`),
-    "owner_id",
-    "modified_by",
-    "status",
-    "priority",
-    "created_at_us",
-    "updated_at_us",
-  ];
-  const tuples: string[] = [];
+  const rows: Array<Record<string, string | bigint>> = [];
 
   for (let rowIndex = start; rowIndex < end; rowIndex += 1) {
     const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
-    const values = [sqlString(String(payload.id))];
+    const row: Record<string, string | bigint> = {
+      id: String(payload.id),
+      ownerId,
+      modifiedBy: ownerId,
+      status: String(payload.status),
+      priority: String(payload.priority),
+    };
 
     for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
-      values.push(sqlString(String(payload[`field${columnIndex.toString().padStart(2, "0")}`])));
+      row[`field${columnIndex.toString().padStart(2, "0")}`] = String(
+        payload[`field${columnIndex.toString().padStart(2, "0")}`],
+      );
     }
 
-    const timestampUs = (1_700_000_000_000_000n + BigInt(rowIndex)).toString();
-    values.push(sqlString(ownerId));
-    values.push(sqlString(ownerId));
-    values.push(sqlString(String(payload.status)));
-    values.push(sqlString(String(payload.priority)));
-    values.push(timestampUs);
-    values.push(timestampUs);
-    tuples.push(`(${values.join(", ")})`);
+    const timestampUs = 1_700_000_000_000_000n + BigInt(rowIndex);
+    row.createdAtUs = timestampUs;
+    row.updatedAtUs = timestampUs;
+    rows.push(row);
   }
 
-  return `INSERT INTO ${qualifiedTableName} (${columns.map(quoteIdent).join(", ")}) VALUES ${tuples.join(", ")};`;
+  return rows;
 }
 
 async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null, protectedTables: string[]) {
@@ -628,7 +613,7 @@ function toSchemaPayload(entry: SyncTableEntry, payload: unknown): unknown {
 }
 
 async function readServerUpdatedAtUs(
-  tx: TransactionClient,
+  tx: PerfLabReadQueryClient,
   entry: SyncTableEntry,
   entityKey: Record<string, string>,
 ): Promise<string | undefined> {
@@ -639,7 +624,6 @@ async function readServerUpdatedAtUs(
     return undefined;
   }
 
-  const tableConfig = getTableConfig(entry.table as AnyPgTable);
   const conditions = entry.primaryKey.columns.map((primaryKeyColumn) => {
     const rawValue = entityKey[primaryKeyColumn];
 
@@ -647,18 +631,23 @@ async function readServerUpdatedAtUs(
       throw new Error(`Missing entity key value for primary key column ${primaryKeyColumn}`);
     }
 
-    return sql`${sql.raw(quoteIdent(primaryKeyColumn))} = ${rawValue}`;
+    const primaryKeyTableColumn = Object.values(columns).find((column) => column.name === primaryKeyColumn);
+
+    if (!primaryKeyTableColumn) {
+      throw new Error(`Missing table column metadata for primary key column ${primaryKeyColumn}`);
+    }
+
+    return eq(primaryKeyTableColumn, rawValue);
   });
 
-  const result = (await tx.execute(sql`
-    SELECT ${sql.raw(quoteIdent("updated_at_us"))}::text AS "updatedAtUs"
-    FROM ${sql.raw(qualifyIdent(tableConfig.schema, tableConfig.name))}
-    WHERE ${sql.join(conditions, sql` AND `)}
-    LIMIT 1
-  `)) as Iterable<{ updatedAtUs: string | null }>;
+  const whereClause = conditions.length === 1 ? conditions[0]! : and(...conditions);
+  const rows = await tx
+    .select({ updatedAtUs: sql<string>`${updatedAtColumn}::text` })
+    .from(entry.table as AnyPgTable)
+    .where(whereClause)
+    .limit(1);
 
-  const row = Array.from(result)[0];
-  return row?.updatedAtUs ?? undefined;
+  return rows[0]?.updatedAtUs ?? undefined;
 }
 
 function formatBatchExecutionError(error: unknown): string {
@@ -757,20 +746,8 @@ function escapeSqlLiteral(value: string) {
   return value.replace(/'/g, "''");
 }
 
-function sqlString(value: string) {
-  return `'${escapeSqlLiteral(value)}'`;
-}
-
 function quoteIdent(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
-}
-
-function qualifyIdent(schemaName: string | undefined, tableName: string) {
-  if (!schemaName) {
-    return quoteIdent(tableName);
-  }
-
-  return `${quoteIdent(schemaName)}.${quoteIdent(tableName)}`;
 }
 
 function enqueueProvision(task: () => Promise<void>) {

@@ -1,10 +1,10 @@
-import { eq, sql } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 
-import { createSyncServer } from "@pgxsinkit/server";
+import { projectsSyncRegistry, projectsTable } from "@pgxsinkit/schema";
+import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
 import { readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
-import { ensureProjectsTableSql, projectsSyncRegistry, projectsTable } from "../fixtures/projects-fixture";
 
 const env = readIntegrationEnv();
 
@@ -27,8 +27,6 @@ describe("server facade contract", () => {
       registry: projectsSyncRegistry,
       databaseUrl: env.databaseUrl,
     });
-
-    await server.drizzle.execute(ensureProjectsTableSql);
   });
 
   beforeEach(async () => {
@@ -349,31 +347,20 @@ type OpsLogRow = {
 };
 
 async function clearOperationsLog(server: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>) {
-  await server.drizzle.execute(
-    sql.raw(`
-    DO $$
-    BEGIN
-      IF to_regclass('public.operations_log') IS NOT NULL THEN
-        TRUNCATE TABLE operations_log;
-      END IF;
-    END $$;
-  `),
-  );
+  await server.drizzle.delete(operationsLogTable);
 }
 
 async function readOperationsLogRows(
   server: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>,
 ): Promise<OpsLogRow[]> {
-  const result = await server.drizzle.execute<OpsLogRow>(sql`
-    SELECT
-      source,
-      backend,
-      table_name AS "tableName",
-      operation_kind AS "operationKind",
-      status
-    FROM operations_log
-    ORDER BY id ASC
-  `);
-
-  return Array.from(result, (row) => row as OpsLogRow);
+  return await server.drizzle
+    .select({
+      source: operationsLogTable.source,
+      backend: operationsLogTable.backend,
+      tableName: operationsLogTable.tableName,
+      operationKind: operationsLogTable.operationKind,
+      status: operationsLogTable.status,
+    })
+    .from(operationsLogTable)
+    .orderBy(asc(operationsLogTable.id));
 }

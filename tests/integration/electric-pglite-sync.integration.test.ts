@@ -1,48 +1,14 @@
-import { sql } from "drizzle-orm";
-
-import { buildDemoSyncConfig, demoSyncRegistry } from "@pgxsinkit/schema";
+import { authorsTable, buildDemoSyncConfig, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-engine";
 import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
+import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const env = readIntegrationEnv();
-
-const ensureTodosTableSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF to_regclass('public.authors') IS NULL THEN
-      CREATE TABLE authors (
-        id UUID PRIMARY KEY,
-        name VARCHAR(120) NOT NULL,
-        owner_id UUID,
-        modified_by UUID,
-        created_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT),
-        updated_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-      );
-    END IF;
-  END $$;
-
-  DO $$
-  BEGIN
-    IF to_regclass('public.todos') IS NULL THEN
-      CREATE TABLE todos (
-        id UUID PRIMARY KEY,
-        title VARCHAR(120) NOT NULL,
-        description TEXT,
-        author_id UUID NOT NULL REFERENCES authors(id),
-        owner_id UUID,
-        modified_by UUID,
-        status VARCHAR(24) NOT NULL DEFAULT 'todo',
-        priority VARCHAR(24) NOT NULL DEFAULT 'medium',
-        created_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT),
-        updated_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-      );
-    END IF;
-  END $$;
-`);
+const localSchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 
 async function createLocalTodoStore() {
   const pg = await createFreshTestPGlite({
@@ -51,29 +17,7 @@ async function createLocalTodoStore() {
     },
   });
 
-  await pg.exec(`
-    CREATE TABLE IF NOT EXISTS authors (
-      id UUID PRIMARY KEY,
-      name VARCHAR(120) NOT NULL,
-      owner_id UUID,
-      modified_by UUID,
-      created_at_us BIGINT NOT NULL,
-      updated_at_us BIGINT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS todos (
-      id UUID PRIMARY KEY,
-      title VARCHAR(120) NOT NULL,
-      description TEXT,
-      author_id UUID NOT NULL,
-      owner_id UUID,
-      modified_by UUID,
-      status VARCHAR(24) NOT NULL,
-      priority VARCHAR(24) NOT NULL,
-      created_at_us BIGINT NOT NULL,
-      updated_at_us BIGINT NOT NULL
-    );
-  `);
+  await pg.exec(localSchemaSql);
 
   return pg;
 }
@@ -121,11 +65,11 @@ describe("electric -> pglite sync integration", () => {
         sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d",
       }),
     });
-    await server.drizzle.execute(ensureTodosTableSql);
   });
 
   beforeEach(async () => {
-    await server.drizzle.execute(sql.raw("TRUNCATE TABLE todos, authors;"));
+    await server.drizzle.delete(todosTable);
+    await server.drizzle.delete(authorsTable);
   });
 
   afterAll(async () => {

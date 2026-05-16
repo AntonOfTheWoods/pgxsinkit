@@ -17,32 +17,31 @@ This document defines how to manage SQL artifacts required by WRITE_API_BACKEND=
 
 ## Artifact location
 
-1. Generated artifact file:
-   - infra/sql/functions/pgxsinkit_apply_batch_mutations.sql
+1. Generated sync-function migration:
+   - infra/drizzle/\*\_sync_artifact/migration.sql
 2. Source inputs:
-   - packages/demo/src/registry.ts
+   - packages/schema/src/registry.ts
    - packages/server/src/mutations/bulk/plpgsql-strategy.ts
 
 ## Commands
 
 1. Generate artifact SQL from current registry and strategy:
    - bun run sync:function:generate
-2. Apply artifact SQL to DATABASE_URL:
-   - bun run db:apply:sync-function
-3. Verify function exists with the expected signature:
-   - bun run db:verify:sync-function
-4. For RLS-enabled registries, apply governance SQL before starting artifact mode:
-   - bun run db:apply:governance
+   - This creates a custom migration under infra/drizzle/.
+2. Generate governance migration SQL when DEFERRABLE constraints or conditional grants change:
+   - bun run db:generate:governance
+   - Commit the generated infra/drizzle/\*\_registry_governance migration alongside the schema/registry change.
+3. Ensure the latest committed schema, governance, and sync-function migrations have already been applied before starting artifact mode:
+   - bun run db:migrate
 
 ## Update workflow
 
 1. Modify registry or mutation strategy.
 2. Regenerate artifact SQL.
-3. Commit the regenerated artifact in the same PR as code changes.
-4. Apply migrations in target environment.
-5. Apply artifact SQL in target environment.
-6. Verify function installation.
-7. Deploy write-api in bulk-plpgsql-artifact mode.
+3. Generate a governance migration too if registry governance changed.
+4. Commit the regenerated artifact and any new governance migration in the same PR as code changes.
+5. Apply migrations in target environment.
+6. Deploy write-api in bulk-plpgsql-artifact mode.
 
 ## Promotion expectations
 
@@ -54,13 +53,13 @@ This document defines how to manage SQL artifacts required by WRITE_API_BACKEND=
 
 1. Missing function:
    - Symptom: write-api startup fails verification for bulk-plpgsql-artifact.
-   - Resolution: apply artifact SQL, then rerun verification.
+   - Resolution: apply the latest committed migrations, then restart the service.
 2. Missing governance auth helpers:
    - Symptom: POST /api/mutations returns a clear 500 about missing auth.uid/auth.jwt.
-   - Resolution: apply governance SQL, then retry the request.
+   - Resolution: ensure the environment bootstrap provides Supabase-compatible auth helpers, then retry the request.
 3. Drift between code and artifact:
    - Symptom: behavior mismatch after deployment.
-   - Resolution: regenerate artifact, apply again, rerun contract tests.
+   - Resolution: regenerate the sync-function migration, apply the latest migrations, and rerun contract tests.
 4. Deferred constraints not effective:
    - Symptom: FK violations despite artifact backend.
    - Resolution: ensure relevant FKs are declared DEFERRABLE in migrations.

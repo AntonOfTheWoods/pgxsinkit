@@ -1,4 +1,4 @@
-import { getTableName, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
@@ -25,6 +25,8 @@ import type { BulkMutationBackend, TransactionClient } from "./types";
 const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
   coerce: { date: true },
 });
+
+type RouteReadQueryClient = Pick<PostgresJsDatabase<any>, "select">;
 
 export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
   app: Hono,
@@ -237,7 +239,7 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
 
         for (const mutation of batchRequest.mutations) {
           const serverUpdatedAtUs = await readServerUpdatedAtUs(
-            tx as unknown as TransactionClient,
+            tx,
             registry[mutation.tableName as keyof TRegistry] as SyncTableEntry,
             mutation.entityKey,
           );
@@ -526,7 +528,7 @@ function resolveServerUpdatedAtColumnName(entry: SyncTableEntry): string {
 }
 
 async function readServerUpdatedAtUs(
-  tx: TransactionClient,
+  tx: RouteReadQueryClient,
   entry: SyncTableEntry,
   entityKey: Record<string, string>,
 ): Promise<string | undefined> {
@@ -545,22 +547,23 @@ async function readServerUpdatedAtUs(
       throw new Error(`Missing entity key value for primary key column ${primaryKeyColumn}`);
     }
 
-    return sql`${quoteIdentifier(primaryKeyColumn)} = ${rawValue}`;
+    const primaryKeyTableColumn = Object.values(columns).find((column) => column.name === primaryKeyColumn);
+
+    if (!primaryKeyTableColumn) {
+      throw new Error(`Missing table column metadata for primary key column ${primaryKeyColumn}`);
+    }
+
+    return eq(primaryKeyTableColumn, rawValue);
   });
 
-  const result = (await tx.execute(sql`
-    SELECT ${quoteIdentifier(columnName)}::text AS "updatedAtUs"
-    FROM ${quoteIdentifier(getTableName(entry.table as AnyPgTable))}
-    WHERE ${sql.join(conditions, sql` AND `)}
-    LIMIT 1
-  `)) as Iterable<{ updatedAtUs: string | null }>;
+  const whereClause = conditions.length === 1 ? conditions[0]! : and(...conditions);
+  const rows = await tx
+    .select({ updatedAtUs: sql<string>`${updatedAtColumn}::text` })
+    .from(entry.table as AnyPgTable)
+    .where(whereClause)
+    .limit(1);
 
-  const row = Array.from(result)[0];
-  return row?.updatedAtUs ?? undefined;
-}
-
-function quoteIdentifier(identifier: string) {
-  return sql.raw(`"${identifier.replace(/"/g, '""')}"`);
+  return rows[0]?.updatedAtUs ?? undefined;
 }
 
 async function installBulkStartupDdl<TRegistry extends SyncTableRegistry>(

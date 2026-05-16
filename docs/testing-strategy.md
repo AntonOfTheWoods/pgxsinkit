@@ -18,13 +18,26 @@ Each integration test command launches its own isolated Podman Compose project o
 
 This is the canonical integration workflow for the repo.
 
+Schema ownership for integration tests is strict:
+
+- PostgreSQL tables used by the demo app and integration suites belong in `packages/schema` and must be migrated through Drizzle.
+- Integration tests must not create server-side tables inline when the shape can be expressed through Drizzle schema modules and normal migrations.
+- Cleanup should prefer Drizzle table deletes or other schema-owned helpers over handwritten setup SQL.
+
+The remaining accepted raw SQL in integration coverage is narrow:
+
+- grants to Supabase roles such as `authenticated`, because Drizzle policies do not grant table privileges by themselves
+- PostgreSQL-specific constraint/session commands such as `ALTER CONSTRAINT ... DEFERRABLE` when the target behavior is not emitted by the current Drizzle migration path
+- PGlite-local runtime/schema SQL where the client runtime does not have a Drizzle migration adapter
+- PL/pgSQL function DDL and execution paths that are intentionally generated as SQL artifacts
+
 Run them by slice when possible:
 
 - `bun run test:integration:contract` for public facade contract coverage
 - `bun run test:integration:implementation` for lower-level implementation coverage
 - `bun run test:integration` for the full integration suite
 
-Use `bun run infra:up` only for manual local demo development. It now includes `db:push` and `db:apply:governance` after infra becomes reachable. Integration scripts must not depend on or reuse that shared stack.
+Use `bun run infra:up` only for manual local demo development. It applies the committed infra/drizzle migration history after infra becomes reachable. Integration scripts must not depend on or reuse that shared stack.
 
 ### Contract suites
 

@@ -1,8 +1,5 @@
-import { eq, sql } from "drizzle-orm";
-import { uuid, varchar } from "drizzle-orm/pg-core";
-import { authenticatedRole } from "drizzle-orm/supabase";
+import { count, eq } from "drizzle-orm";
 
-import { buildSupabaseOwnerOrAdminNativePolicies, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import {
   authorsTable,
   demoSyncRegistry,
@@ -10,185 +7,20 @@ import {
   DEMO_JWT_USER1,
   DEMO_JWT_USER2,
   DEMO_USER1_ID,
+  fkChildrenTable,
+  fkParentsTable,
+  fkSyncRegistry,
+  rlsSyncRegistry,
+  rlsTodosTable,
   todosTable,
 } from "@pgxsinkit/schema";
-import { createSyncServer } from "@pgxsinkit/server";
+import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
 import { readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../apps/write-api/src/demo-auth";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 
 const env = readIntegrationEnv();
-
-const ensureTablesSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF to_regclass('public.authors') IS NULL THEN
-      CREATE TABLE authors (
-        id UUID PRIMARY KEY,
-        name VARCHAR(120) NOT NULL,
-        owner_id UUID,
-        modified_by UUID,
-        created_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT),
-        updated_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-      );
-    END IF;
-  END $$;
-
-  ALTER TABLE authors ADD COLUMN IF NOT EXISTS owner_id UUID;
-  ALTER TABLE authors ADD COLUMN IF NOT EXISTS modified_by UUID;
-
-  DO $$
-  BEGIN
-    IF to_regclass('public.todos') IS NULL THEN
-      CREATE TABLE todos (
-        id UUID PRIMARY KEY,
-        title VARCHAR(120) NOT NULL,
-        description TEXT,
-        author_id UUID NOT NULL REFERENCES authors(id),
-        owner_id UUID,
-        modified_by UUID,
-        status VARCHAR(24) NOT NULL DEFAULT 'todo',
-        priority VARCHAR(24) NOT NULL DEFAULT 'medium',
-        created_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT),
-        updated_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-      );
-    END IF;
-  END $$;
-
-  ALTER TABLE todos ADD COLUMN IF NOT EXISTS owner_id UUID;
-  ALTER TABLE todos ADD COLUMN IF NOT EXISTS modified_by UUID;
-`);
-
-const fkParentsSyncEntry = defineSyncTable({
-  tableName: "fk_parents",
-  makeColumns: () => ({
-    id: uuid("id").primaryKey(),
-    name: varchar("name", { length: 120 }).notNull(),
-  }),
-  mode: "readwrite",
-});
-const fkParentsTable = fkParentsSyncEntry.table;
-
-const fkChildrenSyncEntry = defineSyncTable({
-  tableName: "fk_children",
-  makeColumns: () => ({
-    id: uuid("id").primaryKey(),
-    name: varchar("name", { length: 120 }).notNull(),
-    parentId: uuid("parent_id")
-      .notNull()
-      .references(() => fkParentsTable.id),
-  }),
-  mode: "readwrite",
-});
-const fkChildrenTable = fkChildrenSyncEntry.table;
-
-const fkSyncRegistry = defineSyncRegistry({
-  fk_parents: fkParentsSyncEntry,
-  fk_children: fkChildrenSyncEntry,
-});
-
-const ensureFkTablesSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF to_regclass('public.fk_parents') IS NULL THEN
-      CREATE TABLE fk_parents (
-        id UUID PRIMARY KEY,
-        name VARCHAR(120) NOT NULL
-      );
-    END IF;
-  END $$;
-
-  DO $$
-  BEGIN
-    IF to_regclass('public.fk_children') IS NULL THEN
-      CREATE TABLE fk_children (
-        id UUID PRIMARY KEY,
-        name VARCHAR(120) NOT NULL,
-        parent_id UUID NOT NULL,
-        CONSTRAINT fk_children_parent_fk FOREIGN KEY (parent_id) REFERENCES fk_parents(id)
-      );
-    END IF;
-  END $$;
-`);
-
-const ensureFkConstraintDeferrableSql = sql.raw(`
-  ALTER TABLE "fk_children"
-  ALTER CONSTRAINT "fk_children_parent_fk"
-  DEFERRABLE INITIALLY IMMEDIATE;
-`);
-
-const rlsTodosSyncEntry = defineSyncTable({
-  tableName: "rls_todos",
-  makeColumns: () => ({
-    id: uuid("id").primaryKey(),
-    title: varchar("title", { length: 120 }).notNull(),
-    ownerId: uuid("owner_id"),
-  }),
-  policies: buildSupabaseOwnerOrAdminNativePolicies({
-    tableName: "rls_todos",
-    role: authenticatedRole,
-    ownerSqlColumn: "owner_id",
-  }),
-  mode: "readwrite",
-});
-const rlsTodosTable = rlsTodosSyncEntry.table;
-
-const rlsSyncRegistry = defineSyncRegistry({
-  rls_todos: rlsTodosSyncEntry,
-});
-
-// Supabase-compatible DB provides auth.uid() and authenticated role.
-// We only need table grants for the demo registry tables.
-const ensureTableGrantsSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-      IF to_regclass('public.authors') IS NOT NULL THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "authors" TO authenticated';
-      END IF;
-      IF to_regclass('public.todos') IS NOT NULL THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "todos" TO authenticated';
-      END IF;
-    END IF;
-  END;
-  $$;
-`);
-
-const ensureRlsTablesSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF to_regclass('public.rls_todos') IS NULL THEN
-      CREATE TABLE rls_todos (
-        id UUID PRIMARY KEY,
-        title VARCHAR(120) NOT NULL,
-        owner_id UUID DEFAULT auth.uid()
-      );
-    END IF;
-  END $$;
-
-  ALTER TABLE rls_todos ENABLE ROW LEVEL SECURITY;
-
-  DO $$
-  BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-      EXECUTE 'GRANT SELECT, INSERT ON TABLE rls_todos TO authenticated';
-    END IF;
-  END;
-  $$;
-
-  DROP POLICY IF EXISTS "rls_todos_select_owner" ON "rls_todos";
-  CREATE POLICY "rls_todos_select_owner" ON "rls_todos"
-  AS PERMISSIVE
-  FOR SELECT
-  TO "authenticated" USING (owner_id = auth.uid());
-
-  DROP POLICY IF EXISTS "rls_todos_insert_owner" ON "rls_todos";
-  CREATE POLICY "rls_todos_insert_owner" ON "rls_todos"
-  AS PERMISSIVE
-  FOR INSERT
-  TO "authenticated" WITH CHECK (owner_id = auth.uid());
-`);
 
 describe("write api implementation integration", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
@@ -202,8 +34,6 @@ describe("write api implementation integration", () => {
         sub: DEMO_USER1_ID,
       }),
     });
-    await server.drizzle.execute(ensureTablesSql);
-    await server.drizzle.execute(ensureTableGrantsSql);
     await installPlpgsqlBatchFunction(server.drizzle, demoSyncRegistry);
   });
 
@@ -445,7 +275,6 @@ describe("write api implementation integration", () => {
       },
     });
 
-    await disabledServer.drizzle.execute(ensureTablesSql);
     await installPlpgsqlBatchFunction(disabledServer.drizzle, demoSyncRegistry);
 
     try {
@@ -510,9 +339,6 @@ describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
       databaseUrl: env.databaseUrl,
       backend: "bulk-plpgsql-artifact",
     });
-
-    await server.drizzle.execute(ensureFkTablesSql);
-    await server.drizzle.execute(ensureFkConstraintDeferrableSql);
   });
 
   beforeEach(async () => {
@@ -586,8 +412,6 @@ describe("write api artifact backend RLS auth context", () => {
 
     try {
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, rlsSyncRegistry);
-      await provisioningServer.drizzle.execute(ensureTableGrantsSql);
-      await provisioningServer.drizzle.execute(ensureRlsTablesSql);
     } finally {
       await provisioningServer.stop();
     }
@@ -694,7 +518,6 @@ describe("write api artifact backend missing governance prerequisites", () => {
     });
 
     try {
-      await provisioningServer.drizzle.execute(ensureTablesSql);
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, demoSyncRegistry);
     } finally {
       await provisioningServer.stop();
@@ -762,7 +585,6 @@ describe("write api artifact backend demo auth RLS", () => {
     });
 
     try {
-      await provisioningServer.drizzle.execute(ensureTablesSql);
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, demoSyncRegistry);
     } finally {
       await provisioningServer.stop();
@@ -1052,13 +874,8 @@ describe("write api artifact backend demo auth RLS", () => {
 async function readOperationsLogRowCount(
   server: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>,
 ): Promise<number> {
-  const result = await server.drizzle.execute<{ count: number }>(sql`
-    SELECT COUNT(*)::int AS count
-    FROM operations_log
-  `);
-
-  const firstRow = Array.from(result, (row) => row as { count: number })[0];
-  return firstRow?.count ?? 0;
+  const result = await server.drizzle.select({ count: count() }).from(operationsLogTable);
+  return result[0]?.count ?? 0;
 }
 
 function buildBatchMutation(input: {

@@ -9,6 +9,7 @@
   "scripts": {
     "build:public-packages": "bun scripts/build-public-packages.ts",
     "db:generate": "drizzle-kit generate --config=infra/drizzle.config.ts",
+    "db:generate:governance": "bun scripts/generate-governance-migration.ts",
     "db:migrate": "drizzle-kit migrate --config=infra/drizzle.config.ts",
     "db:push": "drizzle-kit push --config=infra/drizzle.config.ts",
     "dev:api": "cd apps/write-api && bun run dev",

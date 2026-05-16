@@ -5,16 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createSyncClient } from "@pgxsinkit/client";
+import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
-import {
-  ensureProjectsTableSql,
-  projectsSyncRegistry,
-  projectsTable,
-  type CreateProjectInput,
-} from "../fixtures/projects-fixture";
 
 const env = readIntegrationEnv();
 let writeApiPort!: number;
@@ -117,7 +112,6 @@ describe("client facade contract", () => {
       databaseUrl: env.databaseUrl,
     });
 
-    await server.drizzle.execute(ensureProjectsTableSql);
     await installPlpgsqlBatchFunction(server.drizzle, projectsSyncRegistry);
     const startedFetchServer = await startFetchServer(server.fetch, 0);
     httpServer = startedFetchServer.server;

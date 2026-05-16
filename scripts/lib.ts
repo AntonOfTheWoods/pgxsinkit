@@ -79,7 +79,7 @@ export async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): P
   try {
     while (Date.now() - start < timeoutMs) {
       try {
-        await client.unsafe("SELECT 1");
+        await client`SELECT 1`;
         return;
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 500));
