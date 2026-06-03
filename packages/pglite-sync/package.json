@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/pglite-sync",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "files": [
     "dist",
     "src",
@@ -22,8 +22,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "peerDependencies": {
-    "@electric-sql/client": "^1.5.17",
-    "@electric-sql/experimental": "^6.0.17",
-    "@electric-sql/pglite": "0.4.5"
+    "@electric-sql/client": "^1.5.20",
+    "@electric-sql/experimental": "^6.0.20",
+    "@electric-sql/pglite": "0.5.1"
   }
 }

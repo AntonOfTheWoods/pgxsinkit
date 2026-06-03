@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/client",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "files": [
     "dist",
     "src",
@@ -22,11 +22,11 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.26",
-    "@pgxsinkit/sync-engine": "^0.1.26"
+    "@pgxsinkit/contracts": "^0.1.27",
+    "@pgxsinkit/sync-engine": "^0.1.27"
   },
   "peerDependencies": {
-    "@electric-sql/pglite": "0.4.5",
+    "@electric-sql/pglite": "0.5.1",
     "drizzle-orm": "1.0.0-rc.2",
     "zod": "^4.4.3"
   }
