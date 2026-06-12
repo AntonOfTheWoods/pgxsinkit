@@ -1152,7 +1152,7 @@ async function stagePendingMutations(
     for (let index = start; index < batchEnd; index += 1) {
       const target = pickSyntheticWorkloadTarget(bundle.tableNames.length, index, localRows);
       const tableName = bundle.tableNames[target.tableIndex]!;
-      const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id as string;
+      const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id;
 
       batchItems.push({
         table: tableName,
@@ -1204,7 +1204,7 @@ async function measurePointReads(
     const target = pickSyntheticWorkloadTarget(bundle.tableNames.length, index, localRows);
     const tableName = bundle.tableNames[target.tableIndex]!;
     const readModelName = localProjectionName(bundle, `${tableName}_read_model`);
-    const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id as string;
+    const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id;
     const started = performance.now();
     const result = await client.pglite.query<{ id: string }>(`SELECT id FROM ${readModelName} WHERE id = $1`, [rowId]);
     timings.push(performance.now() - started);

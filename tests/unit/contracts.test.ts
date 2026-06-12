@@ -6,6 +6,7 @@ import {
   defineSyncRegistry,
   defineSyncTable,
   getSyncRegistrySchema,
+  type JwtClaims,
   mutationAckSchema,
   mutationEnvelopeSchema,
 } from "@pgxsinkit/contracts";
@@ -148,8 +149,11 @@ describe("buildRowFilterWhere ownership claim selection", () => {
   it("denies all rows when the configured claim is missing or non-primitive", () => {
     const filter = { ownership: { column: "person_id", claim: "app_metadata.person_id" } };
 
+    // Runtime defense: claims that violate the static JwtClaims shape must still deny.
+    const malformedClaims = { sub: "auth-uid", app_metadata: "oops" } as unknown as JwtClaims;
+
     expect(buildRowFilterWhere(filter, { sub: "auth-uid" })).toBe("1 = 0");
-    expect(buildRowFilterWhere(filter, { sub: "auth-uid", app_metadata: "oops" })).toBe("1 = 0");
+    expect(buildRowFilterWhere(filter, malformedClaims)).toBe("1 = 0");
     expect(buildRowFilterWhere(filter, { sub: "auth-uid", app_metadata: { person_id: { nested: true } } })).toBe(
       "1 = 0",
     );

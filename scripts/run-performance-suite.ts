@@ -105,7 +105,7 @@ async function main() {
     ...composeEnv,
     DATABASE_URL: databaseUrl,
     ELECTRIC_URL: electricUrl,
-    PGXSINKIT_PERF_RESULTS_DIR: process.env.PGXSINKIT_PERF_RESULTS_DIR ?? PERF_RESULTS_DIR,
+    PGXSINKIT_PERF_RESULTS_DIR: process.env["PGXSINKIT_PERF_RESULTS_DIR"] ?? PERF_RESULTS_DIR,
   };
 
   let suiteError: unknown;

@@ -244,7 +244,7 @@ function TodoApp({
       continue;
     }
 
-    const todoId = entry.entityKey.id;
+    const todoId = entry.entityKey["id"];
     if (!todoId) {
       continue;
     }
@@ -516,7 +516,7 @@ function TodoApp({
                   <strong>
                     {row.tableName} / {row.mutationKind} / {row.status} / #{row.mutationSeq}
                   </strong>
-                  <small>{row.entityKey.id ?? JSON.stringify(row.entityKey)}</small>
+                  <small>{row.entityKey["id"] ?? JSON.stringify(row.entityKey)}</small>
                 </div>
                 <small>attempts: {row.attemptCount}</small>
                 <small>next retry: {row.nextRetryAtUs ?? "ready now"}</small>

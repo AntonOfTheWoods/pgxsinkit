@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 
 import type {
+  JwtClaims,
   RegistryRelations,
   RegistryTables,
   SyncRuntimeStatus,
@@ -39,7 +40,7 @@ export interface CreateSyncServerOptions<
   /** Existing Hono app to register routes on. If omitted, a new Hono app is created. */
   app?: Hono;
   backend?: BulkMutationBackend;
-  resolveAuthClaims?: (request: Request) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+  resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
   operationsLog?: {
     enabled?: boolean;
   };

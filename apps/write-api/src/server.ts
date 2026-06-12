@@ -6,15 +6,15 @@ import { cors } from "hono/cors";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 import { buildRegistrySchema, createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
 
-import { composeCredentials } from "../../../infra/compose-credentials";
 import { parseDemoAuthClaimsFromRequest } from "./demo-auth";
+import { writeApiEnv } from "./env";
 
-const databaseUrl = process.env.DATABASE_URL ?? composeCredentials.DEFAULT_DATABASE_URL;
-const electricUrl = process.env.ELECTRIC_URL ?? "http://localhost:3000/v1/shape";
+const databaseUrl = writeApiEnv.DATABASE_URL;
+const electricUrl = writeApiEnv.ELECTRIC_URL;
 const allowedOrigins = ["http://localhost:5173", "http://localhost:5174"];
-const backend = readWriteApiBackend(process.env.WRITE_API_BACKEND);
-const operationsLogEnabled = readBooleanEnv(process.env.WRITE_API_OPS_LOG_ENABLED, true);
-const idleTimeoutSeconds = readPositiveIntEnv(process.env.WRITE_API_IDLE_TIMEOUT_SECONDS, 120);
+const backend = writeApiEnv.WRITE_API_BACKEND;
+const operationsLogEnabled = writeApiEnv.WRITE_API_OPS_LOG_ENABLED;
+const idleTimeoutSeconds = writeApiEnv.WRITE_API_IDLE_TIMEOUT_SECONDS;
 
 console.log("Starting write-api...", { databaseUrl, electricUrl, backend, operationsLogEnabled, idleTimeoutSeconds });
 
@@ -34,7 +34,7 @@ const server = createSyncServer({
     enabled: operationsLogEnabled,
   },
   allowedOrigins,
-  port: Number(process.env.WRITE_API_PORT ?? 3001),
+  port: writeApiEnv.WRITE_API_PORT,
   idleTimeoutSeconds,
 });
 
@@ -52,7 +52,7 @@ app.use(
 app.get("/v1/electric-proxy", async (context) => {
   try {
     const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
-    return await proxyElectricShapeRequest(context.req.raw, claims as Record<string, unknown> | null, {
+    return await proxyElectricShapeRequest(context.req.raw, claims, {
       registry: demoSyncRegistry,
       electricUrl,
     });
@@ -69,51 +69,7 @@ app.get("/v1/electric-proxy", async (context) => {
 app.all("*", (context) => server.fetch(context.req.raw));
 
 export default {
-  port: Number(process.env.WRITE_API_PORT ?? 3001),
+  port: writeApiEnv.WRITE_API_PORT,
   idleTimeout: idleTimeoutSeconds,
   fetch: app.fetch,
 };
-
-function readWriteApiBackend(rawValue: string | undefined): "bulk-plpgsql-artifact" {
-  const value = rawValue ?? "bulk-plpgsql-artifact";
-
-  if (value === "bulk-plpgsql-artifact") {
-    return value;
-  }
-
-  throw new Error(
-    `Invalid WRITE_API_BACKEND=${value}. Only bulk-plpgsql-artifact is supported. Legacy backends have been removed.`,
-  );
-}
-
-function readBooleanEnv(rawValue: string | undefined, fallback: boolean): boolean {
-  if (rawValue === undefined) {
-    return fallback;
-  }
-
-  const normalized = rawValue.trim().toLowerCase();
-
-  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
-    return true;
-  }
-
-  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
-    return false;
-  }
-
-  throw new Error(`Invalid WRITE_API_OPS_LOG_ENABLED=${rawValue}. Expected a boolean value.`);
-}
-
-function readPositiveIntEnv(rawValue: string | undefined, fallback: number): number {
-  if (rawValue === undefined) {
-    return fallback;
-  }
-
-  const parsed = Number.parseInt(rawValue, 10);
-
-  if (Number.isInteger(parsed) && parsed > 0) {
-    return parsed;
-  }
-
-  throw new Error(`Invalid WRITE_API_IDLE_TIMEOUT_SECONDS=${rawValue}. Expected a positive integer.`);
-}

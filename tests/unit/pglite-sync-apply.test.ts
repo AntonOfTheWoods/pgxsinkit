@@ -11,7 +11,7 @@ interface TestInsertMessage {
   value: Record<string, unknown>;
 }
 
-const debugTimings = process.env.PGXSINKIT_DEBUG_PGLITE_SYNC_APPLY_TIMINGS === "true";
+const debugTimings = process.env["PGXSINKIT_DEBUG_PGLITE_SYNC_APPLY_TIMINGS"] === "true";
 
 async function measureTiming<T>(label: string, operation: () => Promise<T>): Promise<T> {
   const startedAt = performance.now();

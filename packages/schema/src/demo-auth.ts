@@ -1,7 +1,9 @@
 export type DemoAuthIdentity = "none" | "user1" | "user2" | "admin";
 export type DemoAppRole = "student" | "admin";
 
-export interface DemoJwtClaims {
+/** A type (not interface) so it stays assignable to the index-signature-bearing
+ * `JwtClaims` from @pgxsinkit/contracts. */
+export type DemoJwtClaims = {
   sub: string;
   role: "authenticated";
   email: string;
@@ -10,7 +12,7 @@ export interface DemoJwtClaims {
   app_metadata: {
     roles: DemoAppRole[];
   };
-}
+};
 
 export const DEMO_AUTH_SECRET = "pgxsinkit-demo-secret-v1";
 

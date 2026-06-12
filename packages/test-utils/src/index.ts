@@ -27,8 +27,8 @@ export type IntegrationEnv = z.infer<typeof integrationEnvSchema>;
 
 export function readIntegrationEnv(overrides?: Partial<IntegrationEnv>) {
   return integrationEnvSchema.parse({
-    databaseUrl: process.env.DATABASE_URL,
-    electricUrl: process.env.ELECTRIC_URL,
+    databaseUrl: process.env["DATABASE_URL"],
+    electricUrl: process.env["ELECTRIC_URL"],
     ...overrides,
   });
 }

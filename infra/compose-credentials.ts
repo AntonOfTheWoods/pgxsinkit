@@ -6,14 +6,15 @@
  * Override any value via environment variables (see docker-compose.yml).
  */
 
-const USER = process.env.PGXSINKIT_INTEGRATION_POSTGRES_USER ?? "supabase_admin";
-const PASSWORD = process.env.PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD ?? "your-super-secret-and-long-postgres-password";
-const DB = process.env.PGXSINKIT_INTEGRATION_POSTGRES_DB ?? "postgres";
+const USER = process.env["PGXSINKIT_INTEGRATION_POSTGRES_USER"] ?? "supabase_admin";
+const PASSWORD =
+  process.env["PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD"] ?? "your-super-secret-and-long-postgres-password";
+const DB = process.env["PGXSINKIT_INTEGRATION_POSTGRES_DB"] ?? "postgres";
 
 /** Builds a DATABASE_URL for the compose PostgreSQL instance. */
 function buildLocalDatabaseUrl(
   host = "127.0.0.1",
-  port = Number(process.env.PGXSINKIT_INTEGRATION_POSTGRES_PORT ?? 54321),
+  port = Number(process.env["PGXSINKIT_INTEGRATION_POSTGRES_PORT"] ?? 54321),
 ): string {
   return `postgresql://${USER}:${PASSWORD}@${host}:${port}/${DB}?sslmode=disable`;
 }

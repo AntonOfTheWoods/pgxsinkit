@@ -1,4 +1,9 @@
-import { buildRowFilterWhere, getOmittedProjectedColumnNames, type SyncTableRegistry } from "@pgxsinkit/contracts";
+import {
+  buildRowFilterWhere,
+  getOmittedProjectedColumnNames,
+  type JwtClaims,
+  type SyncTableRegistry,
+} from "@pgxsinkit/contracts";
 
 export interface ElectricProxyOptions {
   registry: SyncTableRegistry;
@@ -16,7 +21,7 @@ export interface ElectricProxyOptions {
  */
 export async function proxyElectricShapeRequest(
   request: Request,
-  claims: Record<string, unknown> | null,
+  claims: JwtClaims | null,
   options: ElectricProxyOptions,
 ): Promise<Response> {
   const targetUrl = buildProxyTargetUrl(request, claims, options);
@@ -66,11 +71,7 @@ export async function proxyElectricShapeRequest(
   });
 }
 
-function buildProxyTargetUrl(
-  request: Request,
-  claims: Record<string, unknown> | null,
-  options: ElectricProxyOptions,
-): string {
+function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options: ElectricProxyOptions): string {
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(options.electricUrl);
 
@@ -136,13 +137,28 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Subset of an Electric shape-log entry the proxy rewrites: `value` carries the
+ * row, `old_value` the prior row on updates. Runtime guards still validate both
+ * before use; the declared shape is the wire-protocol expectation.
+ */
+interface ShapeLogEntry {
+  value?: Record<string, unknown>;
+  old_value?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+function isShapeLogEntry(value: unknown): value is ShapeLogEntry {
+  return isObjectRecord(value);
+}
+
 function stripOmittedColumnsFromShapeLogEntries(payload: unknown[], omittedColumns: readonly string[]): unknown[] {
   return payload.map((entry) => {
-    if (!isObjectRecord(entry)) {
+    if (!isShapeLogEntry(entry)) {
       return entry;
     }
 
-    let nextEntry: Record<string, unknown> | null = null;
+    let nextEntry: ShapeLogEntry | null = null;
 
     if (isObjectRecord(entry.value)) {
       const nextValue = omitColumnsFromRow(entry.value, omittedColumns);

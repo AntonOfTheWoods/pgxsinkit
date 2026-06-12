@@ -265,8 +265,19 @@ export function findSyntheticPerfLabScenarioDefinition(
   );
 }
 
-export function buildSyntheticCreatePayload(tableIndex: number, rowIndex: number, extraColumnCount: number) {
-  const payload: Record<string, unknown> = {
+/** Fixed columns every synthetic table carries, plus dynamic `fieldNN` extras. */
+export type SyntheticCreatePayload = {
+  id: string;
+  status: string;
+  priority: string;
+} & Record<string, string>;
+
+export function buildSyntheticCreatePayload(
+  tableIndex: number,
+  rowIndex: number,
+  extraColumnCount: number,
+): SyntheticCreatePayload {
+  const payload: SyntheticCreatePayload = {
     id: buildSyntheticUuid(tableIndex, rowIndex),
     status: "todo",
     priority: "medium",
@@ -293,8 +304,12 @@ export function pickSyntheticWorkloadTarget(tableCount: number, workIndex: numbe
   };
 }
 
-export function buildSyntheticUpdatePatch(rowIndex: number, extraColumnCount: number) {
-  const patch: Record<string, unknown> = {
+export type SyntheticUpdatePatch = {
+  status: string;
+} & Record<string, string>;
+
+export function buildSyntheticUpdatePatch(rowIndex: number, extraColumnCount: number): SyntheticUpdatePatch {
+  const patch: SyntheticUpdatePatch = {
     status: rowIndex % 2 === 0 ? "done" : "in_progress",
   };
 

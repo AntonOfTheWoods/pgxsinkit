@@ -29,15 +29,15 @@ function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): vo
 
 async function main() {
   const env = process.env;
-  const databaseUrl = new URL(env.DATABASE_URL ?? DEFAULT_DATABASE_URL);
-  const electricUrl = new URL(env.ELECTRIC_URL ?? DEFAULT_ELECTRIC_URL);
+  const databaseUrl = new URL(env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL);
+  const electricUrl = new URL(env["ELECTRIC_URL"] ?? DEFAULT_ELECTRIC_URL);
 
   runCommand("podman", ["compose", "-f", COMPOSE_FILE, "up", "-d"], env);
   await Promise.all([
     waitForTcpService(databaseUrl.hostname, parsePort(databaseUrl), "PostgreSQL"),
     waitForTcpService(electricUrl.hostname, parsePort(electricUrl), "ElectricSQL"),
   ]);
-  await waitForPgReady(env.DATABASE_URL ?? DEFAULT_DATABASE_URL);
+  await waitForPgReady(env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL);
   runCommand("bun", ["run", "db:migrate"], env);
 }
 

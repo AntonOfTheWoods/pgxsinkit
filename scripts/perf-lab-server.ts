@@ -81,10 +81,10 @@ declare const Bun: {
   }) => BunServerHandle;
 };
 
-const databaseUrl = process.env.DATABASE_URL ?? PERF_LAB_DATABASE_URL;
-const electricUrl = process.env.ELECTRIC_URL ?? PERF_LAB_ELECTRIC_URL;
-const host = process.env.WRITE_API_HOST ?? PERF_LAB_HOST;
-const port = readPort(process.env.WRITE_API_PORT, PERF_LAB_WRITE_API_PORT);
+const databaseUrl = process.env["DATABASE_URL"] ?? PERF_LAB_DATABASE_URL;
+const electricUrl = process.env["ELECTRIC_URL"] ?? PERF_LAB_ELECTRIC_URL;
+const host = process.env["WRITE_API_HOST"] ?? PERF_LAB_HOST;
+const port = readPort(process.env["WRITE_API_PORT"], PERF_LAB_WRITE_API_PORT);
 
 const adminDb = drizzle({ connection: databaseUrl });
 const app = new Hono();
@@ -455,23 +455,22 @@ function buildSeedInsertRows(
 
   for (let rowIndex = start; rowIndex < end; rowIndex += 1) {
     const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
+    const timestampUs = 1_700_000_000_000_000n + BigInt(rowIndex);
     const row: Record<string, string | bigint> = {
-      id: String(payload.id),
+      id: payload.id,
       ownerId,
       modifiedBy: ownerId,
-      status: String(payload.status),
-      priority: String(payload.priority),
+      status: payload.status,
+      priority: payload.priority,
+      createdAtUs: timestampUs,
+      updatedAtUs: timestampUs,
     };
 
     for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
-      row[`field${columnIndex.toString().padStart(2, "0")}`] = String(
-        payload[`field${columnIndex.toString().padStart(2, "0")}`],
-      );
+      const fieldKey = `field${columnIndex.toString().padStart(2, "0")}`;
+      row[fieldKey] = payload[fieldKey] ?? "";
     }
 
-    const timestampUs = 1_700_000_000_000_000n + BigInt(rowIndex);
-    row.createdAtUs = timestampUs;
-    row.updatedAtUs = timestampUs;
     rows.push(row);
   }
 

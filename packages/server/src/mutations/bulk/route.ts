@@ -7,6 +7,7 @@ import type { Context, Hono } from "hono";
 
 import type {
   BatchMutationRequest,
+  JwtClaims,
   MutationAck,
   RegistryRelations,
   SyncTableEntry,
@@ -35,7 +36,7 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
   backend: BulkMutationBackend,
   operationsLogConfig: OperationsLogConfig,
   operationsLogReady: Promise<void>,
-  resolveAuthClaims?: (request: Request) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null,
+  resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null,
 ) {
   let startupReadyPromise: Promise<void> | undefined;
   const batchMutationPaths = ["/api/mutations", "/mutations"] as const;
@@ -375,7 +376,7 @@ function isArtifactAuthContextRequired(registry: SyncTableRegistry): boolean {
 
 class UnauthorizedBatchMutationError extends Error {}
 
-function getUuidClaim(claims: Record<string, unknown>, key: string): string | null {
+function getUuidClaim(claims: JwtClaims, key: string): string | null {
   const value = claims[key];
 
   if (typeof value !== "string") {

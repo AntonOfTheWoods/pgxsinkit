@@ -580,7 +580,7 @@ describe("overlay state helpers", () => {
     });
     expect(
       mutations
-        .filter((mutation) => mutation.entityKey.id === todoId)
+        .filter((mutation) => mutation.entityKey["id"] === todoId)
         .map((mutation) => ({ kind: mutation.mutationKind, seq: mutation.mutationSeq })),
     ).toEqual([
       { kind: "update", seq: 2 },
@@ -706,7 +706,7 @@ describe("overlay state helpers", () => {
     const mutations = await runtime.readMutationDetails("todos");
     expect(
       mutations
-        .filter((mutation) => mutation.entityKey.id === todoId)
+        .filter((mutation) => mutation.entityKey["id"] === todoId)
         .map((mutation) => ({ kind: mutation.mutationKind, seq: mutation.mutationSeq })),
     ).toEqual([
       { kind: "delete", seq: 2 },
@@ -1404,7 +1404,7 @@ describe("overlay state helpers", () => {
       await runtime.flush("authors");
 
       const mutations = await runtime.readMutationDetails("authors");
-      const mutationById = new Map(mutations.map((mutation) => [mutation.entityKey.id, mutation]));
+      const mutationById = new Map(mutations.map((mutation) => [mutation.entityKey["id"], mutation]));
 
       // After flush + reconcile, acked entry is cleared. Failed entry remains.
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f970")).toBeUndefined();

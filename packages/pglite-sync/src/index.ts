@@ -29,6 +29,21 @@ import type {
 
 export * from "./types";
 
+/**
+ * Replication-stream headers Electric attaches to change messages but does not
+ * declare on its `Header` type: `lsn` orders changes within the stream and
+ * `last` marks the final change of an LSN. Single choke point for these
+ * protocol assumptions.
+ */
+function readReplicationHeaders(headers: ChangeMessage["headers"]): { lsn: bigint; isLastOfLsn: boolean } {
+  const rawLsn: unknown = headers["lsn"];
+
+  return {
+    lsn: typeof rawLsn === "string" ? BigInt(rawLsn) : BigInt(0),
+    isLastOfLsn: headers["last"] === true,
+  };
+}
+
 async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) {
   const debug = options?.debug ?? false;
   const metadataSchema = options?.metadataSchema ?? "electric";
@@ -317,11 +332,10 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
 
         if (isChangeMessage(message)) {
           const shapeChanges = changes.get(message.shape)!;
-          const lsn = typeof message.headers.lsn === "string" ? BigInt(message.headers.lsn) : BigInt(0);
+          const { lsn, isLastOfLsn } = readReplicationHeaders(message.headers);
           if (lsn <= lastCommittedLsnForShape) {
             return;
           }
-          const isLastOfLsn = (message.headers.last as boolean | undefined) ?? false;
           if (!shapeChanges.has(lsn)) {
             shapeChanges.set(lsn, []);
           }
@@ -428,7 +442,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
         return multiShapeSub.isUpToDate;
       },
       stream: (() => {
-        const stream = multiShapeSub.streams.shape;
+        const stream = multiShapeSub.streams["shape"];
         if (!stream) {
           throw new Error("Missing stream for shape");
         }

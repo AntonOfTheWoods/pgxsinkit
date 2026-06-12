@@ -23,7 +23,7 @@ describe("perf-lab scenario schemas", () => {
       extraColumnCount: 48,
       schemaName,
     });
-    const firstTable = bundle.registry.perf_items_000;
+    const firstTable = bundle.registry["perf_items_000"];
 
     expect(firstTable).toBeDefined();
 

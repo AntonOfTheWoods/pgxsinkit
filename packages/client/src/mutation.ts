@@ -842,12 +842,12 @@ function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableConte
   };
   const nowUs = nowMicroseconds();
 
-  if (hasProperty(context, "createdAtUs") && record.createdAtUs === undefined) {
-    record.createdAtUs = nowUs;
+  if (hasProperty(context, "createdAtUs") && record["createdAtUs"] === undefined) {
+    record["createdAtUs"] = nowUs;
   }
 
-  if (hasProperty(context, "updatedAtUs") && record.updatedAtUs === undefined) {
-    record.updatedAtUs = nowUs;
+  if (hasProperty(context, "updatedAtUs") && record["updatedAtUs"] === undefined) {
+    record["updatedAtUs"] = nowUs;
   }
 
   for (const { propertyKey, column } of context.columns) {
@@ -1326,7 +1326,7 @@ async function flushBatch(
               context,
               stripManagedFields(
                 context,
-                (rawPayload.value ?? rawPayload.patch ?? rawPayload) as Record<string, unknown>,
+                (rawPayload["value"] ?? rawPayload["patch"] ?? rawPayload) as Record<string, unknown>,
                 row.mutationKind as "create" | "update",
               ),
             ),

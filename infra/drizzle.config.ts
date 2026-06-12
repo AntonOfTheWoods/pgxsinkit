@@ -9,6 +9,6 @@ export default defineConfig({
   ],
   out: "./infra/drizzle",
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? "postgresql://postgres:password@localhost:54321/pgxsinkit?sslmode=disable",
+    url: process.env["DATABASE_URL"] ?? "postgresql://postgres:password@localhost:54321/pgxsinkit?sslmode=disable",
   },
 });

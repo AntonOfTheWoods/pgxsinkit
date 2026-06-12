@@ -80,7 +80,7 @@ describe("performance: artifact write load", () => {
                 const tableName = tableNames[tableIndex]!;
                 const entityIndex = workerIndex * config.mutationsPerBatch + mutationIndex;
                 const entityKey = {
-                  id: buildSyntheticCreatePayload(tableIndex, entityIndex, config.extraColumnCount).id as string,
+                  id: buildSyntheticCreatePayload(tableIndex, entityIndex, config.extraColumnCount).id,
                 };
                 const isCreate = batchIndex === 0;
                 const eventIndex =

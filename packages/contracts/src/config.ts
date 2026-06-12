@@ -1,4 +1,23 @@
+import { z } from "zod";
+
 export type TableMode = "readonly" | "writeonly" | "readwrite";
+
+/**
+ * Minimal verified-JWT claim shape the sync layer understands. Providers may
+ * attach arbitrary extra claims; those stay reachable through index access and
+ * ownership claim paths (e.g. "app_metadata.person_id"). Parse decoded JWT
+ * payloads with this schema at the auth boundary so the static type is honest.
+ */
+export const jwtClaimsSchema = z.looseObject({
+  sub: z.string().optional(),
+  app_metadata: z
+    .looseObject({
+      roles: z.array(z.string()).optional(),
+    })
+    .optional(),
+});
+
+export type JwtClaims = z.infer<typeof jwtClaimsSchema>;
 
 export interface PrimaryKeySpec {
   columns: string[];
@@ -54,10 +73,10 @@ export interface TableSpecInput {
   governance?: TableGovernanceSpec;
 }
 
-export interface SyncConfigInput {
+export interface SyncConfigInput<TTables extends Record<string, TableSpecInput> = Record<string, TableSpecInput>> {
   electricUrl: string;
   localSchema?: string;
-  tables: Record<string, TableSpecInput>;
+  tables: TTables;
 }
 
 export function getLocalSyncPrimaryKey(source: {
@@ -98,7 +117,7 @@ export interface RowFilterSpec {
    * Escape hatch: returns a raw SQL fragment ANDed with other filters.
    * Return `null` to bypass all filters (e.g. admin access).
    */
-  customWhere?: (claims: Record<string, unknown>, params?: Record<string, unknown>) => string | null;
+  customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
 }
@@ -107,7 +126,7 @@ function escapeSqlLiteral(value: string): string {
   return value.replace(/'/g, "''");
 }
 
-function readOwnerClaim(claims: Record<string, unknown> | null, claimPath: string): string | null {
+function readOwnerClaim(claims: JwtClaims | null, claimPath: string): string | null {
   let current: unknown = claims;
 
   for (const segment of claimPath.split(".")) {
@@ -138,7 +157,7 @@ function readOwnerClaim(claims: Record<string, unknown> | null, claimPath: strin
  */
 export function buildRowFilterWhere(
   filter: RowFilterSpec,
-  claims: Record<string, unknown> | null,
+  claims: JwtClaims | null,
   params?: Record<string, unknown>,
 ): string | null {
   const parts: string[] = [];

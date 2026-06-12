@@ -44,8 +44,7 @@ describe("performance: client local optimistic views", () => {
           const batchItems: UpdateBatchItem[] = [];
 
           for (let index = start; index < batchEnd; index += 1) {
-            const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount)
-              .id as string;
+            const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount).id;
 
             batchItems.push({
               table: targetTable,
@@ -74,7 +73,7 @@ describe("performance: client local optimistic views", () => {
         const readTimings: number[] = [];
 
         for (let index = 0; index < config.readSamples; index += 1) {
-          const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount).id as string;
+          const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount).id;
           const started = performance.now();
           const result = await client.pglite.query<{ id: string; overlay_kind: string }>(
             `SELECT id, overlay_kind FROM ${targetTable}_read_model WHERE id = $1`,

@@ -1714,14 +1714,14 @@ function buildConcurrentUpdatePatch(
 ) {
   const patch = {
     ...buildSyntheticUpdatePatch(rowIndex + operationIndex + mutationIndex, extraColumnCount),
-  } as Record<string, unknown>;
+  };
 
   if (extraColumnCount > 0) {
-    patch.field00 = `c${clientIndex}-o${operationIndex}-m${mutationIndex}`;
+    patch["field00"] = `c${clientIndex}-o${operationIndex}-m${mutationIndex}`;
   }
 
   if (extraColumnCount > 1) {
-    patch.field01 = `row-${rowIndex}`;
+    patch["field01"] = `row-${rowIndex}`;
   }
 
   return patch;
@@ -1808,7 +1808,7 @@ async function readLocalEntityStateDiagnostics(
   }> = [];
 
   for (const mutation of mutations) {
-    const entityId = mutation.entityKey.id;
+    const entityId = mutation.entityKey["id"];
 
     if (!entityId) {
       continue;
@@ -1886,7 +1886,7 @@ async function readServerEntityStateDiagnostics(
     }> = [];
 
     for (const mutation of mutations) {
-      const entityId = mutation.entityKey.id;
+      const entityId = mutation.entityKey["id"];
 
       if (!entityId) {
         continue;
