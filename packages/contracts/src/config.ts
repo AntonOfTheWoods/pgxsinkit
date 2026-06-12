@@ -75,9 +75,15 @@ export function getLocalSyncPrimaryKeyColumns(source: {
 }
 
 export interface RowFilterSpec {
-  /** WHERE "column" = auth.uid() — ownership-based row filtering. */
+  /** WHERE "column" = '<owner claim>' — ownership-based row filtering. */
   ownership?: {
     column: string;
+    /**
+     * Dot-path into the JWT claims used as the owner value (e.g.
+     * "app_metadata.person_id"). Defaults to "sub". A missing, empty, or
+     * non-primitive claim denies all rows, matching the missing-sub behavior.
+     */
+    claim?: string;
   };
   /** OR clause for shared content: adds rows owned by sharedUserId. */
   shared?: {
@@ -101,6 +107,29 @@ function escapeSqlLiteral(value: string): string {
   return value.replace(/'/g, "''");
 }
 
+function readOwnerClaim(claims: Record<string, unknown> | null, claimPath: string): string | null {
+  let current: unknown = claims;
+
+  for (const segment of claimPath.split(".")) {
+    if (typeof current !== "object" || current === null || Array.isArray(current)) {
+      return null;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+
+  switch (typeof current) {
+    case "string":
+      return current.length > 0 ? current : null;
+    case "number":
+    case "bigint":
+    case "boolean":
+      // Mirrors the historical truthiness check on claims.sub.
+      return current ? String(current) : null;
+    default:
+      return null;
+  }
+}
+
 /**
  * Composes ownership, shared, and customWhere filters into a single
  * SQL WHERE clause suitable for Electric shape requests.
@@ -116,12 +145,15 @@ export function buildRowFilterWhere(
   const { ownership, shared, customWhere } = filter;
 
   // Ownership
-  if (ownership && claims?.sub) {
-    const userId = escapeSqlLiteral(String(claims.sub as string | number | bigint | boolean));
-    parts.push(`"${ownership.column}" = '${userId}'`);
-  } else if (ownership && !claims?.sub) {
-    // No authenticated user — block all rows
-    return "1 = 0";
+  if (ownership) {
+    const ownerValue = readOwnerClaim(claims, ownership.claim ?? "sub");
+
+    if (ownerValue === null) {
+      // No authenticated owner claim — block all rows
+      return "1 = 0";
+    }
+
+    parts.push(`"${ownership.column}" = '${escapeSqlLiteral(ownerValue)}'`);
   }
 
   // Shared content

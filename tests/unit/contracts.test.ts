@@ -2,6 +2,7 @@ import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 
 import {
+  buildRowFilterWhere,
   defineSyncRegistry,
   defineSyncTable,
   getSyncRegistrySchema,
@@ -125,5 +126,51 @@ describe("sync config contracts", () => {
 
     expect(envelope.kind).toBe("update");
     expect(ack.status).toBe("acked");
+  });
+});
+
+describe("buildRowFilterWhere ownership claim selection", () => {
+  it("defaults to the sub claim with deny-on-missing behavior", () => {
+    const filter = { ownership: { column: "person_id" } };
+
+    expect(buildRowFilterWhere(filter, { sub: "user-1" })).toBe(`"person_id" = 'user-1'`);
+    expect(buildRowFilterWhere(filter, null)).toBe("1 = 0");
+    expect(buildRowFilterWhere(filter, {})).toBe("1 = 0");
+  });
+
+  it("reads a dot-path claim when configured", () => {
+    const filter = { ownership: { column: "person_id", claim: "app_metadata.person_id" } };
+    const claims = { sub: "auth-uid", app_metadata: { person_id: "person-9" } };
+
+    expect(buildRowFilterWhere(filter, claims)).toBe(`"person_id" = 'person-9'`);
+  });
+
+  it("denies all rows when the configured claim is missing or non-primitive", () => {
+    const filter = { ownership: { column: "person_id", claim: "app_metadata.person_id" } };
+
+    expect(buildRowFilterWhere(filter, { sub: "auth-uid" })).toBe("1 = 0");
+    expect(buildRowFilterWhere(filter, { sub: "auth-uid", app_metadata: "oops" })).toBe("1 = 0");
+    expect(buildRowFilterWhere(filter, { sub: "auth-uid", app_metadata: { person_id: { nested: true } } })).toBe(
+      "1 = 0",
+    );
+    expect(buildRowFilterWhere(filter, { sub: "auth-uid", app_metadata: { person_id: "" } })).toBe("1 = 0");
+  });
+
+  it("escapes quotes in claim-selected owner values", () => {
+    const filter = { ownership: { column: "person_id", claim: "app_metadata.person_id" } };
+
+    expect(buildRowFilterWhere(filter, { app_metadata: { person_id: "per'son" } })).toBe(`"person_id" = 'per''son'`);
+  });
+
+  it("composes shared OR clauses with claim-selected ownership", () => {
+    const filter = {
+      ownership: { column: "owner_id", claim: "app_metadata.person_id" },
+      shared: { sharedColumn: "is_shared", sharedUserId: "shared-1" },
+    };
+    const claims = { app_metadata: { person_id: "person-9" } };
+
+    expect(buildRowFilterWhere(filter, claims)).toBe(
+      `("owner_id" = 'person-9' OR ("is_shared" = true AND "owner_id" = 'shared-1'))`,
+    );
   });
 });

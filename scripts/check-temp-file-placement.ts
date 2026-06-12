@@ -12,6 +12,8 @@ const allowedRootEntries = new Set([
   ".oxfmtrc.jsonc",
   ".oxlintrc.jsonc",
   ".vscode",
+  "AGENTS.md",
+  "CLAUDE.md",
   "README.md",
   "apps",
   "bun.lock",
