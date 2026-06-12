@@ -88,7 +88,7 @@ export async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): P
     }
     throw new Error("Timed out waiting for PostgreSQL to accept queries");
   } finally {
-    await (db as any).$client?.close();
+    await db.$client.close();
   }
 }
 

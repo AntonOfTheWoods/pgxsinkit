@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
+import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+
 const order: string[] = [];
 
 const initMetadataTablesMock = mock(async (): Promise<void> => {
@@ -108,7 +110,7 @@ describe("createSyncClient subscription reset", () => {
             journalTable: "items_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
       writeUrl: "http://127.0.0.1:3101",
       dataDir: "memory:/client-sync-reset-test",
@@ -149,7 +151,7 @@ describe("createSyncClient subscription reset", () => {
             journalTable: "items_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
       writeUrl: "http://127.0.0.1:3101",
       dataDir: "memory:/client-sync-prepare-test",
@@ -188,7 +190,7 @@ describe("createSyncClient subscription reset", () => {
             journalTable: "items_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
       writeUrl: "http://127.0.0.1:3101",
       dataDir: "memory:/client-sync-prepare-before-schema-test",
@@ -225,7 +227,7 @@ describe("createSyncClient subscription reset", () => {
             journalTable: "items_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
       writeUrl: "http://127.0.0.1:3101",
       dataDir: "memory:/client-sync-get-auth-token-shape-header-test",
@@ -256,7 +258,7 @@ describe("createSyncClient subscription reset", () => {
             journalTable: "items_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
       writeUrl: "http://127.0.0.1:3101",
       dataDir: "memory:/client-sync-no-auth-token-shape-header-test",

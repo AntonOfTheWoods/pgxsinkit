@@ -36,8 +36,9 @@ import type {
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
 
-// PgView is generic; this alias covers any pg view instance.
-type AnyPgView = PgView<any, any, any>;
+// PgView's parameters all default to their upper bounds, so the bare name
+// covers any pg view instance.
+type AnyPgView = PgView;
 
 type TableColumnsShape<TTable extends AnyPgTable> = TTable extends {
   _: {
@@ -64,7 +65,7 @@ export interface ResolvedManagedFieldSpecForTable<TTable extends AnyPgTable> {
 }
 
 export type ClientProjectionSpecForTable<TTable extends AnyPgTable> = Omit<ClientProjectionSpec, "omitColumns"> & {
-  omitColumns?: Array<TableColumnKey<TTable>>;
+  omitColumns?: readonly TableColumnKey<TTable>[];
 };
 
 export interface ProjectedTableColumn<TTable extends AnyPgTable = AnyPgTable> {
@@ -243,17 +244,19 @@ type ManagedFieldColumnKeysForOperation<TEntry, TOperation extends ManagedFieldA
     : never;
 
 export type SyncTableCreateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<any, infer TLocalTable extends AnyPgTable>
+  TRegistry[TKey] extends SyncTableEntry<AnyPgTable, infer TLocalTable extends AnyPgTable>
     ? Omit<InferInsertModel<TLocalTable>, ManagedFieldColumnKeysForOperation<TRegistry[TKey], "create">>
     : never;
 
 export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<any, infer TLocalTable extends AnyPgTable>
+  TRegistry[TKey] extends SyncTableEntry<AnyPgTable, infer TLocalTable extends AnyPgTable>
     ? Partial<Omit<InferInsertModel<TLocalTable>, ManagedFieldColumnKeysForOperation<TRegistry[TKey], "update">>>
     : never;
 
 export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable, any> ? InferSelectModel<TTable> : never;
+  TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable, AnyPgTable>
+    ? InferSelectModel<TTable>
+    : never;
 
 /**
  * Filters a columns object, omitting keys in `omitSet`, while preserving TypeScript column types.
@@ -334,9 +337,7 @@ export function defineSyncTable<
           ...(extras ? extras(self) : []),
         ]
       : undefined;
-  const table = schema
-    ? schema.table(tableName, makeColumns(), extrasFn as any)
-    : pgTable(tableName, makeColumns(), extrasFn as any);
+  const table = schema ? schema.table(tableName, makeColumns(), extrasFn) : pgTable(tableName, makeColumns(), extrasFn);
 
   const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
   const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);
@@ -359,8 +360,14 @@ export function defineSyncTable<
     mode: resolvedMode,
     primaryKey: resolvedPrimaryKey,
     ...(resolvedShape != null ? { shape: resolvedShape } : {}),
-    ...(governance != null ? { governance: governance as any } : {}),
-    ...(resolvedClientProjection != null ? { clientProjection: resolvedClientProjection as any } : {}),
+    // The input specs are typed over the builder columns map (keys of
+    // TColumns); the entry fields demand specs typed over the built table.
+    // The key sets are equal by construction (BuildColumns preserves keys),
+    // but that equality is unprovable while TColumns is an open generic.
+    ...(governance != null ? { governance: governance as TableGovernanceSpecForTable<typeof table> } : {}),
+    ...(resolvedClientProjection != null
+      ? { clientProjection: resolvedClientProjection as unknown as ClientProjectionSpecForTable<typeof table> }
+      : {}),
     table,
     localTable,
     ...(view != null ? { view } : {}),
@@ -369,13 +376,13 @@ export function defineSyncTable<
   return entry as typeof entry & SyncTableInputGovernanceMarker<TGovernance>;
 }
 
-export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any> }>(
+export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry }>(
   registry: TRegistry,
 ): TRegistry;
-export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any> }>(
+export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry }>(
   definition: SyncRegistryDefinition<TRegistry>,
 ): TRegistry;
-export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any> }>(
+export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry }>(
   input: TRegistry | SyncRegistryDefinition<TRegistry>,
 ) {
   if (isSyncRegistryDefinition(input)) {

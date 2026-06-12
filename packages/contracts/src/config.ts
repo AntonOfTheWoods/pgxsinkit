@@ -41,7 +41,7 @@ export interface ClientProjectionSpec {
   syncedTable?: string;
   overlayTable?: string;
   journalTable?: string;
-  omitColumns?: string[];
+  omitColumns?: readonly string[];
   localPrimaryKey?: PrimaryKeySpec;
 }
 

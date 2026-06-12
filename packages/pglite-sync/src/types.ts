@@ -4,7 +4,7 @@ import type { Transaction } from "@electric-sql/pglite";
 export type Lsn = bigint;
 
 export type MapColumnsMap = Record<string, string>;
-export type MapColumnsFn = (message: ChangeMessage<Row<unknown>>) => Record<string, any>;
+export type MapColumnsFn = (message: ChangeMessage<Row<unknown>>) => Row<unknown>;
 export type MapColumns = MapColumnsMap | MapColumnsFn;
 export type SubscriptionKey = string;
 export type InitialInsertMethod = "insert" | "csv" | "json" | "useCopy";
@@ -58,6 +58,6 @@ export interface ElectricSyncOptions {
   metadataSchema?: string;
 }
 
-export type InsertChangeMessage = ChangeMessage<any> & {
+export type InsertChangeMessage = ChangeMessage<Row<unknown>> & {
   headers: { operation: "insert" };
 };

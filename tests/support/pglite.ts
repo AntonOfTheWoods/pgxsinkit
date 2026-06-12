@@ -3,7 +3,7 @@ import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulate
 
 export async function createFreshTestPGlite<TOptions extends PGliteOptions>(options?: TOptions) {
   const pg = await PGlite.create({
-    ...(options as any),
+    ...options,
     loadDataDir: await prepopulatedDataDir(),
   });
   return pg as PGlite &

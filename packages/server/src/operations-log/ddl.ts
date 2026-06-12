@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import type { PgAsyncDatabase } from "drizzle-orm/pg-core";
+import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 
 import type { RegistryRelations, SyncTableRegistry } from "@pgxsinkit/contracts";
 
@@ -17,7 +17,7 @@ type OperationsLogPresenceRow = {
  * in their Drizzle schema so `drizzle-kit generate`/`push` creates it.
  */
 export async function ensureOperationsLogSchema<TRegistry extends SyncTableRegistry>(
-  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   config: OperationsLogConfig,
 ): Promise<boolean> {
   if (!config.enabled) {
@@ -29,7 +29,7 @@ export async function ensureOperationsLogSchema<TRegistry extends SyncTableRegis
     SELECT to_regclass('public.operations_log')::text AS "tableName"
   `);
 
-    const row = Array.from(result, (entry) => entry as OperationsLogPresenceRow)[0];
+    const row = Array.from(result as Iterable<unknown>, (entry) => entry as OperationsLogPresenceRow)[0];
 
     if (!row?.tableName) {
       console.warn(

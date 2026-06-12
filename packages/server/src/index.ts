@@ -1,4 +1,4 @@
-import type { PgAsyncDatabase } from "drizzle-orm/pg-core";
+import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
@@ -33,7 +33,10 @@ interface BunNamespace {
 
 export interface CreateSyncServerOptions<
   TRegistry extends SyncTableRegistry,
-  TDb extends PgAsyncDatabase<any, RegistryRelations<TRegistry>> = PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  TDb extends PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>> = PgAsyncDatabase<
+    PgQueryResultHKT,
+    RegistryRelations<TRegistry>
+  >,
 > {
   registry: TRegistry;
   db: TDb;
@@ -60,7 +63,10 @@ export interface ServerDiagnostics<TRegistry extends SyncTableRegistry> {
 
 export interface SyncServer<
   TRegistry extends SyncTableRegistry,
-  TDb extends PgAsyncDatabase<any, RegistryRelations<TRegistry>> = PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  TDb extends PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>> = PgAsyncDatabase<
+    PgQueryResultHKT,
+    RegistryRelations<TRegistry>
+  >,
 > {
   drizzle: TDb;
   fetch: (request: Request) => Promise<Response>;
@@ -74,7 +80,10 @@ export interface SyncServer<
 
 export function createSyncServer<
   TRegistry extends SyncTableRegistry,
-  TDb extends PgAsyncDatabase<any, RegistryRelations<TRegistry>> = PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  TDb extends PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>> = PgAsyncDatabase<
+    PgQueryResultHKT,
+    RegistryRelations<TRegistry>
+  >,
 >(options: CreateSyncServerOptions<TRegistry, TDb>): SyncServer<TRegistry, TDb> {
   const ownsApp = !options.app;
   const db = options.db;

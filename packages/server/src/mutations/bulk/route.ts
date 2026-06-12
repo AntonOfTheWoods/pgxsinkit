@@ -1,6 +1,6 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, type AnyRelations } from "drizzle-orm";
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
-import type { PgAsyncDatabase } from "drizzle-orm/pg-core";
+import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 import { createSchemaFactory } from "drizzle-orm/zod";
 import type { Context, Hono } from "hono";
@@ -27,11 +27,11 @@ const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
   coerce: { date: true },
 });
 
-type RouteReadQueryClient = Pick<PgAsyncDatabase<any, any>, "select">;
+type RouteReadQueryClient = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations>, "select">;
 
 export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
   app: Hono,
-  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   registry: TRegistry,
   backend: BulkMutationBackend,
   operationsLogConfig: OperationsLogConfig,
@@ -568,7 +568,7 @@ async function readServerUpdatedAtUs(
 }
 
 async function installBulkStartupDdl<TRegistry extends SyncTableRegistry>(
-  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   registry: TRegistry,
   _backend: BulkMutationBackend,
 ): Promise<void> {

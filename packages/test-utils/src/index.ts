@@ -14,7 +14,7 @@ export function createServerDb<TRegistry extends SyncTableRegistry>(
   const db = drizzle({ connection: databaseUrl, relations });
   return {
     db: db as ReturnType<typeof drizzle<RegistryRelations<TRegistry>>>,
-    close: () => (db as any).$client?.close() ?? Promise.resolve(),
+    close: () => db.$client.close(),
   };
 }
 

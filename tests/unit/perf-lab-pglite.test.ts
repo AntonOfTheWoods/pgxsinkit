@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
+import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+
 const destroyMock = mock(async (): Promise<void> => undefined);
 const createSyncClientMock = mock(
   async (): Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: () => Promise<void> }> => ({
@@ -40,7 +42,7 @@ describe("perf-lab pglite loader", () => {
             journalTable: "perf_items_000_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       "idb://pgxsinkit-perf-lab-browser",
       {
         mode: "live",
@@ -76,7 +78,7 @@ describe("perf-lab pglite loader", () => {
             journalTable: "perf_items_000_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       "idb://pgxsinkit-perf-lab-browser",
       {
         mode: "offline",
@@ -110,7 +112,7 @@ describe("perf-lab pglite loader", () => {
             journalTable: "perf_items_000_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       "idb://pgxsinkit-perf-lab-browser",
       {
         mode: "live",
@@ -143,7 +145,7 @@ describe("perf-lab pglite loader", () => {
             journalTable: "perf_items_000_mutations",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       "idb://pgxsinkit-perf-lab-browser",
       {
         mode: "live",

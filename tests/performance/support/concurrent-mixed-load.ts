@@ -1928,7 +1928,7 @@ async function readServerEntityStateDiagnostics(
 
     return diagnostics;
   } finally {
-    await (diagnosticDb as any).$client?.close();
+    await diagnosticDb.$client.close();
   }
 }
 

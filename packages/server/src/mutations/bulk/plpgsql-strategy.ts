@@ -1,5 +1,5 @@
 import { getTableName, sql } from "drizzle-orm";
-import { getTableConfig, type AnyPgTable, type PgAsyncDatabase } from "drizzle-orm/pg-core";
+import { getTableConfig, type AnyPgTable, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 
 import {
@@ -293,7 +293,7 @@ $$;
 }
 
 export async function installPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
-  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   registry: TRegistry,
   options: {
     functionSchema?: string;
@@ -308,7 +308,7 @@ type FunctionPresenceRow = {
 };
 
 export async function verifyPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
-  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   options: {
     functionSchema?: string;
   } = {},
@@ -318,7 +318,7 @@ export async function verifyPlpgsqlBatchFunction<TRegistry extends SyncTableRegi
     SELECT to_regprocedure(${functionSignature})::text AS "functionName"
   `);
 
-  const row = Array.from(result, (entry) => entry as FunctionPresenceRow)[0];
+  const row = Array.from(result as Iterable<unknown>, (entry) => entry as FunctionPresenceRow)[0];
 
   if (!row?.functionName) {
     throw new Error(
@@ -332,14 +332,14 @@ type AuthHelperPresenceRow = {
 };
 
 export async function verifyArtifactRlsAuthHelpers<TRegistry extends SyncTableRegistry>(
-  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
 ): Promise<void> {
   const result = await db.execute<AuthHelperPresenceRow>(sql`
     SELECT
       to_regprocedure('auth.uid()')::text AS "authUid"
   `);
 
-  const row = Array.from(result, (entry) => entry as AuthHelperPresenceRow)[0];
+  const row = Array.from(result as Iterable<unknown>, (entry) => entry as AuthHelperPresenceRow)[0];
   const missingHelpers = [row?.authUid ? null : "auth.uid()"].filter((value): value is string => value !== null);
 
   if (missingHelpers.length > 0) {

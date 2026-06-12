@@ -19,6 +19,7 @@
   },
   "rules": {
     "typescript/ban-ts-comment": "error",
+    "typescript/no-explicit-any": "error",
     "typescript/no-deprecated": "error",
     "typescript/consistent-type-imports": "error",
     "typescript/no-floating-promises": "error",

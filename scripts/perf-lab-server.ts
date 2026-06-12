@@ -765,6 +765,6 @@ async function shutdown() {
 
   shuttingDown = true;
   server.stop();
-  await (adminDb as any).$client?.close();
+  await adminDb.$client.close();
   process.exit(0);
 }

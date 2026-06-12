@@ -1,4 +1,4 @@
-import type { ChangeMessage } from "@electric-sql/client";
+import type { ChangeMessage, Row } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 
 import type { MapColumns, InsertChangeMessage } from "./types";
@@ -7,7 +7,7 @@ export interface ApplyMessageToTableOptions {
   pg: PGliteInterface | Transaction;
   table: string;
   schema?: string | undefined;
-  message: ChangeMessage<any>;
+  message: ChangeMessage<Row<unknown>>;
   mapColumns?: MapColumns | undefined;
   primaryKey: string[];
   debug: boolean;
@@ -87,7 +87,7 @@ export async function applyInsertsToTable({
   primaryKey,
   debug,
 }: BulkApplyMessagesToTableOptions) {
-  const data: Record<string, any>[] = messages.map((message) =>
+  const data: Row<unknown>[] = messages.map((message) =>
     mapColumns ? doMapColumns(mapColumns, message) : message.value,
   );
   const firstRow = data[0];
@@ -98,7 +98,7 @@ export async function applyInsertsToTable({
   if (debug) console.log("inserting", data);
   const columns = Object.keys(firstRow);
 
-  const getValueSize = (value: any): number => {
+  const getValueSize = (value: unknown): number => {
     if (value === null) return 0;
     if (value instanceof ArrayBuffer) return value.byteLength;
     if (value instanceof Blob) return value.size;
@@ -113,13 +113,26 @@ export async function applyInsertsToTable({
         return 8;
       case "boolean":
         return 1;
-      default:
+      case "bigint":
+      case "symbol":
+        return value.toString().length;
+      case "function":
+      case "undefined":
+        return 0;
+      default: {
+        // Remaining typeof: object (null was handled above).
         if (value instanceof Date) return 8;
-        return value?.toString()?.length || 0;
+        try {
+          return JSON.stringify(value)?.length ?? 0;
+        } catch {
+          // Non-serialisable nested value (e.g. bigint inside jsonb).
+          return 16;
+        }
+      }
     }
   };
 
-  const getRowSize = (row: Record<string, any>): number => {
+  const getRowSize = (row: Row<unknown>): number => {
     return columns.reduce((size, column) => {
       const value = row[column];
       if (value === null) return size;
@@ -150,7 +163,7 @@ export async function applyInsertsToTable({
   const maxParams = 32_000;
   const maxBytes = 50 * 1024 * 1024;
 
-  const executeBatch = async (batch: Record<string, any>[]) => {
+  const executeBatch = async (batch: Row<unknown>[]) => {
     const upsertClause = buildUpsertClause(columns, primaryKey);
     const sql = `
       INSERT INTO "${schema}"."${table}"
@@ -163,7 +176,7 @@ export async function applyInsertsToTable({
     await pg.query(sql, values);
   };
 
-  let currentBatch: Record<string, any>[] = [];
+  let currentBatch: Row<unknown>[] = [];
   let currentBatchSize = 0;
   let currentBatchParams = 0;
 
@@ -210,7 +223,7 @@ export async function applyMessagesToTableWithJson({
 }: BulkApplyMessagesToTableOptions) {
   if (debug) console.log("applying messages with json_to_recordset");
 
-  const data: Record<string, any>[] = messages.map((message) =>
+  const data: Row<unknown>[] = messages.map((message) =>
     mapColumns ? doMapColumns(mapColumns, message) : message.value,
   );
   const firstRow = data[0];
@@ -283,7 +296,7 @@ export async function applyMessagesToTableWithCopy({
     return;
   }
 
-  const data: Record<string, any>[] = messages.map((message) =>
+  const data: Row<unknown>[] = messages.map((message) =>
     mapColumns ? doMapColumns(mapColumns, message) : message.value,
   );
   const firstRow = data[0];
@@ -297,10 +310,20 @@ export async function applyMessagesToTableWithCopy({
       return columns
         .map((column) => {
           const value = message[column];
-          if (typeof value === "string" && (value.includes(",") || value.includes('"') || value.includes("\n"))) {
-            return `"${value.replace(/"/g, '""')}"`;
+          if (value === null) {
+            return "\\N";
           }
-          return value === null ? "\\N" : value;
+          // jsonb values arrive as parsed objects; COPY expects their json text.
+          const text =
+            typeof value === "string"
+              ? value
+              : typeof value === "number" || typeof value === "boolean" || typeof value === "bigint"
+                ? value.toString()
+                : (JSON.stringify(value) ?? "\\N");
+          if (text.includes(",") || text.includes('"') || text.includes("\n")) {
+            return `"${text.replace(/"/g, '""')}"`;
+          }
+          return text;
         })
         .join(",");
     })
@@ -323,12 +346,12 @@ export async function applyMessagesToTableWithCopy({
   if (debug) console.log(`Inserted ${messages.length} rows using COPY`);
 }
 
-function doMapColumns(mapColumns: MapColumns, message: ChangeMessage<any>): Record<string, any> {
+function doMapColumns(mapColumns: MapColumns, message: ChangeMessage<Row<unknown>>): Row<unknown> {
   if (typeof mapColumns === "function") {
     return mapColumns(message);
   }
 
-  const mappedColumns: Record<string, any> = {};
+  const mappedColumns: Row<unknown> = {};
   for (const [key, value] of Object.entries(mapColumns)) {
     mappedColumns[key] = message.value[value];
   }

@@ -220,7 +220,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
 
           if (!useInsert) {
             const initialInserts: InsertChangeMessage[] = [];
-            const remainingMessages: ChangeMessage<any>[] = [];
+            const remainingMessages: ChangeMessage<Row<unknown>>[] = [];
             let foundNonInsert = false;
             for (const message of messages) {
               if (!foundNonInsert && message.headers.operation === "insert") {
@@ -251,7 +251,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
           }
 
           const bulkInserts: InsertChangeMessage[] = [];
-          let change: ChangeMessage<any> | null = null;
+          let change: ChangeMessage<Row<unknown>> | null = null;
           const messagesLength = messages.length;
           for (const [index, changeMessage] of messages.entries()) {
             if (changeMessage.headers.operation === "insert") {
