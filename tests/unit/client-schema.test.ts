@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { bigint, integer, jsonb, pgEnum, pgSchema, real, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";

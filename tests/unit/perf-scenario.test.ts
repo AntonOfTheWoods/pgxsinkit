@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { computeDefaultConcurrentFlushBudgetMs } from "../performance/support/scenario";
 
 function buildBudgetInputs(overrides: Partial<Parameters<typeof computeDefaultConcurrentFlushBudgetMs>[0]> = {}) {

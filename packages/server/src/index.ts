@@ -151,7 +151,7 @@ export function createSyncServer<
     fetch,
     request: (path, init) => {
       const baseUrl = address === null ? "http://localhost" : `http://${address.host}:${address.port}`;
-      return fetch(new Request(new URL(path, baseUrl), init));
+      return fetch(new Request(new URL(path, baseUrl).toString(), init));
     },
     start: async () => {
       if (bunServer) {

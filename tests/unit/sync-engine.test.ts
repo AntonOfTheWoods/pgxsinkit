@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { buildDemoSyncConfig } from "@pgxsinkit/schema";
 import { buildConfiguredShapeSpecs, buildShapeConfig, buildShapeUrl } from "@pgxsinkit/sync-engine";
 

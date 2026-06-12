@@ -37,7 +37,6 @@ import type {
 type PgSchemaType = ReturnType<typeof pgSchema>;
 
 // PgView is generic; this alias covers any pg view instance.
-// biome-ignore lint: intentional any
 type AnyPgView = PgView<any, any, any>;
 
 type TableColumnsShape<TTable extends AnyPgTable> = TTable extends {
@@ -328,7 +327,6 @@ export function defineSyncTable<
         }
       : undefined;
 
-  // biome-ignore lint: intentional any for policy/extras passthrough
   const extrasFn =
     policies || extras
       ? (self: PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>) => [

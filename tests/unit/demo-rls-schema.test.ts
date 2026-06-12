@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { getTableConfig } from "drizzle-orm/pg-core";
 
 import { buildSupabaseOwnerOrAdminPredicateSqlText } from "@pgxsinkit/contracts";

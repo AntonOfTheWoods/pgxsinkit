@@ -1,3 +1,5 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+
 import { count, eq } from "drizzle-orm";
 
 import {
@@ -574,7 +576,7 @@ describe("write api artifact backend missing governance prerequisites", () => {
     // The verifyArtifactRlsAuthHelpers check only requires auth.uid()
     // which is always present in a Supabase-compatible database.
     await expectResponseStatus(response, 200);
-    const body = await response.json();
+    const body = (await response.json()) as { acks: Array<{ status?: string }> };
     expect(body.acks).toBeDefined();
     expect(body.acks).toHaveLength(1);
     expect(body.acks[0]?.status).toBe("acked");

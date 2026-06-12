@@ -260,6 +260,7 @@ describe("electric proxy", () => {
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
+      // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
       await expect(
         proxyElectricShapeRequest(
           request,

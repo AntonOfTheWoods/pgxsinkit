@@ -111,6 +111,7 @@ describe("overlay state helpers", () => {
       writeUrl,
     });
 
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
       runtime.create("routeOptionalBatchItems", {
         id: "01963227-d4c7-72db-b858-f89f6af8f901",
@@ -718,6 +719,7 @@ describe("overlay state helpers", () => {
     const { db, runtime } = await createOverlayTestContext();
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f943";
 
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
       runtime.batch([
         {
@@ -758,6 +760,7 @@ describe("overlay state helpers", () => {
   it("rejects invalid local batches without partial journaling", async () => {
     const { db, runtime } = await createOverlayTestContext();
 
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
       runtime.batch([
         {

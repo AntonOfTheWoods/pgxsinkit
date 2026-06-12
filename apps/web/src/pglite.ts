@@ -26,8 +26,8 @@ interface SharedDatabaseEntry {
 const sharedDatabases = new Map<string, SharedDatabaseEntry>();
 
 export async function loadPGlite(options?: LoadPGliteOptions): Promise<LoadedDatabase> {
-  const writeUrl = import.meta.env.VITE_WRITE_API_URL ?? "http://localhost:3001";
-  const electricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${writeUrl}/v1/electric-proxy`;
+  const writeUrl = import.meta.env["VITE_WRITE_API_URL"] ?? "http://localhost:3001";
+  const electricUrl = import.meta.env["VITE_ELECTRIC_URL"] ?? `${writeUrl}/v1/electric-proxy`;
   const getAuthToken = options?.getAuthToken
     ? async () => {
         const token = await options.getAuthToken?.();

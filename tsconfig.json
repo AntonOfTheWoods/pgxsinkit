@@ -1,7 +1,7 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node", "bun-types", "bun-types/test-globals"]
+    "types": ["node", "bun-types"]
   },
   "include": [
     "apps/**/*.ts",
@@ -12,5 +12,11 @@
     "tests/**/*.ts",
     "infra/**/*.ts",
     "drizzle.config.ts"
+  ],
+  "exclude": [
+    "apps/web/src/App.tsx",
+    "apps/web/src/main.tsx",
+    "apps/perf-lab/src/App.tsx",
+    "apps/perf-lab/src/main.tsx"
   ]
 }

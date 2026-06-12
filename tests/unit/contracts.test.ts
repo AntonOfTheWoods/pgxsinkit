@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 

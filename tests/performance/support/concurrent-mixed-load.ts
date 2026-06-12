@@ -2068,7 +2068,7 @@ async function handleIncomingRequest(
   const body = await readRequestBody(incoming);
   const request = new Request(`http://127.0.0.1:${port}${incoming.url ?? "/"}`, {
     method: incoming.method,
-    headers: incoming.headers as HeadersInit,
+    headers: incoming.headers as Bun.HeadersInit,
     body: shouldSendBody(incoming.method) ? body : undefined,
     duplex: "half",
   } as RequestInit & { duplex: "half" });

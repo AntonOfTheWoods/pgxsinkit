@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { runConcurrentMixedLoadScenario } from "./support/concurrent-mixed-load";
 import {
   assertPerfBudgets,

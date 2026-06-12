@@ -32,8 +32,8 @@ const offlineConnectionDefaults = {
 } as const;
 
 export function getPerfLabConnectionDefaults(): PerfLabConnectionDefaults {
-  const liveWriteUrl = import.meta.env.VITE_WRITE_API_URL ?? "http://127.0.0.1:3101";
-  const liveElectricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${liveWriteUrl}/v1/electric-proxy`;
+  const liveWriteUrl = import.meta.env["VITE_WRITE_API_URL"] ?? "http://127.0.0.1:3101";
+  const liveElectricUrl = import.meta.env["VITE_ELECTRIC_URL"] ?? `${liveWriteUrl}/v1/electric-proxy`;
 
   return {
     liveWriteUrl,

@@ -1,3 +1,4 @@
+import { describe, expect, it } from "bun:test";
 import { performance } from "node:perf_hooks";
 
 import { createSyncClient, type ClientPGlite } from "@pgxsinkit/client";

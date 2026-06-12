@@ -1,3 +1,4 @@
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { performance } from "node:perf_hooks";
 
 import type { PGlite } from "@electric-sql/pglite";
