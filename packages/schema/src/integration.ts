@@ -177,21 +177,32 @@ const workItemsSyncEntry = defineSyncTable({
 
 export const workItemsTable = workItemsSyncEntry.table;
 
-// Read-path fan-out (Scenario A): a member syncs every work_item in the workspaces they belong to —
-// including items owned by other members. Returns no rows for an unauthenticated subject.
-function workspaceMembershipRowFilter(claims: JwtClaims): string | null {
+// Read-path fan-out + role-asymmetric visibility (Scenario A + B). A member syncs every *visible*
+// work_item in the workspaces they belong to (including items owned by other members); a workspace
+// *manager* additionally syncs *hidden* items in the workspaces they manage. So two members of the
+// same workspace receive different row sets purely by their per-workspace role — the generic
+// mechanism behind "a moderator sees hidden content a regular member does not". The whole predicate
+// (two correlated subqueries + a boolean branch) is forwarded verbatim as the Electric shape `where`.
+// `role` is a pg enum, so it is cast to text (`"role"::text`) — Electric's where-grammar accepts an
+// enum only when the column is cast to text, never a bare enum literal. Returns no rows for an
+// unauthenticated subject.
+function workspaceVisibilityRowFilter(claims: JwtClaims): string | null {
   if (!claims.sub) {
     return "1 = 0";
   }
 
-  return `"workspace_id" IN (SELECT "workspace_id" FROM "workspace_members" WHERE "member_id" = '${escapeSqlLiteral(claims.sub)}')`;
+  const sub = escapeSqlLiteral(claims.sub);
+  const memberOf = `SELECT "workspace_id" FROM "workspace_members" WHERE "member_id" = '${sub}'`;
+  const managerOf = `SELECT "workspace_id" FROM "workspace_members" WHERE "member_id" = '${sub}' AND "role"::text = 'manager'`;
+
+  return `"workspace_id" IN (${memberOf}) AND ("hidden" = false OR "workspace_id" IN (${managerOf}))`;
 }
 
-// Server registry: work_items carries the membership read-filter (applied by the proxy).
+// Server registry: work_items carries the visibility read-filter (applied by the proxy).
 export const membershipFanoutSyncRegistry = defineSyncRegistry({
   work_items: {
     ...workItemsSyncEntry,
-    shape: { ...workItemsSyncEntry.shape!, rowFilter: { customWhere: workspaceMembershipRowFilter } },
+    shape: { ...workItemsSyncEntry.shape!, rowFilter: { customWhere: workspaceVisibilityRowFilter } },
   },
 });
 
