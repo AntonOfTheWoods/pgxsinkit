@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { pgRole } from "drizzle-orm/pg-core";
 
 import {
+  buildSupabaseMembershipNativePolicies,
   buildSupabaseOwnerOrAdminNativePolicies,
   buildSupabaseOwnerOrAdminPredicateSqlText,
   supabaseOwnerOrAdminDefaults,
@@ -151,5 +152,46 @@ describe("contracts supabase RLS helpers", () => {
         withCheck: null,
       },
     });
+  });
+
+  it("gates membership INSERT/UPDATE on write-state but leaves SELECT/DELETE open", () => {
+    const policies = buildSupabaseMembershipNativePolicies({
+      tableName: "work_items",
+      role: pgRole("authenticated"),
+      containerSqlColumn: "workspace_id",
+      membershipTableName: "workspace_members",
+      membershipContainerSqlColumn: "workspace_id",
+      membershipSubjectSqlColumn: "member_id",
+      managerRoleSqlColumn: "role",
+      writeGate: {
+        containerTableName: "workspaces",
+        containerPkSqlColumn: "id",
+        containerLockSqlColumn: "locked",
+        membershipMutedSqlColumn: "muted",
+      },
+    }) as NativePolicy[];
+
+    const byCommand = Object.fromEntries(
+      policies.map((policy) => [
+        policy.for,
+        { using: nativeSqlToText(policy.using), withCheck: nativeSqlToText(policy.withCheck) },
+      ]),
+    );
+
+    // INSERT WITH CHECK keeps owner+member and adds the write-state gate (lock bypassable by a manager,
+    // plus a not-muted requirement).
+    expect(byCommand["insert"]?.withCheck).toContain("owner_id =");
+    expect(byCommand["insert"]?.withCheck).toContain("FROM workspaces WHERE locked = false");
+    expect(byCommand["insert"]?.withCheck).toContain("AND muted = false");
+
+    // UPDATE gates both USING and WITH CHECK.
+    expect(byCommand["update"]?.using).toContain("FROM workspaces WHERE locked = false");
+    expect(byCommand["update"]?.withCheck).toContain("AND muted = false");
+
+    // SELECT and DELETE are untouched by write-state.
+    expect(byCommand["select"]?.using).not.toContain("locked");
+    expect(byCommand["select"]?.using).not.toContain("muted");
+    expect(byCommand["delete"]?.using).not.toContain("locked");
+    expect(byCommand["delete"]?.using).not.toContain("muted");
   });
 });

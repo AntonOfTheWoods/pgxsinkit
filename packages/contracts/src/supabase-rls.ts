@@ -170,9 +170,27 @@ export type SupabaseMembershipPredicateOptions = {
   subjectCastType?: string;
 };
 
+// Optional write-state gate (generic). When supplied, INSERT and UPDATE are additionally gated on
+// mutable state: a *locked* container admits writes only from a manager (e.g. a frozen discussion
+// thread), and a *muted* member may not write at all. SELECT and DELETE are unaffected — reads and
+// moderation deletes still flow. Domain-agnostic: the container/lock and membership/mute columns are
+// parameters. Requires managerRoleSqlColumn (managers bypass the lock).
+export type SupabaseMembershipWriteGateOptions = {
+  /** Container table holding the lock flag (e.g. "workspaces"). */
+  containerTableName: string;
+  /** PK column on the container table the governed row's container column references (e.g. "id"). */
+  containerPkSqlColumn: string;
+  /** Boolean column on the container table; when true, only a manager may write (e.g. "locked"). */
+  containerLockSqlColumn: string;
+  /** Boolean column on the membership table; when true, that member may not write (e.g. "muted"). */
+  membershipMutedSqlColumn: string;
+};
+
 export type SupabaseMembershipNativePoliciesOptions = SupabaseMembershipPredicateOptions & {
   tableName: string;
   role: PgRole;
+  /** Optional write-state gate applied to INSERT and UPDATE only. */
+  writeGate?: SupabaseMembershipWriteGateOptions;
 };
 
 const defaultManagerRoleValue = "manager";
@@ -255,6 +273,37 @@ function buildOwnerOrManagerPredicate(
   return `(${owner}) OR ${buildMembershipMatchSqlText(normalized, subjectSql, true)}`;
 }
 
+function normalizeWriteGate(gate: SupabaseMembershipWriteGateOptions): SupabaseMembershipWriteGateOptions {
+  assertIdentifier(gate.containerTableName, "writeGate.containerTableName");
+  assertIdentifier(gate.containerPkSqlColumn, "writeGate.containerPkSqlColumn");
+  assertIdentifier(gate.containerLockSqlColumn, "writeGate.containerLockSqlColumn");
+  assertIdentifier(gate.membershipMutedSqlColumn, "writeGate.membershipMutedSqlColumn");
+  return gate;
+}
+
+// write-state gate: ((container not locked) OR caller is a manager) AND caller's membership not muted.
+// Same IN-containment discipline as buildMembershipMatchSqlText, so the container/membership tables
+// can reuse their own column names without shadowing the governed row's container column.
+function buildMembershipWriteGateSqlText(
+  normalized: ReturnType<typeof normalizeMembershipOptions>,
+  gate: SupabaseMembershipWriteGateOptions,
+  subjectSql: string,
+): string {
+  const unlocked = `${normalized.containerSqlColumn} IN (
+    SELECT ${gate.containerPkSqlColumn}
+    FROM ${gate.containerTableName}
+    WHERE ${gate.containerLockSqlColumn} = false
+  )`;
+  const manager = buildMembershipMatchSqlText(normalized, subjectSql, true);
+  const notMuted = `${normalized.containerSqlColumn} IN (
+    SELECT ${normalized.membershipContainerSqlColumn}
+    FROM ${normalized.membershipTableName}
+    WHERE ${normalized.membershipSubjectSqlColumn} = ${subjectSql} AND ${gate.membershipMutedSqlColumn} = false
+  )`;
+
+  return `((${unlocked}) OR ${manager}) AND ${notMuted}`;
+}
+
 export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershipNativePoliciesOptions) {
   const normalized = normalizeMembershipOptions(options);
   const subjectSql = buildSubjectSqlText(normalized.subjectCastType);
@@ -263,13 +312,24 @@ export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershi
   const ownerAndMember = `(${buildOwnerPredicate(normalized, subjectSql)}) AND ${memberPredicate}`;
   const ownerOrManager = buildOwnerOrManagerPredicate(normalized, subjectSql);
 
+  let writeGateClause: string | null = null;
+  if (options.writeGate) {
+    if (!normalized.managerRoleSqlColumn) {
+      throw new Error("writeGate requires managerRoleSqlColumn so a manager can write into a locked container");
+    }
+    writeGateClause = buildMembershipWriteGateSqlText(normalized, normalizeWriteGate(options.writeGate), subjectSql);
+  }
+
+  const gatedForWrite = (base: string): string => (writeGateClause ? `(${base}) AND ${writeGateClause}` : base);
+
   const predicateFor = (command: MembershipPolicyKind): string => {
     switch (command) {
       case "select":
         return memberPredicate;
       case "insert":
-        return ownerAndMember;
+        return gatedForWrite(ownerAndMember);
       case "update":
+        return gatedForWrite(ownerOrManager);
       case "delete":
         return ownerOrManager;
     }

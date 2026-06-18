@@ -129,6 +129,8 @@ export const workItemStatusEnum = pgEnum("work_item_status", ["open", "resolved"
 export const workspacesTable = pgTable("workspaces", {
   id: uuid("id").primaryKey(),
   ownerId: uuid("owner_id"),
+  // Scenario C (write-state gating): when locked, only a manager may write into this workspace.
+  locked: boolean("locked").notNull().default(false),
 });
 
 export const workspaceMembersTable = pgTable("workspace_members", {
@@ -138,6 +140,8 @@ export const workspaceMembersTable = pgTable("workspace_members", {
     .references(() => workspacesTable.id),
   memberId: uuid("member_id").notNull(),
   role: workspaceMemberRoleEnum("role").notNull().default("member"),
+  // Scenario C (write-state gating): a muted member may not write, even when the workspace is open.
+  muted: boolean("muted").notNull().default(false),
 });
 
 const workItemsSyncEntry = defineSyncTable({
@@ -164,6 +168,13 @@ const workItemsSyncEntry = defineSyncTable({
     membershipContainerSqlColumn: "workspace_id",
     membershipSubjectSqlColumn: "member_id",
     managerRoleSqlColumn: "role",
+    // Scenario C: gate INSERT/UPDATE on a locked workspace (manager-only) and a muted membership.
+    writeGate: {
+      containerTableName: "workspaces",
+      containerPkSqlColumn: "id",
+      containerLockSqlColumn: "locked",
+      membershipMutedSqlColumn: "muted",
+    },
   }),
   mode: "readwrite",
   governance: {
