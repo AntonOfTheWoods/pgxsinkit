@@ -22,8 +22,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.31",
-    "@pgxsinkit/sync-engine": "^0.1.31"
+    "@pgxsinkit/contracts": "workspace:*",
+    "@pgxsinkit/sync-engine": "workspace:*"
   },
   "peerDependencies": {
     "@electric-sql/pglite": "0.5.2",

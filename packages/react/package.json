@@ -22,8 +22,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/client": "^0.1.31",
-    "@pgxsinkit/contracts": "^0.1.31"
+    "@pgxsinkit/client": "workspace:*",
+    "@pgxsinkit/contracts": "workspace:*"
   },
   "peerDependencies": {
     "@electric-sql/pglite": "0.5.2",

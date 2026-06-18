@@ -21,13 +21,13 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
-const DRY_RUN = process.env.DRY_RUN === "1";
+const DRY_RUN = process.env["DRY_RUN"] === "1";
 const REGISTRY = "https://npm.pkg.github.com";
 
-const repository = process.env.GITHUB_REPOSITORY ?? "";
-const refType = process.env.GITHUB_REF_TYPE ?? "branch";
-const refName = process.env.GITHUB_REF_NAME ?? "";
-const shortSha = (process.env.GITHUB_SHA ?? "").slice(0, 7);
+const repository = process.env["GITHUB_REPOSITORY"] ?? "";
+const refType = process.env["GITHUB_REF_TYPE"] ?? "branch";
+const refName = process.env["GITHUB_REF_NAME"] ?? "";
+const shortSha = (process.env["GITHUB_SHA"] ?? "").slice(0, 7);
 
 const SEMVER_TAG_RE = /^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._+-]+)?$/;
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -118,6 +119,12 @@ function readPublicPackageManifests(): PublicPackageManifest[] {
 }
 
 function updateDependencyVersion(spec: string, version: string): string {
+  // Sibling deps use the workspace protocol; bun resolves it to the real version
+  // at pack/publish time, so it must never be rewritten to a pinned range here.
+  if (spec.startsWith("workspace:")) {
+    return spec;
+  }
+
   if (spec.startsWith("^")) {
     return `^${version}`;
   }
@@ -129,7 +136,24 @@ function updateDependencyVersion(spec: string, version: string): string {
   return version;
 }
 
-function updateManifestVersions(version: string): void {
+// A workspace version bump does not dirty bun's lockfile — not even `bun install --force`
+// refreshes the recorded workspace versions — so `workspace:*` siblings would otherwise pack and
+// publish with the *previous* version. Regenerate the lockfile from scratch to keep it consistent.
+function refreshLockfile(): void {
+  const lockfilePath = resolve(repoRoot, "bun.lock");
+  if (existsSync(lockfilePath)) {
+    rmSync(lockfilePath);
+  }
+
+  const result = spawnSync("bun", ["install"], { cwd: repoRoot, stdio: "inherit" });
+  if (result.status !== 0) {
+    throw new Error("Failed to regenerate bun.lock after the version bump");
+  }
+
+  console.log("Regenerated bun.lock to match the new workspace versions.");
+}
+
+function updateManifestVersions(version: string): boolean {
   const packageManifests = readPublicPackageManifests();
   const publicPackageNames = new Set(packageManifests.map((entry) => entry.manifest.name));
   let updatedPackageCount = 0;
@@ -173,11 +197,14 @@ function updateManifestVersions(version: string): void {
 
   if (updatedPackageCount === 0) {
     console.log(`Public package manifests already match version ${version}`);
-    return;
+    return false;
   }
 
   console.log(`Updated ${updatedPackageCount} public package manifest(s) to version ${version}`);
+  return true;
 }
 
 const options = parseArgs(process.argv.slice(2));
-updateManifestVersions(options.version);
+if (updateManifestVersions(options.version)) {
+  refreshLockfile();
+}
