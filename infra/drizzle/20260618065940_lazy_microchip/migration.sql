@@ -1,0 +1,1 @@
+ALTER TABLE "workspaces" ADD COLUMN "name" varchar(120);

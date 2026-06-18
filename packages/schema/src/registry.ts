@@ -1,5 +1,6 @@
 import { defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
 
+import { membershipFanoutSyncRegistry } from "./integration";
 import { authorsSyncEntry, todosSyncEntry } from "./schema";
 
 function escapeSqlLiteral(value: string): string {
@@ -31,4 +32,12 @@ export const demoSyncRegistry = defineSyncRegistry({
     ...todosSyncEntry,
     shape: { ...todosSyncEntry.shape!, rowFilter: { customWhere: ownershipRowFilter } },
   },
+});
+
+// The registry the demo website + write-api use: the authors/todos ownership demo plus the
+// membership scenarios (readonly workspaces + workspace_members, readwrite work_items). Kept separate
+// from `demoSyncRegistry` so the existing demo-registry tests stay pinned to authors/todos only.
+export const demoMembershipSyncRegistry = defineSyncRegistry({
+  ...demoSyncRegistry,
+  ...membershipFanoutSyncRegistry,
 });

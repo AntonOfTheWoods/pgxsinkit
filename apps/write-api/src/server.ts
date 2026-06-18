@@ -3,7 +3,7 @@ import { defineRelations } from "drizzle-orm/relations";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
-import { demoSyncRegistry } from "@pgxsinkit/schema";
+import { demoMembershipSyncRegistry } from "@pgxsinkit/schema";
 import { buildRegistrySchema, createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
 
 import { parseDemoAuthClaimsFromRequest } from "./demo-auth";
@@ -18,12 +18,12 @@ const idleTimeoutSeconds = writeApiEnv.WRITE_API_IDLE_TIMEOUT_SECONDS;
 
 console.log("Starting write-api...", { databaseUrl, electricUrl, backend, operationsLogEnabled, idleTimeoutSeconds });
 
-const schema = buildRegistrySchema(demoSyncRegistry);
+const schema = buildRegistrySchema(demoMembershipSyncRegistry);
 const relations = defineRelations(schema);
 const db = drizzle({ connection: databaseUrl, relations });
 
 const server = createSyncServer({
-  registry: demoSyncRegistry,
+  registry: demoMembershipSyncRegistry,
   db,
   backend,
   resolveAuthClaims: (request) => {
@@ -53,7 +53,7 @@ app.get("/v1/electric-proxy", async (context) => {
   try {
     const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
     return await proxyElectricShapeRequest(context.req.raw, claims, {
-      registry: demoSyncRegistry,
+      registry: demoMembershipSyncRegistry,
       electricUrl,
     });
   } catch (error) {

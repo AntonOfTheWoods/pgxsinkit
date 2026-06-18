@@ -1,8 +1,8 @@
 import { createSyncClient, type ClientPGlite } from "@pgxsinkit/client";
-import { demoSyncRegistry, type DemoAuthIdentity } from "@pgxsinkit/schema";
+import { demoMembershipSyncRegistry, type DemoAuthIdentity } from "@pgxsinkit/schema";
 
 export type AppDb = ClientPGlite;
-export type AppClient = Awaited<ReturnType<typeof createSyncClient<typeof demoSyncRegistry>>>;
+export type AppClient = Awaited<ReturnType<typeof createSyncClient<typeof demoMembershipSyncRegistry>>>;
 
 interface LoadedDatabase {
   client: AppClient;
@@ -42,7 +42,7 @@ export async function loadPGlite(options?: LoadPGliteOptions): Promise<LoadedDat
     entry = {
       refCount: 0,
       promise: createSyncClient({
-        registry: demoSyncRegistry,
+        registry: demoMembershipSyncRegistry,
         electricUrl,
         writeUrl,
         ...(getAuthToken ? { getAuthToken } : {}),

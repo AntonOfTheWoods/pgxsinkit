@@ -39,6 +39,7 @@ async function main() {
   ]);
   await waitForPgReady(env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL);
   runCommand("bun", ["run", "db:migrate"], env);
+  runCommand("bun", ["run", "seed:demo"], env);
 }
 
 await main();

@@ -1,4 +1,4 @@
-export type DemoAuthIdentity = "none" | "user1" | "user2" | "admin";
+export type DemoAuthIdentity = "none" | "user1" | "user2" | "user3" | "user4" | "user5" | "admin";
 export type DemoAppRole = "student" | "admin";
 
 /** A type (not interface) so it stays assignable to the index-signature-bearing
@@ -125,6 +125,9 @@ export const demoAuthTokenByIdentity: Record<DemoAuthIdentity, string | null> = 
   none: null,
   user1: DEMO_JWT_USER1,
   user2: DEMO_JWT_USER2,
+  user3: DEMO_JWT_USER3,
+  user4: DEMO_JWT_USER4,
+  user5: DEMO_JWT_USER5,
   admin: DEMO_JWT_ADMIN,
 };
 

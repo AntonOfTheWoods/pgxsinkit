@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, pgEnum, pgTable, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, boolean, pgEnum, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
 import {
@@ -126,23 +126,41 @@ function escapeSqlLiteral(value: string): string {
 export const workspaceMemberRoleEnum = pgEnum("workspace_member_role", ["member", "manager"]);
 export const workItemStatusEnum = pgEnum("work_item_status", ["open", "resolved"]);
 
-export const workspacesTable = pgTable("workspaces", {
-  id: uuid("id").primaryKey(),
-  ownerId: uuid("owner_id"),
-  // Scenario C (write-state gating): when locked, only a manager may write into this workspace.
-  locked: boolean("locked").notNull().default(false),
+// Container + membership are READONLY sync entries: a member syncs the workspaces they belong to and
+// their own membership rows (role + muted), so a client can render its membership context locally.
+// Read filtering is the proxy customWhere (Electric bypasses RLS on reads); there is no write path,
+// hence no RLS. The read filters are attached where the registry is assembled, like work_items.
+const workspacesSyncEntry = defineSyncTable({
+  tableName: "workspaces",
+  makeColumns: () => ({
+    id: uuid("id").primaryKey(),
+    ownerId: uuid("owner_id"),
+    // Display label for UIs; nullable so non-demo fixtures need not set it.
+    name: varchar("name", { length: 120 }),
+    // Scenario C (write-state gating): when locked, only a manager may write into this workspace.
+    locked: boolean("locked").notNull().default(false),
+  }),
+  mode: "readonly",
 });
 
-export const workspaceMembersTable = pgTable("workspace_members", {
-  id: uuid("id").primaryKey(),
-  workspaceId: uuid("workspace_id")
-    .notNull()
-    .references(() => workspacesTable.id),
-  memberId: uuid("member_id").notNull(),
-  role: workspaceMemberRoleEnum("role").notNull().default("member"),
-  // Scenario C (write-state gating): a muted member may not write, even when the workspace is open.
-  muted: boolean("muted").notNull().default(false),
+export const workspacesTable = workspacesSyncEntry.table;
+
+const workspaceMembersSyncEntry = defineSyncTable({
+  tableName: "workspace_members",
+  makeColumns: () => ({
+    id: uuid("id").primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id),
+    memberId: uuid("member_id").notNull(),
+    role: workspaceMemberRoleEnum("role").notNull().default("member"),
+    // Scenario C (write-state gating): a muted member may not write, even when the workspace is open.
+    muted: boolean("muted").notNull().default(false),
+  }),
+  mode: "readonly",
 });
+
+export const workspaceMembersTable = workspaceMembersSyncEntry.table;
 
 const workItemsSyncEntry = defineSyncTable({
   tableName: "work_items",
@@ -187,6 +205,7 @@ const workItemsSyncEntry = defineSyncTable({
 });
 
 export const workItemsTable = workItemsSyncEntry.table;
+export const workItemsView = workItemsSyncEntry.view!;
 
 // Read-path fan-out + role-asymmetric visibility (Scenario A + B). A member syncs every *visible*
 // work_item in the workspaces they belong to (including items owned by other members); a workspace
@@ -209,8 +228,35 @@ function workspaceVisibilityRowFilter(claims: JwtClaims): string | null {
   return `"workspace_id" IN (${memberOf}) AND ("hidden" = false OR "workspace_id" IN (${managerOf}))`;
 }
 
-// Server registry: work_items carries the visibility read-filter (applied by the proxy).
+// Read filters for the readonly container/membership tables: a member syncs the workspaces they
+// belong to (cross-table membership subquery) and only their own membership rows (simple equality).
+function workspacesRowFilter(claims: JwtClaims): string | null {
+  if (!claims.sub) {
+    return "1 = 0";
+  }
+
+  return `"id" IN (SELECT "workspace_id" FROM "workspace_members" WHERE "member_id" = '${escapeSqlLiteral(claims.sub)}')`;
+}
+
+function workspaceMembersRowFilter(claims: JwtClaims): string | null {
+  if (!claims.sub) {
+    return "1 = 0";
+  }
+
+  return `"member_id" = '${escapeSqlLiteral(claims.sub)}'`;
+}
+
+// Server registry: each entry carries its read-filter (applied by the proxy). workspaces +
+// workspace_members are readonly; work_items is readwrite with the role-asymmetric visibility filter.
 export const membershipFanoutSyncRegistry = defineSyncRegistry({
+  workspaces: {
+    ...workspacesSyncEntry,
+    shape: { ...workspacesSyncEntry.shape!, rowFilter: { customWhere: workspacesRowFilter } },
+  },
+  workspace_members: {
+    ...workspaceMembersSyncEntry,
+    shape: { ...workspaceMembersSyncEntry.shape!, rowFilter: { customWhere: workspaceMembersRowFilter } },
+  },
   work_items: {
     ...workItemsSyncEntry,
     shape: { ...workItemsSyncEntry.shape!, rowFilter: { customWhere: workspaceVisibilityRowFilter } },
@@ -222,6 +268,20 @@ export function buildMembershipFanoutSyncConfig(electricUrl: string): SyncConfig
   return {
     electricUrl,
     tables: {
+      work_items: workItemsSyncEntry,
+    },
+  };
+}
+
+// Client config that also syncs the readonly container + membership tables (the demo's full path).
+export function buildDemoMembershipSyncConfig(
+  electricUrl: string,
+): SyncConfigInput<{ workspaces: TableSpecInput; workspace_members: TableSpecInput; work_items: TableSpecInput }> {
+  return {
+    electricUrl,
+    tables: {
+      workspaces: workspacesSyncEntry,
+      workspace_members: workspaceMembersSyncEntry,
       work_items: workItemsSyncEntry,
     },
   };

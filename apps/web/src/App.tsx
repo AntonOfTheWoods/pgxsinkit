@@ -12,7 +12,10 @@ import {
   demoAuthTokenByIdentity,
   todosTable,
   todosView,
-  type demoSyncRegistry,
+  workItemsView,
+  workspaceMembersTable,
+  workspacesTable,
+  type demoMembershipSyncRegistry,
   type DemoAuthIdentity,
 } from "@pgxsinkit/schema";
 
@@ -22,7 +25,20 @@ import { createReplProxy } from "./repl-proxy";
 const createTodoInputSchema = createInsertSchema(todosTable);
 const createAuthorInputSchema = createInsertSchema(authorsTable);
 
-const { SyncClientProvider, useSyncClient, useLiveDrizzleRows } = createSyncClientHooks<typeof demoSyncRegistry>();
+const { SyncClientProvider, useSyncClient, useLiveDrizzleRows } =
+  createSyncClientHooks<typeof demoMembershipSyncRegistry>();
+
+const identityOptions: { value: DemoAuthIdentity; label: string }[] = [
+  { value: "none", label: "No user" },
+  { value: "user1", label: "User 1 — Aurora manager" },
+  { value: "user2", label: "User 2 — Aurora member" },
+  { value: "user3", label: "User 3 — Aurora member (muted)" },
+  { value: "user4", label: "User 4 — Borealis manager" },
+  { value: "user5", label: "User 5 — Borealis member" },
+  { value: "admin", label: "Admin" },
+];
+
+const validIdentities = new Set<string>(identityOptions.map((option) => option.value));
 
 const emptyForm = {
   title: "",
@@ -37,8 +53,8 @@ const identityStorageKey = "pgxsinkit-demo-identity";
 export function App() {
   const [authIdentity] = useState<DemoAuthIdentity>(() => {
     const raw = window.localStorage.getItem(identityStorageKey);
-    if (raw === "none" || raw === "user1" || raw === "user2" || raw === "admin") {
-      return raw;
+    if (raw && validIdentities.has(raw)) {
+      return raw as DemoAuthIdentity;
     }
 
     return "user1";
@@ -189,6 +205,51 @@ function TodoApp({
         .orderBy(authorsView.createdAtUs),
     [],
   );
+  // Membership scenarios: each of these arrives filtered to the current identity by the proxy.
+  // workspaces + workspace_members are readonly synced tables (no overlay); work_items is the
+  // overlay-merged read model.
+  const { rows: workspaceRows } = useLiveDrizzleRows(
+    (c) =>
+      c.drizzle
+        .select({ id: workspacesTable.id, name: workspacesTable.name, locked: workspacesTable.locked })
+        .from(workspacesTable)
+        .orderBy(workspacesTable.name),
+    [],
+  );
+  const { rows: membershipRows } = useLiveDrizzleRows(
+    (c) =>
+      c.drizzle
+        .select({
+          workspaceId: workspaceMembersTable.workspaceId,
+          role: workspaceMembersTable.role,
+          muted: workspaceMembersTable.muted,
+        })
+        .from(workspaceMembersTable),
+    [],
+  );
+  const { rows: workItemRows } = useLiveDrizzleRows(
+    (c) =>
+      c.drizzle
+        .select({
+          id: workItemsView.id,
+          workspaceId: workItemsView.workspaceId,
+          body: workItemsView.body,
+          hidden: workItemsView.hidden,
+          ownerId: workItemsView.ownerId,
+        })
+        .from(workItemsView)
+        .orderBy(workItemsView.createdAtUs),
+    [],
+  );
+  const [workItemBody, setWorkItemBody] = useState<string>("");
+  const [workItemWorkspaceId, setWorkItemWorkspaceId] = useState<string>("");
+
+  const membershipByWorkspace = new Map(membershipRows.map((row) => [row.workspaceId, row]));
+  const workspaceNameById = new Map(workspaceRows.map((row) => [row.id, row.name ?? row.id]));
+
+  useEffect(() => {
+    setWorkItemWorkspaceId((prev) => (prev.length === 0 && workspaceRows[0] ? workspaceRows[0].id : prev));
+  }, [workspaceRows]);
 
   useEffect(() => {
     let isDisposed = false;
@@ -321,6 +382,31 @@ function TodoApp({
     setAuthorName("");
   }
 
+  async function handleCreateWorkItem(event: React.SubmitEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+
+    if (workItemWorkspaceId.length === 0) {
+      setError("Pick a workspace before posting a work item.");
+      return;
+    }
+
+    try {
+      await client.tables.work_items.create({
+        id: uuidv7(),
+        workspaceId: workItemWorkspaceId,
+        body: workItemBody,
+      });
+      await client.flush();
+      await refreshMutationState();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to queue work item");
+      return;
+    }
+
+    setWorkItemBody("");
+  }
+
   async function processQueuedWork(action: () => Promise<void>) {
     setError(null);
 
@@ -392,10 +478,11 @@ function TodoApp({
                 value={authIdentity}
                 onChange={(event) => onAuthIdentityChange(event.target.value as DemoAuthIdentity)}
               >
-                <option value="none">No user</option>
-                <option value="user1">User 1</option>
-                <option value="user2">User 2</option>
-                <option value="admin">Admin</option>
+                {identityOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </label>
             <span className="status-pill status-journal">
@@ -407,6 +494,78 @@ function TodoApp({
                 Retry failed writes
               </button>
             ) : null}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="journal-header">
+            <h2>Workspaces (membership-synced)</h2>
+            <p className="muted">
+              These rows arrive filtered to your identity: you sync the workspaces you belong to, your own membership,
+              and the work items visible to you. Switch identity to watch fan-out, manager-only hidden rows, and
+              lock/mute write-gating change.
+            </p>
+          </div>
+          <div className="grid">
+            <div className="insight">
+              <h2>Your workspaces</h2>
+              <ul className="todo-list">
+                {workspaceRows.map((workspace) => {
+                  const membership = membershipByWorkspace.get(workspace.id);
+                  return (
+                    <li key={workspace.id}>
+                      <strong>{workspace.name ?? workspace.id}</strong>
+                      <small>{workspace.locked ? "🔒 locked" : "open"}</small>
+                      {membership ? (
+                        <small>
+                          you are {membership.role}
+                          {membership.muted ? " · muted" : ""}
+                        </small>
+                      ) : null}
+                    </li>
+                  );
+                })}
+                {workspaceRows.length === 0 ? <li>No workspaces synced for this identity.</li> : null}
+              </ul>
+            </div>
+
+            <div className="insight">
+              <h2>Visible work items</h2>
+              <ul className="todo-list">
+                {workItemRows.map((item) => (
+                  <li key={item.id}>
+                    <strong>{workspaceNameById.get(item.workspaceId) ?? item.workspaceId}</strong>
+                    <p>{item.body}</p>
+                    <small>{item.hidden ? "🙈 hidden — managers only" : "visible to all members"}</small>
+                  </li>
+                ))}
+                {workItemRows.length === 0 ? <li>No work items visible to this identity.</li> : null}
+              </ul>
+            </div>
+
+            <form className="composer" onSubmit={handleCreateWorkItem}>
+              <h2>Post a work item</h2>
+              <label>
+                <span>Workspace</span>
+                <select value={workItemWorkspaceId} onChange={(event) => setWorkItemWorkspaceId(event.target.value)}>
+                  <option value="">Select a workspace…</option>
+                  {workspaceRows.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name ?? workspace.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Body</span>
+                <textarea rows={3} value={workItemBody} onChange={(event) => setWorkItemBody(event.target.value)} />
+              </label>
+              <button type="submit">Queue work item</button>
+              <p className="muted">
+                A locked workspace accepts writes only from its manager; a muted member is rejected even in an open
+                workspace. Rejections surface as failed mutations in the journal below.
+              </p>
+            </form>
           </div>
         </section>
 
