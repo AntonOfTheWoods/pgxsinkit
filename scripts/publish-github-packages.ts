@@ -17,6 +17,7 @@
  * Env (provided by GitHub Actions): GITHUB_REPOSITORY, GITHUB_REF_TYPE, GITHUB_REF_NAME, GITHUB_SHA.
  * Set DRY_RUN=1 to print the plan without mutating package.json or publishing.
  */
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -68,13 +69,70 @@ function findPublishablePackages(): { dir: string; pkgPath: string; pkg: Manifes
   return results;
 }
 
+// --- Dev-channel version ordering --------------------------------------------------------------
+// A pre-release of the current package.json version (e.g. `0.1.31-dev.x`) sorts *below* the latest
+// published release (`0.1.32`) under SemVer, so `@dev` would look older than `@latest`. To keep the
+// dev channel strictly ahead, anchor its base to the greater of (package.json version, latest
+// release tag + 1 patch). Reading tags requires the workflow to check out with `fetch-depth: 0`.
+const RELEASE_TAG_RE = /^[0-9]+\.[0-9]+\.[0-9]+$/;
+
+function parseSemverCore(v: string): [number, number, number] {
+  const parts = v.split(".");
+  return [
+    Number.parseInt(parts[0] ?? "0", 10) || 0,
+    Number.parseInt(parts[1] ?? "0", 10) || 0,
+    Number.parseInt(parts[2] ?? "0", 10) || 0,
+  ];
+}
+
+function compareSemverCore(a: string, b: string): number {
+  const [aMaj, aMin, aPat] = parseSemverCore(a);
+  const [bMaj, bMin, bPat] = parseSemverCore(b);
+  if (aMaj !== bMaj) return aMaj - bMaj;
+  if (aMin !== bMin) return aMin - bMin;
+  return aPat - bPat;
+}
+
+function nextPatch(v: string): string {
+  const [maj, min, pat] = parseSemverCore(v);
+  return `${maj}.${min}.${pat + 1}`;
+}
+
+function maxCore(a: string, b: string): string {
+  return compareSemverCore(a, b) >= 0 ? a : b;
+}
+
+// Highest bare-semver release tag in the repo, or null if none are reachable (e.g. shallow checkout).
+function latestReleaseTag(): string | null {
+  let out: string;
+  try {
+    out = execFileSync("git", ["tag", "--list"], { cwd: ROOT, encoding: "utf8" });
+  } catch {
+    return null;
+  }
+  const tags = out
+    .split("\n")
+    .map((t) => t.trim())
+    .filter((t) => RELEASE_TAG_RE.test(t));
+  if (tags.length === 0) return null;
+  return tags.reduce((hi, t) => (compareSemverCore(t, hi) > 0 ? t : hi));
+}
+
 const isReleaseTag = refType === "tag" && SEMVER_TAG_RE.test(refName);
 const distTag = isReleaseTag ? "latest" : "dev";
 
+// Computed once so every package in this run shares the same dev version (siblings must match for
+// cross-deps to resolve). The pre-release id leads with a unix-seconds stamp (a numeric SemVer
+// identifier => chronological ordering between dev builds) and keeps the short sha for traceability.
+const latestRelease = isReleaseTag ? null : latestReleaseTag();
+const devBaseFloor = latestRelease ? nextPatch(latestRelease) : null;
+const devStamp = Math.floor(Date.now() / 1000);
+const devPreId = shortSha ? `${devStamp}.${shortSha}` : String(devStamp);
+
 function targetVersion(baseVersion: string): string {
   if (isReleaseTag) return refName;
-  const suffix = shortSha || Date.now().toString(36);
-  return `${baseVersion}-dev.${suffix}`;
+  const base = devBaseFloor ? maxCore(baseVersion, devBaseFloor) : baseVersion;
+  return `${base}-dev.${devPreId}`;
 }
 
 // Pin sibling (same-scope) runtime deps to the exact version being published, so a `@dev` (or
