@@ -10,8 +10,7 @@
     "@pgxsinkit/schema": "workspace:*",
     "@pgxsinkit/server": "workspace:*",
     "drizzle-orm": "1.0.0-rc.2",
-    "hono": "4.12.25",
-    "postgres": "3.4.9",
+    "hono": "4.12.26",
     "zod": "4.4.3"
   }
 }

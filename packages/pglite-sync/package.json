@@ -24,6 +24,6 @@
   "peerDependencies": {
     "@electric-sql/client": "^1.5.21",
     "@electric-sql/experimental": "^6.0.21",
-    "@electric-sql/pglite": "0.5.2"
+    "@electric-sql/pglite": "0.5.3"
   }
 }

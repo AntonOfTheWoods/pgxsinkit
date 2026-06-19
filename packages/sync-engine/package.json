@@ -26,6 +26,6 @@
     "@pgxsinkit/pglite-sync": "workspace:*"
   },
   "peerDependencies": {
-    "@electric-sql/pglite": "0.5.2"
+    "@electric-sql/pglite": "0.5.3"
   }
 }
