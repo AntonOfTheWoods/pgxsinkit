@@ -69,12 +69,13 @@
         "@pgxsinkit/server": "workspace:*",
         "drizzle-orm": "1.0.0-rc.2",
         "hono": "4.12.25",
+        "postgres": "3.4.9",
         "zod": "4.4.3",
       },
     },
     "packages/client": {
       "name": "@pgxsinkit/client",
-      "version": "0.1.31",
+      "version": "0.0.0",
       "dependencies": {
         "@pgxsinkit/contracts": "workspace:*",
         "@pgxsinkit/sync-engine": "workspace:*",
@@ -87,7 +88,7 @@
     },
     "packages/contracts": {
       "name": "@pgxsinkit/contracts",
-      "version": "0.1.31",
+      "version": "0.0.0",
       "peerDependencies": {
         "drizzle-orm": "1.0.0-rc.2",
         "zod": "^4.4.3",
@@ -95,7 +96,7 @@
     },
     "packages/pglite-sync": {
       "name": "@pgxsinkit/pglite-sync",
-      "version": "0.1.31",
+      "version": "0.0.0",
       "peerDependencies": {
         "@electric-sql/client": "^1.5.21",
         "@electric-sql/experimental": "^6.0.21",
@@ -104,7 +105,7 @@
     },
     "packages/react": {
       "name": "@pgxsinkit/react",
-      "version": "0.1.31",
+      "version": "0.0.0",
       "dependencies": {
         "@pgxsinkit/client": "workspace:*",
         "@pgxsinkit/contracts": "workspace:*",
@@ -125,7 +126,7 @@
     },
     "packages/server": {
       "name": "@pgxsinkit/server",
-      "version": "0.1.31",
+      "version": "0.0.0",
       "bin": {
         "pgxsinkit-generate": "src/cli/generate.ts",
       },
@@ -139,7 +140,7 @@
     },
     "packages/sync-engine": {
       "name": "@pgxsinkit/sync-engine",
-      "version": "0.1.31",
+      "version": "0.0.0",
       "dependencies": {
         "@pgxsinkit/contracts": "workspace:*",
         "@pgxsinkit/pglite-sync": "workspace:*",

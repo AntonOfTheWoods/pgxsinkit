@@ -73,12 +73,17 @@ placed in each repo so every repo is self-documenting with no cross-repo links.
    | `check` | `typecheck` + `lint` + `test` | no |
    | `validate` | `format` + `check` | no |
    | `validate:full` | `validate` unscoped (no `--affected`) | no |
-   | `build` | `turbo run build` | — |
+   | `build` | build all packages | — |
    | `release:npm <tag>` *(publishers only)* | download GH tarballs → publish to npm | publishes |
 
    `version:*` scripts are **deleted** (the tag is the version). `test` is unit-only;
    container lanes live behind `test:integration` and are never part of
    `test`/`check`/`validate`.
+
+   The script *contract* (names, semantics, check-default) is what is uniform — not the
+   orchestrator. Use `turbo` (caching, `--affected`) where packages carry their own tasks
+   (conform-ed, emergent); use direct invocation where they do not (pgxsinkit, whose tests
+   are root-level system suites). Either way it is invisible to callers.
 
 6. **Pre-commit hook is uniform `bun run validate`** (`format` + `lint` + `typecheck` +
    unit `test`) — container-free and fast — in all three repos (pgxsinkit gains one).
