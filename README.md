@@ -183,7 +183,8 @@ The `operations_log` table is migration-managed (not runtime-created).
 
 Typical gates:
 
-- `bun run validate` # contains format, lint and typecheck
+- `bun run validate` # fast pre-commit gate: format, lint, typecheck, fast unit subset
+- `bun run validate:full` # pre-push + CI gate: adds the PGlite-backed unit suite
 - `bun run test:integration:contract`
 - `bun run test:integration:implementation`
 

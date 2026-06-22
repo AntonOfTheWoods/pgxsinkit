@@ -7,9 +7,12 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 [docs/adr/0001](docs/adr/0001-unified-ts-release-versioning-tooling-standard.md)). The essentials:
 
 - **Scripts are check-default.** `bun run format` / `bun run lint` **check** (non-mutating); use
-  `format:write` / `lint:fix` to change files. `bun run validate` (format, typecheck, lint, then unit
-  `test`) is the pre-commit gate, auto-installed via the `prepare` script. `test` is unit-only;
-  container lanes are `test:integration` (CI on release + on demand), never in the commit path.
+  `format:write` / `lint:fix` to change files. `bun run validate` (format, typecheck, lint, then the
+  **fast** unit subset `test:unit:fast`) is the **pre-commit** gate, auto-installed via the `prepare`
+  script — it skips the PGlite/WASM-backed unit tests so commits stay quick. `bun run validate:full`
+  (the **full** unit suite) is the **pre-push** gate and what CI runs; `bun run test` /
+  `bun run test:unit` remain the canonical full unit run. `test` is unit-only; container lanes are
+  `test:integration` (CI on release + on demand), never in the commit path.
 - **Versions are tag-derived, never hand-edited.** Every publishable `package.json` carries
   `"version": "0.0.0"` as a placeholder — the most recent semver tag is the _only_ version input,
   and CI derives the real dev/release version at publish time. There is no version-bump script.
@@ -71,7 +74,7 @@ vocabulary.
 
 ## Definition of done
 
-- `bun run validate` - this runs all linters, formatters, and type checks. You MUST ensure this passes before passing back.
+- `bun run validate` (the fast pre-commit gate: format, lint, typecheck, fast unit subset) must pass before any commit. Before handing back work — and before any push — run `bun run validate:full`, which adds the PGlite/WASM-backed unit tests; that is the gate CI enforces.
 
 Integration suites must run through the package scripts that launch isolated compose projects (`test:integration:contract`, `test:integration:implementation`, or `test:integration`). Do not rely on shared long-running infra for integration verification.
 
