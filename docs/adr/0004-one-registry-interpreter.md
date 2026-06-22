@@ -1,6 +1,6 @@
 # One registry interpreter: shared resolvers and a registry fingerprint
 
-Status: proposed (2026-06-22)
+Status: accepted (2026-06-22)
 
 The sync registry (`defineSyncTable` / `defineSyncRegistry`) is the single
 declaration of every synced table — its mode, keys, projection, shape, and
@@ -67,6 +67,18 @@ already produced one shipped bug plus one latent one.
   of bug closed permanently.
 - The fingerprint unlocks ADR-0006 with no new model to maintain.
 - Modest churn across packages, all behind one import.
+
+## Implementation status
+
+All four decisions are implemented. The shared `packages/contracts/src/sql-identifier.ts`
+now backs the seven former copies (client schema + mutation, server applier,
+contracts config + supabase-rls, schema governance + performance);
+`mutation.ts`'s public-schema branch quote-when-needed fixes the latent reserved-word
+bug, pinned by `tests/unit/sql-identifier.test.ts`. `fingerprintRegistry` /
+`canonicalizeRegistry` live in `packages/contracts/src/fingerprint.ts`, pinned by
+`tests/unit/registry-fingerprint.test.ts`. `rowTransform` moved from
+`ClientProjectionSpec` to a new server-authority `ServerProjectionSpec`
+(`entry.serverProjection.rowTransform`), read by the proxy.
 
 References: [ADR-0006](0006-local-schema-evolution.md) (consumes the fingerprint);
 `CONTEXT.md` (Read model, Overlay, Mutation journal);

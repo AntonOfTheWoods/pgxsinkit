@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { escapeSqlLiteral } from "./sql-identifier";
+
 export type TableMode = "readonly" | "writeonly" | "readwrite";
 
 /**
@@ -61,13 +63,22 @@ export interface ClientProjectionSpec {
   overlayTable?: string;
   journalTable?: string;
   omitColumns?: readonly string[];
+  localPrimaryKey?: PrimaryKeySpec;
+}
+
+/**
+ * Server-side projection applied in the proxy response path. This is server
+ * authority, not client shape — it never alters the local PGlite schema or the
+ * Electric shape URL — so it lives apart from {@link ClientProjectionSpec} (ADR-0004).
+ */
+export interface ServerProjectionSpec {
   /**
    * Optional per-row rewrite applied in the proxy response path. Runs before column
-   * omission, so it may read a column (e.g. a control flag) that `omitColumns` then
-   * removes from the client-visible row. See {@link RowTransform}.
+   * omission, so it may read a column (e.g. a control flag) that
+   * `clientProjection.omitColumns` then removes from the client-visible row. See
+   * {@link RowTransform}.
    */
   rowTransform?: RowTransform;
-  localPrimaryKey?: PrimaryKeySpec;
 }
 
 export interface DeferrableConstraintSpec {
@@ -151,10 +162,6 @@ export interface RowFilterSpec {
   customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
-}
-
-function escapeSqlLiteral(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 function readOwnerClaim(claims: JwtClaims | null, claimPath: string): string | null {

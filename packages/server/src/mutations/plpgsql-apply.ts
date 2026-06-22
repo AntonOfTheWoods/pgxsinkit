@@ -3,7 +3,9 @@ import { getTableConfig, type AnyPgTable, type PgAsyncDatabase, type PgQueryResu
 import { getColumns } from "drizzle-orm/utils";
 
 import {
+  escapeSqlLiteral as toSqlLiteral,
   getProjectedColumns,
+  quoteIdentifier as quoteIdent,
   type BatchMutationRequest,
   type RegistryRelations,
   type SyncTableEntry,
@@ -12,20 +14,12 @@ import {
 
 import type { TransactionClient } from "./types";
 
-function quoteIdent(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
 function qualifyIdent(schemaName: string | undefined, name: string): string {
   if (!schemaName) {
     return quoteIdent(name);
   }
 
   return `${quoteIdent(schemaName)}.${quoteIdent(name)}`;
-}
-
-function toSqlLiteral(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 function toSqlTextOrNull(value: string): string {

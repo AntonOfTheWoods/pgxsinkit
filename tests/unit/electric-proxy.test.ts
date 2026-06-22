@@ -20,6 +20,8 @@ const secureItemsRegistry = defineSyncRegistry({
     }),
     clientProjection: {
       omitColumns: ["keysWithheld"],
+    },
+    serverProjection: {
       rowTransform: (row) => (row["keys_withheld"] === true ? { ...row, payload: { stripped: true } } : row),
     },
   }),

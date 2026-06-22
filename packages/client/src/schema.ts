@@ -4,6 +4,9 @@ import {
   getLocalSyncPrimaryKeyColumns,
   getSyncRegistrySchema,
   getProjectedColumns,
+  maybeQuoteIdentifier,
+  quoteIdentifier,
+  quoteSqlLiteral as quoteSqlStringLiteral,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
@@ -385,106 +388,6 @@ function qualifyIdentifier(schemaName: string, objectName: string) {
   }
 
   return `${quoteIdentifier(schemaName)}.${quoteIdentifier(objectName)}`;
-}
-
-// PostgreSQL fully-reserved keywords (cannot be used as a bare identifier). A name that is reserved,
-// or not a simple lowercase identifier, is quoted; everything else is left bare to keep generated
-// SQL stable for the common case.
-const RESERVED_SQL_KEYWORDS = new Set([
-  "all",
-  "analyse",
-  "analyze",
-  "and",
-  "any",
-  "array",
-  "as",
-  "asc",
-  "asymmetric",
-  "both",
-  "case",
-  "cast",
-  "check",
-  "collate",
-  "column",
-  "constraint",
-  "create",
-  "current_catalog",
-  "current_date",
-  "current_role",
-  "current_time",
-  "current_timestamp",
-  "current_user",
-  "default",
-  "deferrable",
-  "desc",
-  "distinct",
-  "do",
-  "else",
-  "end",
-  "except",
-  "false",
-  "fetch",
-  "for",
-  "foreign",
-  "from",
-  "grant",
-  "group",
-  "having",
-  "in",
-  "initially",
-  "intersect",
-  "into",
-  "lateral",
-  "leading",
-  "limit",
-  "localtime",
-  "localtimestamp",
-  "not",
-  "null",
-  "offset",
-  "on",
-  "only",
-  "or",
-  "order",
-  "placing",
-  "primary",
-  "references",
-  "returning",
-  "select",
-  "session_user",
-  "some",
-  "symmetric",
-  "table",
-  "then",
-  "to",
-  "trailing",
-  "true",
-  "union",
-  "unique",
-  "user",
-  "using",
-  "variadic",
-  "when",
-  "where",
-  "window",
-  "with",
-]);
-
-function maybeQuoteIdentifier(value: string) {
-  const isSimpleIdentifier = /^[a-z_][a-z0-9_]*$/.test(value);
-  if (isSimpleIdentifier && !RESERVED_SQL_KEYWORDS.has(value)) {
-    return value;
-  }
-
-  return quoteIdentifier(value);
-}
-
-function quoteIdentifier(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-function quoteSqlStringLiteral(value: string) {
-  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function buildJournalSequenceName(journalTable: string) {

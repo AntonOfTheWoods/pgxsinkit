@@ -49,6 +49,14 @@ Depends on: nothing. Unblocks: [ADR-0006](../adr/0006-local-schema-evolution.md)
 
 ## Acceptance
 
-- One resolver; the five copies gone; reserved-word regression test green.
-- `fingerprintRegistry` stable and shape-sensitive, with tests.
-- `rowTransform` no longer under a client-named key; validate green.
+- One resolver; the seven copies gone; reserved-word regression test green. **(done
+  — `tests/unit/sql-identifier.test.ts`)**
+- `fingerprintRegistry` stable and shape-sensitive, with tests. **(done —
+  `tests/unit/registry-fingerprint.test.ts`)**
+- `rowTransform` no longer under a client-named key (`ServerProjectionSpec`); validate
+  green. **(done)**
+
+Note: the `supabase-rls` `assertIdentifier`/`assertTypeName` guards stay local — they
+validate "is a syntactically valid identifier" (uppercase allowed, must be quoted),
+which is a distinct concern from the bare-quoting rule. Only their `escapeSqlLiteral`
+was consolidated.

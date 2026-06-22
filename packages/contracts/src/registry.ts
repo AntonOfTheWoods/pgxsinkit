@@ -28,6 +28,7 @@ import type {
   ManagedFieldSpec,
   ManagedFieldStrategy,
   PrimaryKeySpec,
+  ServerProjectionSpec,
   ShapeSpec,
   ShapeSpecInput,
   TableGovernanceSpec as TableGovernanceSpecBase,
@@ -101,6 +102,7 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
   primaryKey: PrimaryKeySpec;
   shape?: ShapeSpec;
   clientProjection?: ClientProjectionSpecForTable<TTable>;
+  serverProjection?: ServerProjectionSpec;
   governance?: TableGovernanceSpecForTable<TTable>;
 }
 
@@ -193,6 +195,8 @@ export type SyncTableInput<
   primaryKey?: string[];
   shape?: ShapeSpecInput;
   clientProjection?: SyncTableInputProjection<TColumns, TOmittedColumns>;
+  /** Server-side response-path projection (e.g. `rowTransform`). Server authority, not client shape. */
+  serverProjection?: ServerProjectionSpec;
   governance?: SyncTableInputGovernance<TColumns>;
 };
 
@@ -299,6 +303,7 @@ export function defineSyncTable<
     primaryKey,
     governance,
     clientProjection,
+    serverProjection,
     shape,
     ...otherRest
   } = input;
@@ -368,6 +373,7 @@ export function defineSyncTable<
     ...(resolvedClientProjection != null
       ? { clientProjection: resolvedClientProjection as unknown as ClientProjectionSpecForTable<typeof table> }
       : {}),
+    ...(serverProjection != null ? { serverProjection } : {}),
     table,
     localTable,
     ...(view != null ? { view } : {}),

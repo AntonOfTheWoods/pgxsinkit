@@ -40,7 +40,13 @@ import type {
   SyncTableRegistry,
   SyncTableUpdateInput,
 } from "@pgxsinkit/contracts";
-import { getProjectedColumns as getProjectedTableColumns, getSyncRegistrySchema } from "@pgxsinkit/contracts";
+import {
+  escapeSqlLiteral as escapeSqlString,
+  getProjectedColumns as getProjectedTableColumns,
+  getSyncRegistrySchema,
+  maybeQuoteIdentifier,
+  quoteIdentifier,
+} from "@pgxsinkit/contracts";
 
 export type MutationStatus = "pending" | "sending" | "acked" | "failed";
 export type MutationKind = "create" | "update" | "delete";
@@ -1782,22 +1788,17 @@ function buildColumnEquality(columnNames: string[], leftAlias: string, rightAlia
 
 function qualifyLocalIdentifier(schemaName: string, tableName: string) {
   if (schemaName === "public") {
-    return tableName;
+    // Quote-when-needed: a reserved-word or mixed-case table name (e.g. `group`)
+    // MUST be quoted or the generated SQL fails to parse (ADR-0004). Normal names
+    // stay bare, so existing generated SQL is unchanged.
+    return maybeQuoteIdentifier(tableName);
   }
 
   return `${quoteIdentifier(schemaName)}.${quoteIdentifier(tableName)}`;
 }
 
-function quoteIdentifier(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
 function buildJournalSequenceName(journalTable: string) {
   return `${journalTable}_mutation_seq`;
-}
-
-function escapeSqlString(value: string) {
-  return value.replace(/'/g, "''");
 }
 
 function formatSqlValuePlaceholder(position: number, columnName: string) {

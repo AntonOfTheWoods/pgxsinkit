@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { pgPolicy, type PgRole } from "drizzle-orm/pg-core";
 
+import { escapeSqlLiteral } from "./sql-identifier";
+
 type SupabaseOwnerOrAdminPolicyKind = "select" | "insert" | "update" | "delete";
 
 type SupabaseOwnerOrAdminPolicyShape = {
@@ -59,10 +61,6 @@ function assertTypeName(value: string, label: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*$/.test(value)) {
     throw new Error(`${label} must be a valid SQL type name: ${value}`);
   }
-}
-
-function escapeSqlLiteral(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 function buildOwnerOrAdminPolicyName(tableName: string, command: SupabaseOwnerOrAdminPolicyKind) {

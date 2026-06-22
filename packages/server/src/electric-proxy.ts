@@ -177,7 +177,7 @@ function getOmittedProjectedColumnsForTable(registry: SyncTableRegistry, table: 
 }
 
 function getRowTransformForTable(registry: SyncTableRegistry, table: string): RowTransform | undefined {
-  return getRegistryEntry(registry, table)?.clientProjection?.rowTransform;
+  return getRegistryEntry(registry, table)?.serverProjection?.rowTransform;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

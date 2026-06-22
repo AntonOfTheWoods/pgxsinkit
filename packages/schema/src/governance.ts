@@ -1,5 +1,6 @@
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
+import { escapeSqlLiteral, quoteIdentifier as quoteIdent } from "@pgxsinkit/contracts";
 import type { SyncTableEntry, SyncTableRegistry } from "@pgxsinkit/contracts";
 
 const grantPrivilegeOrder = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
@@ -123,20 +124,12 @@ function buildGrantSql(qualifiedTableName: string, grant: TableGrant): string {
   ].join("\n");
 }
 
-function quoteIdent(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
 function qualifyIdent(schemaName: string | undefined, tableName: string): string {
   if (!schemaName || schemaName === "public") {
     return quoteIdent(tableName);
   }
 
   return `${quoteIdent(schemaName)}.${quoteIdent(tableName)}`;
-}
-
-function escapeSqlLiteral(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 function describeUnknownValue(value: unknown): string {

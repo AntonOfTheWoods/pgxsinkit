@@ -6,6 +6,8 @@ import {
   attachSyncRegistrySchema,
   buildSupabaseOwnerOrAdminNativePolicies,
   defineSyncTable,
+  escapeSqlLiteral as escapeSqlString,
+  quoteIdentifier as quoteIdent,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
@@ -380,14 +382,6 @@ function toRegclassLiteral(schemaName: string | undefined, tableName: string): s
   }
 
   return `${quoteIdent(schemaName)}.${quoteIdent(tableName)}`;
-}
-
-function quoteIdent(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-function escapeSqlString(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 function buildFieldValue(tableIndex: number, rowIndex: number, columnIndex: number): string {
