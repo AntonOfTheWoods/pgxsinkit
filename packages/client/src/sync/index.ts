@@ -4,6 +4,9 @@ import type { ChangeMessage, ShapeStreamOptions } from "@electric-sql/client";
 import { MultiShapeStream } from "@electric-sql/experimental";
 import type { Extension, PGliteInterface } from "@electric-sql/pglite";
 
+import { quoteIdentifier } from "@pgxsinkit/contracts";
+
+import { computeRetryDelayMs } from "../mutation";
 import {
   applyInsertsToTable,
   applyMessageToTable,
@@ -17,14 +20,15 @@ import {
   type SubscriptionState,
   updateSubscriptionState,
 } from "./subscription-state";
-import type {
-  ElectricSyncOptions,
-  InsertChangeMessage,
-  Lsn,
-  SyncShapesToTablesOptions,
-  SyncShapesToTablesResult,
-  SyncShapeToTableOptions,
-  SyncShapeToTableResult,
+import {
+  DEFAULT_MAX_COMMIT_RETRIES,
+  type ElectricSyncOptions,
+  type InsertChangeMessage,
+  type Lsn,
+  type SyncShapesToTablesOptions,
+  type SyncShapesToTablesResult,
+  type SyncShapeToTableOptions,
+  type SyncShapeToTableResult,
 } from "./types";
 
 export * from "./types";
@@ -79,6 +83,8 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
     initialInsertMethod = "insert",
     onInitialSync,
     onError,
+    onSyncError,
+    maxCommitRetries = DEFAULT_MAX_COMMIT_RETRIES,
   }: SyncShapesToTablesOptions): Promise<SyncShapesToTablesResult> => {
     let unsubscribed = false;
     await initMetadataTables();
@@ -131,7 +137,15 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
     const completeLsns = new Map<string, Lsn>(Object.keys(shapes).map((key) => [key, BigInt(-1)]));
 
     const truncateNeeded = new Set<string>();
-    const lastCommittedLsn: Lsn = subState?.last_lsn ?? BigInt(-1);
+    // The committed frontier is a *running* variable, advanced after each successful commit — not
+    // the boot-time `const` the upstream engine never advanced (which forced redundant empty
+    // re-commits). `degraded` latches once commits exhaust their retries (ADR-0009 decision 5).
+    let committedLsn: Lsn = subState?.last_lsn ?? BigInt(-1);
+    let degraded = false;
+    // Single-flight commit queue: at most one commit runs at a time; messages buffered while one
+    // is in flight coalesce into the next run (re-armed via `commitRerun`).
+    let commitInFlight: Promise<void> | null = null;
+    let commitRerun = false;
 
     const aborter = new AbortController();
     Object.values(shapes)
@@ -177,7 +191,13 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       insert: applyInsertsToTable,
     } as const;
 
-    const commitUpToLsn = async (targetLsn: Lsn) => {
+    // Apply everything buffered up to `targetLsn` in a single transaction, retrying with jittered
+    // backoff on failure. Returns `true` once applied (and advances the running committed frontier);
+    // returns `false` without advancing if the engine unsubscribed mid-flight or the commit
+    // exhausted its retries (→ `degraded` + `onSyncError`, ADR-0009 decision 5). The drained
+    // messages and the truncate snapshot are held across retries so a transient failure loses
+    // nothing; the read cache never advances past an unapplied commit.
+    const commitUpToLsn = async (targetLsn: Lsn): Promise<boolean> => {
       const messagesToCommit = new Map<string, ChangeMessage<Row<unknown>>[]>(
         Object.keys(shapes).map((shapeName) => [shapeName, []]),
       );
@@ -194,129 +214,195 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
         }
       }
 
-      await pg.transaction(async (tx) => {
-        if (debug) {
-          console.time("commit");
+      // Snapshot the truncate set so a retried transaction still truncates; the per-shape flag is
+      // cleared only once the commit has succeeded.
+      const shapesToTruncate = new Set(truncateNeeded);
+
+      const runCommit = () =>
+        pg.transaction(async (tx) => {
+          if (debug) {
+            console.time("commit");
+          }
+
+          await tx.exec(`SET LOCAL ${metadataSchema}.syncing = true;`);
+
+          for (const [shapeName, initialMessages] of messagesToCommit.entries()) {
+            const shape = getShapeOptions(shapes, shapeName);
+            let messages = initialMessages;
+
+            if (shapesToTruncate.has(shapeName)) {
+              if (debug) {
+                console.log("truncating table", shape.table);
+              }
+              if (shape.onMustRefetch) {
+                await shape.onMustRefetch(tx);
+              } else {
+                const schema = shape.schema || "public";
+                await tx.exec(`DELETE FROM ${quoteIdentifier(schema)}.${quoteIdentifier(shape.table)};`);
+              }
+            }
+
+            if (!useInsert) {
+              const initialInserts: InsertChangeMessage[] = [];
+              const remainingMessages: ChangeMessage<Row<unknown>>[] = [];
+              let foundNonInsert = false;
+              for (const message of messages) {
+                if (!foundNonInsert && message.headers.operation === "insert") {
+                  initialInserts.push(message as InsertChangeMessage);
+                } else {
+                  foundNonInsert = true;
+                  remainingMessages.push(message);
+                }
+              }
+              if (initialInserts.length > 0 && initialInsertMethod === "csv") {
+                remainingMessages.unshift(initialInserts.pop()!);
+              }
+              messages = remainingMessages;
+
+              if (initialInserts.length > 0) {
+                await insertMethods[initialInsertMethod]({
+                  pg: tx,
+                  table: shape.table,
+                  schema: shape.schema,
+                  messages: initialInserts,
+                  mapColumns: shape.mapColumns,
+                  primaryKey: shape.primaryKey,
+                  debug,
+                });
+
+                useInsert = true;
+              }
+            }
+
+            const bulkInserts: InsertChangeMessage[] = [];
+            let change: ChangeMessage<Row<unknown>> | null = null;
+            const messagesLength = messages.length;
+            for (const [index, changeMessage] of messages.entries()) {
+              if (changeMessage.headers.operation === "insert") {
+                bulkInserts.push(changeMessage as InsertChangeMessage);
+              } else {
+                change = changeMessage;
+              }
+
+              if (change || index === messagesLength - 1) {
+                if (bulkInserts.length > 0) {
+                  await applyInsertsToTable({
+                    pg: tx,
+                    table: shape.table,
+                    schema: shape.schema,
+                    messages: bulkInserts,
+                    mapColumns: shape.mapColumns,
+                    primaryKey: shape.primaryKey,
+                    debug,
+                  });
+                  bulkInserts.length = 0;
+                }
+                if (change) {
+                  await applyMessageToTable({
+                    pg: tx,
+                    table: shape.table,
+                    schema: shape.schema,
+                    message: change,
+                    mapColumns: shape.mapColumns,
+                    primaryKey: shape.primaryKey,
+                    debug,
+                  });
+                  change = null;
+                }
+              }
+            }
+          }
+
+          if (key) {
+            await updateSubscriptionState({
+              pg: tx,
+              metadataSchema,
+              subscriptionKey: key,
+              shapeMetadata: Object.fromEntries(
+                Object.keys(shapes).map((shapeName) => {
+                  const stream = getShapeStream(shapeName);
+                  return [
+                    shapeName,
+                    {
+                      handle: stream.shapeHandle!,
+                      offset: stream.lastOffset,
+                    },
+                  ];
+                }),
+              ),
+              lastLsn: targetLsn,
+              debug,
+            });
+          }
+        });
+
+      for (let attempt = 1; ; attempt++) {
+        if (unsubscribed) {
+          return false;
         }
-
-        await tx.exec(`SET LOCAL ${metadataSchema}.syncing = true;`);
-
-        for (const [shapeName, initialMessages] of messagesToCommit.entries()) {
-          const shape = getShapeOptions(shapes, shapeName);
-          let messages = initialMessages;
-
-          if (truncateNeeded.has(shapeName)) {
-            if (debug) {
-              console.log("truncating table", shape.table);
-            }
-            if (shape.onMustRefetch) {
-              await shape.onMustRefetch(tx);
-            } else {
-              const schema = shape.schema || "public";
-              await tx.exec(`DELETE FROM "${schema}"."${shape.table}";`);
-            }
+        try {
+          await runCommit();
+          committedLsn = targetLsn;
+          for (const shapeName of shapesToTruncate) {
             truncateNeeded.delete(shapeName);
           }
-
-          if (!useInsert) {
-            const initialInserts: InsertChangeMessage[] = [];
-            const remainingMessages: ChangeMessage<Row<unknown>>[] = [];
-            let foundNonInsert = false;
-            for (const message of messages) {
-              if (!foundNonInsert && message.headers.operation === "insert") {
-                initialInserts.push(message as InsertChangeMessage);
-              } else {
-                foundNonInsert = true;
-                remainingMessages.push(message);
-              }
-            }
-            if (initialInserts.length > 0 && initialInsertMethod === "csv") {
-              remainingMessages.unshift(initialInserts.pop()!);
-            }
-            messages = remainingMessages;
-
-            if (initialInserts.length > 0) {
-              await insertMethods[initialInsertMethod]({
-                pg: tx,
-                table: shape.table,
-                schema: shape.schema,
-                messages: initialInserts,
-                mapColumns: shape.mapColumns,
-                primaryKey: shape.primaryKey,
-                debug,
-              });
-
-              useInsert = true;
-            }
+          if (debug) console.timeEnd("commit");
+          maybeSignalInitialSync();
+          return true;
+        } catch (error) {
+          if (unsubscribed) {
+            return false;
           }
-
-          const bulkInserts: InsertChangeMessage[] = [];
-          let change: ChangeMessage<Row<unknown>> | null = null;
-          const messagesLength = messages.length;
-          for (const [index, changeMessage] of messages.entries()) {
-            if (changeMessage.headers.operation === "insert") {
-              bulkInserts.push(changeMessage as InsertChangeMessage);
-            } else {
-              change = changeMessage;
-            }
-
-            if (change || index === messagesLength - 1) {
-              if (bulkInserts.length > 0) {
-                await applyInsertsToTable({
-                  pg: tx,
-                  table: shape.table,
-                  schema: shape.schema,
-                  messages: bulkInserts,
-                  mapColumns: shape.mapColumns,
-                  primaryKey: shape.primaryKey,
-                  debug,
-                });
-                bulkInserts.length = 0;
-              }
-              if (change) {
-                await applyMessageToTable({
-                  pg: tx,
-                  table: shape.table,
-                  schema: shape.schema,
-                  message: change,
-                  mapColumns: shape.mapColumns,
-                  primaryKey: shape.primaryKey,
-                  debug,
-                });
-                change = null;
-              }
-            }
+          if (attempt >= maxCommitRetries) {
+            degraded = true;
+            onSyncError?.(error instanceof Error ? error : new Error(String(error)));
+            return false;
           }
+          await new Promise((resolve) => setTimeout(resolve, computeRetryDelayMs(attempt)));
         }
+      }
+    };
 
-        if (key) {
-          await updateSubscriptionState({
-            pg: tx,
-            metadataSchema,
-            subscriptionKey: key,
-            shapeMetadata: Object.fromEntries(
-              Object.keys(shapes).map((shapeName) => {
-                const stream = getShapeStream(shapeName);
-                return [
-                  shapeName,
-                  {
-                    handle: stream.shapeHandle!,
-                    offset: stream.lastOffset,
-                  },
-                ];
-              }),
-            ),
-            lastLsn: targetLsn,
-            debug,
-          });
-        }
-        if (unsubscribed) {
-          await tx.rollback();
-        }
-      });
+    const lowestCompleteLsn = (): Lsn =>
+      Array.from(completeLsns.values()).reduce((minimum, entry) => (entry < minimum ? entry : minimum));
 
-      if (debug) console.timeEnd("commit");
-      maybeSignalInitialSync();
+    // Drain buffered changes up to the current complete frontier, one commit at a time, looping
+    // while fresh messages keep arriving (so commits coalesce). Returns early on `degraded` — a held
+    // commit is not retried here; recovery is a later message/refetch or a restart.
+    const runCommitLoop = async (): Promise<void> => {
+      do {
+        commitRerun = false;
+        const target = lowestCompleteLsn();
+        const isCommitNeeded = target > committedLsn;
+        const isMustRefetchAndCatchingUp = target >= committedLsn && truncateNeeded.size > 0;
+        if (isCommitNeeded || isMustRefetchAndCatchingUp) {
+          const applied = await commitUpToLsn(target);
+          if (!applied) {
+            return;
+          }
+        } else {
+          maybeSignalInitialSync();
+        }
+      } while (commitRerun);
+    };
+
+    // Single-flight: at most one commit loop runs. A message arriving while one is running buffers
+    // synchronously (above) and re-arms the loop via `commitRerun`; `commitInFlight` is cleared
+    // inside the same async body — before its promise resolves — so an enqueue can never observe a
+    // stale in-flight handle and resolve without committing its messages.
+    const enqueueCommit = (): Promise<void> => {
+      if (commitInFlight) {
+        commitRerun = true;
+        return commitInFlight;
+      }
+      commitInFlight = (async () => {
+        try {
+          await runCommitLoop();
+        } finally {
+          commitInFlight = null;
+        }
+      })();
+      return commitInFlight;
     };
 
     multiShapeStream.subscribe(async (messages) => {
@@ -373,20 +459,10 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
         }
       });
 
-      const lowestCommittedLsn = Array.from(completeLsns.values()).reduce((minimum, entry) =>
-        entry < minimum ? entry : minimum,
-      );
-
-      const isCommitNeeded = lowestCommittedLsn > lastCommittedLsn;
-      const isMustRefetchAndCatchingUp = lowestCommittedLsn >= lastCommittedLsn && truncateNeeded.size > 0;
-
-      if (isCommitNeeded || isMustRefetchAndCatchingUp) {
-        void commitUpToLsn(lowestCommittedLsn);
-        await new Promise((resolve) => setTimeout(resolve));
-        return;
-      }
-
-      maybeSignalInitialSync();
+      // Buffering above is synchronous; here we enqueue the single-flight commit and await it. The
+      // stream awaits this callback, so awaiting the (coalesced) commit is the natural backpressure
+      // that bounds the buffer — replacing the old fire-and-forget commit + `setTimeout(0)` race.
+      await enqueueCommit();
     }, onError);
 
     streams.push({
@@ -409,7 +485,9 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
     return {
       unsubscribe,
       get isUpToDate() {
-        return multiShapeStream.isUpToDate;
+        // Never report up-to-date while a commit is pending or after going degraded (ADR-0009
+        // decision 5): the read cache must not claim to match the server on an unapplied commit.
+        return !degraded && commitInFlight === null && multiShapeStream.isUpToDate;
       },
       streams: Object.fromEntries(
         Object.keys(shapes).map((shapeName) => [shapeName, getShapeStream(shapeName)]),
@@ -434,6 +512,8 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       initialInsertMethod: options.initialInsertMethod,
       onInitialSync: options.onInitialSync,
       onError: options.onError,
+      onSyncError: options.onSyncError,
+      maxCommitRetries: options.maxCommitRetries,
     });
 
     return {

@@ -79,6 +79,12 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   autoSync?: ConvergenceTrigger;
   /** Invoked after each automatic convergence pass with its error, or `null` on success (only when `autoSync` is set). */
   onConvergencePass?: (error: unknown) => void;
+  /**
+   * Invoked when a read-path sync commit fails after exhausting its retries (ADR-0009 decision 5).
+   * The runtime enters the `degraded` phase and holds the read cache at the last applied commit
+   * instead of silently diverging from the server; recovery is a later commit or a restart/refetch.
+   */
+  onSyncError?: (error: Error) => void;
 }
 
 export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey extends SyncTableName<TRegistry>> {
@@ -228,6 +234,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         status.phase = "ready";
         options.onStatusChange?.(status);
         resolveReady();
+      },
+      onSyncError: (error) => {
+        // A sync commit exhausted its retries (ADR-0009 decision 5): go degraded and surface it,
+        // rather than letting the read cache silently diverge from the server.
+        status.phase = "degraded";
+        status.lastError = error.message;
+        options.onStatusChange?.(status);
+        options.onSyncError?.(error);
       },
     });
   } else {

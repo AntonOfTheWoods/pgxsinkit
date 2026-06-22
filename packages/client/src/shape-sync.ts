@@ -16,6 +16,8 @@ export interface ShapeSyncSpec {
 export interface StartShapeSyncOptions extends ShapeSyncSpec {
   headers?: Record<string, string>;
   onInitialSync?: () => void;
+  /** Commit-level error surfacing (ADR-0009 decision 5): a commit exhausted its retries. */
+  onSyncError?: (error: Error) => void;
 }
 
 export interface ConfiguredShapeSyncSpec extends ShapeSyncSpec {
@@ -27,6 +29,8 @@ export interface StartConfiguredSyncOptions {
   shapeHeaders?: Record<string, string>;
   onInitialSync?: () => void;
   onTableInitialSync?: (tableKey: string) => void;
+  /** Commit-level error surfacing (ADR-0009 decision 5): a sync commit exhausted its retries. */
+  onSyncError?: (error: Error) => void;
 }
 
 type ElectricNamespace = ReturnType<typeof electricSync>;
@@ -82,18 +86,12 @@ export async function startShapeSync(pg: SyncEnginePGlite, input: StartShapeSync
 
   const shapeHeaders = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
 
-  return getElectricNamespace(pg).syncShapeToTable(
-    input.onInitialSync
-      ? {
-          ...config,
-          ...(shapeHeaders ? { shape: { ...config.shape, headers: shapeHeaders } } : {}),
-          onInitialSync: input.onInitialSync,
-        }
-      : {
-          ...config,
-          ...(shapeHeaders ? { shape: { ...config.shape, headers: shapeHeaders } } : {}),
-        },
-  );
+  return getElectricNamespace(pg).syncShapeToTable({
+    ...config,
+    ...(shapeHeaders ? { shape: { ...config.shape, headers: shapeHeaders } } : {}),
+    ...(input.onInitialSync ? { onInitialSync: input.onInitialSync } : {}),
+    ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
+  });
 }
 
 export async function startConfiguredSync(
@@ -114,6 +112,7 @@ export async function startConfiguredSync(
         primaryKey: spec.primaryKey,
         ...(spec.electricTable !== undefined ? { electricTable: spec.electricTable } : {}),
         ...(input.shapeHeaders ? { headers: input.shapeHeaders } : {}),
+        ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
         onInitialSync: () => {
           pendingInitialSyncs -= 1;
           input.onTableInitialSync?.(spec.key);

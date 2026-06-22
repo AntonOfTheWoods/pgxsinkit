@@ -9,6 +9,9 @@ export type MapColumns = MapColumnsMap | MapColumnsFn;
 export type SubscriptionKey = string;
 export type InitialInsertMethod = "insert" | "csv" | "json" | "useCopy";
 
+/** Default hard cap on commit-transaction attempts before the engine goes degraded (ADR-0009). */
+export const DEFAULT_MAX_COMMIT_RETRIES = 5;
+
 export interface ShapeToTableOptions {
   shape: ShapeStreamOptions<Row<unknown>>;
   table: string;
@@ -24,7 +27,17 @@ export interface SyncShapesToTablesOptions {
   useCopy?: boolean | undefined;
   initialInsertMethod?: InitialInsertMethod | undefined;
   onInitialSync?: (() => void) | undefined;
+  /** Stream-level (network / fetch) error from Electric, forwarded to `MultiShapeStream.subscribe`. */
   onError?: ((error: FetchError | Error) => void) | undefined;
+  /**
+   * Commit-level error surfacing (ADR-0009 decision 5). Fired when a sync commit transaction
+   * still fails after `maxCommitRetries` jittered-backoff attempts. The engine then holds its
+   * buffer and committed frontier (never advancing `isUpToDate` on an unapplied commit) so the
+   * read cache cannot silently diverge; recovery is a later commit or a restart/refetch.
+   */
+  onSyncError?: ((error: Error) => void) | undefined;
+  /** Hard cap on commit-transaction attempts before going degraded. Defaults to {@link DEFAULT_MAX_COMMIT_RETRIES}. */
+  maxCommitRetries?: number | undefined;
 }
 
 export interface SyncShapesToTablesResult {
@@ -44,6 +57,10 @@ export interface SyncShapeToTableOptions {
   initialInsertMethod?: InitialInsertMethod | undefined;
   onInitialSync?: (() => void) | undefined;
   onError?: ((error: FetchError | Error) => void) | undefined;
+  /** Commit-level error surfacing (ADR-0009 decision 5); see {@link SyncShapesToTablesOptions.onSyncError}. */
+  onSyncError?: ((error: Error) => void) | undefined;
+  /** Hard cap on commit-transaction attempts before going degraded. Defaults to {@link DEFAULT_MAX_COMMIT_RETRIES}. */
+  maxCommitRetries?: number | undefined;
   onMustRefetch?: ((tx: Transaction) => Promise<void>) | undefined;
 }
 

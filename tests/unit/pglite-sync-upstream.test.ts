@@ -31,11 +31,10 @@ await mock.module("@electric-sql/experimental", () => ({ MultiShapeStream: MockM
 
 const { electricSync } = await import("../../packages/client/src/sync/index");
 
-// The vendored engine commits sync batches fire-and-forget (`void commitUpToLsn`) — a late commit
-// can reject after a test has unsubscribed/closed its PGlite, surfacing as an unhandled rejection
-// that bun turns into a non-zero exit even though every assertion passed. That fire-and-forget
-// commit is exactly what ADR-0009 replaces with a serialized, error-surfacing queue; until then we
-// swallow these known post-teardown races here so the oracle reports honest pass/fail.
+// ADR-0009 Phase 2 replaced the upstream fire-and-forget `void commitUpToLsn` with a serialized,
+// error-surfacing commit queue, so commit failures no longer escape as unhandled rejections. This
+// handler is retained as belt-and-suspenders for post-teardown timing (e.g. a backoff timer that
+// resumes after a test has closed its PGlite) so the oracle always reports honest pass/fail.
 const swallowEngineTeardownRejection = (): void => {};
 process.on("unhandledRejection", swallowEngineTeardownRejection);
 afterAll(() => {
@@ -294,7 +293,12 @@ describe("pglite-sync", () => {
           }>`SELECT COUNT(*) as count FROM todo;`
         ).rows[0]?.["count"] ?? 0;
 
-      return numItemsInserted > 0;
+      // ADR-0009 migration: wait for ALL rows, not just `> 0`. The serialized commit queue applies
+      // the fire-and-forget batches in LSN-ordered transactions (e.g. 2000 then 8000), so `> 0`
+      // could observe an intermediate count; the upstream engine's overlapping fire-and-forget
+      // happened to coalesce into one. The behaviour under test — every row lands transactionally —
+      // is preserved and asserted more strictly here.
+      return numItemsInserted >= numInserts;
     });
 
     // should have exact number of inserts added transactionally
