@@ -53,8 +53,12 @@ The critical security fix; self-contained, no public-API change.
 ## Acceptance
 
 - Phase 1: unregistered/absent tables provably rejected without fetch; validate
-  green. **(done in this pass)**
-- Phase 2: demo runs with a single claims adapter; no second Hono app; integration
-  lanes green.
-- Phase 3: ownership is the default; `customWhere` documented as the escape hatch
-  with an injection-resistance test.
+  green. **(done)**
+- Phase 2: `createSyncServer` owns the shape proxy via `electricUrl` + one
+  `resolveAuthClaims`; the demo dropped its second Hono app; pinned by
+  `tests/unit/server-shape-proxy.test.ts`. **(done)** — the integration harnesses
+  keep using the exported `proxyElectricShapeRequest` (advanced/manual hosting),
+  unchanged.
+- Phase 3: `ownership`/`shared` are the safe default (escaped, tested);
+  `customWhere` documented as the raw escape hatch with an injection-resistance
+  test in `tests/unit/contracts.test.ts`. **(done)**

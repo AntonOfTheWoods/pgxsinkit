@@ -1,10 +1,8 @@
 import { drizzle } from "drizzle-orm/bun-sql";
 import { defineRelations } from "drizzle-orm/relations";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
 
 import { demoMembershipSyncRegistry } from "@pgxsinkit/schema";
-import { buildRegistrySchema, createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
+import { buildRegistrySchema, createSyncServer } from "@pgxsinkit/server";
 
 import { parseDemoAuthClaimsFromRequest } from "./demo-auth";
 import { writeApiEnv } from "./env";
@@ -21,6 +19,10 @@ const schema = buildRegistrySchema(demoMembershipSyncRegistry);
 const relations = defineRelations(schema);
 const db = drizzle({ connection: databaseUrl, relations });
 
+// One server owns both ingress paths: the write route (POST /api/mutations) and the
+// read-path Electric shape proxy, both resolving identity through the single
+// resolveAuthClaims adapter (ADR-0003). The proxy fails closed on tables absent from
+// the registry. The path stays /v1/electric-proxy for client/env compatibility.
 const server = createSyncServer({
   registry: demoMembershipSyncRegistry,
   db,
@@ -28,6 +30,8 @@ const server = createSyncServer({
     const claims = parseDemoAuthClaimsFromRequest(request);
     return claims ? { ...claims } : null;
   },
+  electricUrl,
+  shapeProxyPath: "/v1/electric-proxy",
   operationsLog: {
     enabled: operationsLogEnabled,
   },
@@ -36,38 +40,8 @@ const server = createSyncServer({
   idleTimeoutSeconds,
 });
 
-const app = new Hono();
-
-app.use(
-  "/v1/*",
-  cors({
-    origin: allowedOrigins,
-    allowMethods: ["GET", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
-  }),
-);
-
-app.get("/v1/electric-proxy", async (context) => {
-  try {
-    const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
-    return await proxyElectricShapeRequest(context.req.raw, claims, {
-      registry: demoMembershipSyncRegistry,
-      electricUrl,
-    });
-  } catch (error) {
-    return context.json(
-      {
-        message: error instanceof Error ? error.message : "Failed to proxy Electric shape request",
-      },
-      502,
-    );
-  }
-});
-
-app.all("*", (context) => server.fetch(context.req.raw));
-
 export default {
   port: writeApiEnv.WRITE_API_PORT,
   idleTimeout: idleTimeoutSeconds,
-  fetch: app.fetch,
+  fetch: server.fetch,
 };

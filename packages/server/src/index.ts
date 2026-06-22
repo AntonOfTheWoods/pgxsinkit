@@ -11,6 +11,7 @@ import type {
   SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
+import { proxyElectricShapeRequest } from "./electric-proxy";
 import { registerMutationRoute } from "./mutations/route";
 import { ensureOperationsLogSchema } from "./operations-log/ddl";
 import type { OperationsLogConfig } from "./operations-log/types";
@@ -42,6 +43,16 @@ export interface CreateSyncServerOptions<
   /** Existing Hono app to register routes on. If omitted, a new Hono app is created. */
   app?: Hono;
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
+  /**
+   * When set, the server serves a read-path Electric shape proxy that shares the
+   * single `resolveAuthClaims` adapter with the write path (ADR-0003). Without it,
+   * no shape proxy is registered.
+   */
+  electricUrl?: string;
+  /** Path for the shape proxy route. Defaults to `/api/shape`. */
+  shapeProxyPath?: string;
+  /** Optional per-request extra params passed to customWhere/shared filters. */
+  resolveShapeParams?: (request: Request) => Record<string, unknown> | undefined;
   operationsLog?: {
     enabled?: boolean;
   };
@@ -107,6 +118,10 @@ export function createSyncServer<
     app.use("/api/*", corsMiddleware);
     app.use("/mutations", corsMiddleware);
 
+    if (options.electricUrl) {
+      app.use(options.shapeProxyPath ?? "/api/shape", corsMiddleware);
+    }
+
     app.onError((error, context) => {
       status.phase = "degraded";
       status.lastError = error instanceof Error ? error.message : "Unexpected error";
@@ -141,6 +156,24 @@ export function createSyncServer<
 
   // The single mutation ingress point — all writes go through POST /api/mutations
   registerMutationRoute(app, db, options.registry, operationsLogConfig, operationsLogReady, options.resolveAuthClaims);
+
+  // The read-path shape proxy shares the same resolveAuthClaims adapter, so read and
+  // write authorization can never diverge (ADR-0003).
+  if (options.electricUrl) {
+    const shapeProxyPath = options.shapeProxyPath ?? "/api/shape";
+    const electricUrl = options.electricUrl;
+    const resolveAuthClaims = options.resolveAuthClaims;
+    const resolveShapeParams = options.resolveShapeParams;
+    app.get(shapeProxyPath, async (context) => {
+      const claims = resolveAuthClaims ? await resolveAuthClaims(context.req.raw) : null;
+      const extraParams = resolveShapeParams?.(context.req.raw);
+      return proxyElectricShapeRequest(context.req.raw, claims, {
+        registry: options.registry,
+        electricUrl,
+        ...(extraParams ? { extraParams } : {}),
+      });
+    });
+  }
 
   const fetch = async (request: Request) => app.fetch(request);
 

@@ -81,11 +81,17 @@ surface.
   different read/write identity would be a different design and is out of scope.
 - `customWhere` stays powerful but the common ownership case never touches raw SQL.
 
-## Increment landed with this ADR
+## Implementation status
 
-Decisions 1 and 4 (fail-closed on unregistered/absent tables, pinned by tests) are
-implemented in this change. Decision 3 (ingress unification behind one claims
-adapter) and decision 5 (`customWhere` hardening) are sequenced in the plan.
+All five decisions are implemented. Decisions 1 and 4 (fail closed on
+unregistered/absent tables) landed first, pinned by
+`tests/unit/electric-proxy.test.ts`. Decision 3 — `createSyncServer` owns the shape
+proxy via an `electricUrl` option and shares the single `resolveAuthClaims`, and the
+demo drops its hand-rolled second Hono app — is pinned by
+`tests/unit/server-shape-proxy.test.ts`. Decision 5 strengthens the `customWhere`
+injection warning and pins the safe-by-default `ownership`/`shared` escaping in
+`tests/unit/contracts.test.ts`. `proxyElectricShapeRequest` stays exported for
+advanced/manual hosting (the integration harnesses use it directly).
 
 References: [ADR-0002](0002-single-in-database-write-path.md) (single write path);
 `CONTEXT.md` (Parity boundary, Read model);

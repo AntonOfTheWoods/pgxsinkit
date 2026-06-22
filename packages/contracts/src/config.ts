@@ -139,8 +139,14 @@ export interface RowFilterSpec {
     sharedUserId: string | ((params: Record<string, unknown>) => string);
   };
   /**
-   * Escape hatch: returns a raw SQL fragment ANDed with other filters.
-   * Return `null` to bypass all filters (e.g. admin access).
+   * Escape hatch: returns a raw SQL fragment ANDed with other filters. Return
+   * `null` to bypass all filters (e.g. admin access).
+   *
+   * SECURITY: the returned string is interpolated verbatim into the Electric shape
+   * `where` clause — it is NOT escaped. Any request-derived value (e.g. from
+   * `params`) you embed must be escaped/validated inside this function, or it is a
+   * SQL-injection vector. Prefer `ownership`/`shared`, which escape their values for
+   * you; reach for `customWhere` only when those cannot express the predicate.
    */
   customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */

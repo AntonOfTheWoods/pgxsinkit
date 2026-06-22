@@ -180,3 +180,26 @@ describe("buildRowFilterWhere ownership claim selection", () => {
     );
   });
 });
+
+describe("row filter injection resistance (ADR-0003)", () => {
+  it("escapes single quotes in the ownership claim value so it cannot break out", () => {
+    const filter = { ownership: { column: "owner_id" } };
+    const claims: JwtClaims = { sub: "x' OR '1'='1" };
+
+    // The quote is doubled, keeping the whole value inside the string literal.
+    expect(buildRowFilterWhere(filter, claims)).toBe(`"owner_id" = 'x'' OR ''1''=''1'`);
+  });
+
+  it("escapes single quotes in a function-derived shared user id", () => {
+    const filter = {
+      ownership: { column: "owner_id" },
+      shared: { sharedUserId: (params: Record<string, unknown>) => String(params["uid"]) },
+    };
+    const claims: JwtClaims = { sub: "owner-1" };
+
+    const where = buildRowFilterWhere(filter, claims, { uid: "y'); DROP TABLE x;--" });
+
+    // Both the owner claim and the injected param value stay quoted/escaped.
+    expect(where).toBe(`("owner_id" = 'owner-1' OR "owner_id" = 'y''); DROP TABLE x;--')`);
+  });
+});
