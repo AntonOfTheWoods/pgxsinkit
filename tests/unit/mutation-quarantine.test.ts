@@ -53,6 +53,57 @@ function transportErrorFetch(httpStatus: number) {
   return mock(async () => new Response("upstream unavailable", { status: httpStatus }));
 }
 
+/**
+ * A 400 whole-batch validation rejection that *attributes* the fault to the named mutations
+ * (the real server's behaviour: an atomic batch, one structurally-invalid member, the
+ * culprits named in `rejections`).
+ */
+function attributedRejectFetch(rejectedEntityIds: string[], reason = "includes a server-managed field") {
+  const rejected = new Set(rejectedEntityIds);
+  return mock(async (_input: unknown, init?: { body?: unknown }) => {
+    const bodyText = typeof init?.body === "string" ? init.body : "{}";
+    const requestBody = JSON.parse(bodyText) as {
+      mutations: Array<{
+        mutationId: string;
+        tableName: string;
+        mutationSeq: number;
+        entityKey: Record<string, string>;
+      }>;
+    };
+
+    // Model the real server's atomic batch: any structurally-invalid member 400s the whole
+    // batch, naming the culprits; an all-valid batch is applied and 200-acked.
+    const rejections = requestBody.mutations
+      .filter((mutation) => rejected.has(mutation.entityKey["id"]!))
+      .map((mutation) => ({
+        tableName: mutation.tableName,
+        mutationId: mutation.mutationId,
+        mutationSeq: mutation.mutationSeq,
+        reason,
+      }));
+
+    if (rejections.length > 0) {
+      return new Response(JSON.stringify({ message: "Payload validation failed", rejections }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(
+      JSON.stringify({
+        acks: requestBody.mutations.map((mutation) => ({
+          tableName: mutation.tableName,
+          entityKey: mutation.entityKey,
+          mutationId: mutation.mutationId,
+          mutationSeq: mutation.mutationSeq,
+          status: "acked",
+        })),
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+}
+
 describe("mutation quarantine (ADR-0006)", () => {
   it("quarantines a structural 4xx rejection, surfaces it, and never retries it", async () => {
     const quarantined: MutationDetail[][] = [];
@@ -139,6 +190,52 @@ describe("mutation quarantine (ADR-0006)", () => {
       expect(detail?.status).toBe("failed");
       expect(detail?.lastHttpStatus).toBe(404);
       expect(detail?.nextRetryAtUs).not.toBeNull(); // retried with backoff, not terminal
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("attributes a structural 400 to the named mutation only — innocent siblings flush", async () => {
+    const quarantined: MutationDetail[][] = [];
+    const { runtime } = await createAuthorsRuntime({
+      onQuarantine: (details) => {
+        quarantined.push(details);
+      },
+    });
+
+    const poisonId = "01963227-d4c7-72db-b858-f89f6af80010";
+    const innocentId = "01963227-d4c7-72db-b858-f89f6af80011";
+
+    // The atomic batch 400s because of one poison mutation; the server names it. The flush
+    // drain then re-sends the innocent sibling alone, which the (now-valid) batch 200-acks.
+    const fetchMock = attributedRejectFetch([poisonId]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await runtime.create("authors", { id: poisonId, name: "Poison" });
+      await runtime.create("authors", { id: innocentId, name: "Innocent" });
+
+      await runtime.flush("authors");
+
+      const details = await runtime.readMutationDetails("authors");
+      const poison = details.find((detail) => detail.entityKey["id"] === poisonId);
+      const innocent = details.find((detail) => detail.entityKey["id"] === innocentId);
+
+      // The named mutation is terminally quarantined; the unrelated sibling is NOT dragged
+      // down with it — it flushed successfully on its own. One bad write never poisons the queue.
+      expect(poison?.status).toBe("quarantined");
+      expect(poison?.nextRetryAtUs).toBeNull();
+      expect(innocent?.status).toBe("acked");
+
+      const stats = await runtime.readMutationStats("authors");
+      expect(stats.quarantinedCount).toBe(1);
+      expect(stats.failedCount).toBe(0);
+
+      // Surfaced exactly once, only for the quarantined poison.
+      expect(quarantined).toHaveLength(1);
+      expect(quarantined[0]).toHaveLength(1);
+      expect(quarantined[0]?.[0]?.entityKey["id"]).toBe(poisonId);
     } finally {
       globalThis.fetch = originalFetch;
     }

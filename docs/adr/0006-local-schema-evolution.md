@@ -130,6 +130,16 @@ drain-then-drop while online. Optimistic *attempt* yes; *silent* loss no.
   (cross-boot rebuild + re-sync).
 - **Decision 9 (lossless offline upgrade) — deferred** as designed.
 
+**Post-review hardening (2026-06-22).** A prior round had added a pre-fingerprint-store path
+(detect an unstamped store whose journal predates the `registry_version` column and rebuild it).
+A review then found that path inconsistent: with writes owed it deferred, but the legacy journal
+still lacked the column, so subsequent writes failed. Per the pre-launch no-legacy rule the path
+is **removed entirely** rather than completed — the fingerprint mechanism shipped before launch,
+so no pre-fingerprint store can exist, and an unstamped store is unconditionally treated as
+brand-new (stamped). A stamped store's journal therefore always has `registry_version`, so the
+genuine fingerprint-mismatch defer (writes owed) never meets a missing column. Pinned by the
+trimmed `tests/unit/local-store.test.ts`.
+
 References: [ADR-0004](0004-one-registry-interpreter.md) (fingerprint);
 [ADR-0005](0005-mutation-convergence.md) (drop primitive, quarantine surfacing);
 `docs/migrations.md`; `CONTEXT.md` (Parity boundary, Mutation journal, Local

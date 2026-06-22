@@ -12,7 +12,9 @@ import type { SyncTableEntry, SyncTableRegistry } from "./registry";
  * (`rowTransform`, `customWhere`, a function-valued `sharedUserId`) cannot be fingerprinted
  * and are excluded — but their *presence* and the surrounding **static** filter structure
  * (ownership/shared columns, projected columns) participate, so swapping one static filter
- * for another is detected.
+ * for another is detected. For the invisible *logic* itself, a consumer-bumped
+ * `rowFilter.revision` is folded in: changing it is how a `customWhere` authorization change
+ * is forced to shift the fingerprint (and so rebuild the cache + reset the subscription).
  */
 
 export interface CanonicalColumn {
@@ -56,6 +58,12 @@ export interface CanonicalRowFilter {
   shared: { ownerColumn: string | null; sharedColumn: string | null; sharedUserId: string } | null;
   hasCustomWhere: boolean;
   columns: string[] | null;
+  /**
+   * The consumer-supplied version tag for the non-fingerprintable filter logic (the
+   * `customWhere` body, a function-valued `sharedUserId`). Changing it shifts the fingerprint,
+   * which is the only way a `customWhere` *logic* change forces a cache + subscription reset.
+   */
+  revision: string | null;
 }
 
 const byName = (a: { name: string }, b: { name: string }): number => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
@@ -107,6 +115,7 @@ function canonicalizeRowFilter(filter: RowFilterSpec | undefined): CanonicalRowF
       : null,
     hasCustomWhere: filter.customWhere != null,
     columns: filter.columns ? [...filter.columns].sort(asString) : null,
+    revision: filter.revision != null ? String(filter.revision) : null,
   };
 }
 

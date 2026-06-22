@@ -292,6 +292,11 @@ describe("server facade contract", () => {
 
     expect(response.status).toBe(400);
 
+    // The 400 attributes the failure to the invalid (second) mutation only, so the client can
+    // quarantine exactly it and keep the valid sibling retryable.
+    const body = (await response.json()) as { rejections?: Array<{ mutationId: string }> };
+    expect(body.rejections?.map((rejection) => rejection.mutationId)).toEqual(["12345678-1234-1234-8234-123456780005"]);
+
     const rows = await server.drizzle.select().from(projectsTable);
     expect(rows).toHaveLength(0);
   });

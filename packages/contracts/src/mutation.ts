@@ -45,6 +45,32 @@ export const batchMutationAckSchema = z
   })
   .strict();
 
+/**
+ * Per-mutation attribution for a structural batch rejection. The batch write is atomic —
+ * one structurally-invalid mutation rejects the whole POST with a single non-2xx — so the
+ * server names the offending mutation(s) here. That lets the client quarantine exactly those
+ * and keep the innocent siblings retryable, instead of dragging the whole offline queue to
+ * quarantine at the shared attempt cap.
+ */
+export const mutationRejectionSchema = z
+  .object({
+    tableName: z.string().trim().min(1),
+    mutationId: z.uuid(),
+    mutationSeq: z.number().int().nonnegative(),
+    reason: z.string().trim().min(1),
+  })
+  .strict();
+
+/**
+ * The body of a non-2xx batch-mutation response. `rejections` is present only when the fault
+ * is attributable to specific mutations (payload validation); whole-batch faults (execution
+ * 5xx, auth, malformed envelope) carry just a `message`. Unknown extra fields are stripped.
+ */
+export const batchMutationErrorSchema = z.object({
+  message: z.string().optional(),
+  rejections: z.array(mutationRejectionSchema).optional(),
+});
+
 export type MutationKind = z.infer<typeof mutationKindSchema>;
 export type MutationStatus = z.infer<typeof mutationStatusSchema>;
 export type MutationAckStatus = z.infer<typeof mutationAckStatusSchema>;
@@ -53,3 +79,5 @@ export type MutationEnvelope = z.infer<typeof mutationEnvelopeSchema>;
 export type MutationAck = z.infer<typeof mutationAckSchema>;
 export type BatchMutationRequest = z.infer<typeof batchMutationRequestSchema>;
 export type BatchMutationAck = z.infer<typeof batchMutationAckSchema>;
+export type MutationRejection = z.infer<typeof mutationRejectionSchema>;
+export type BatchMutationError = z.infer<typeof batchMutationErrorSchema>;

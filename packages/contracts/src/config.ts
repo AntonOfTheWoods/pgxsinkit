@@ -162,6 +162,15 @@ export interface RowFilterSpec {
   customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
+  /**
+   * An opaque version tag for the parts of this filter the fingerprint cannot see — the
+   * `customWhere` body and a function-valued `shared.sharedUserId`. Their *presence* is
+   * fingerprinted, but their *logic* is invisible (you cannot hash a closure). Bump this
+   * (any new string/number) whenever you change that logic so the fingerprint shifts and the
+   * local read cache rebuilds + the shape subscription resets. Leaving it unchanged after a
+   * `customWhere` authorization change would silently serve the stale shape.
+   */
+  revision?: string | number;
 }
 
 function readOwnerClaim(claims: JwtClaims | null, claimPath: string): string | null {

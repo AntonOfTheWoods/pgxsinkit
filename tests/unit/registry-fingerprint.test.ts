@@ -110,6 +110,29 @@ describe("registry fingerprint (ADR-0004)", () => {
     );
   });
 
+  it("changes when rowFilter.revision is bumped (the escape hatch for invisible customWhere logic)", () => {
+    // The customWhere body is invisible to the fingerprint, so a consumer that changes its
+    // *authorization logic* bumps `revision` to force a cache + subscription reset.
+    const withRevision = (revision?: string | number) => {
+      const entry = defineSyncTable({
+        tableName: "items",
+        makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id") }),
+        clientProjection: { omitColumns: [] },
+      });
+      const rowFilter = {
+        customWhere: () => "owner_id = '1'",
+        ...(revision !== undefined ? { revision } : {}),
+      };
+      return defineSyncRegistry({ items: { ...entry, shape: { ...entry.shape!, rowFilter } } });
+    };
+
+    expect(fingerprintRegistry(withRevision("v2"))).not.toBe(fingerprintRegistry(withRevision("v1")));
+    // Same revision → stable.
+    expect(fingerprintRegistry(withRevision("v1"))).toBe(fingerprintRegistry(withRevision("v1")));
+    // A bumped revision differs from no revision at all.
+    expect(fingerprintRegistry(withRevision(2))).not.toBe(fingerprintRegistry(withRevision()));
+  });
+
   it("canonicalizes to a sorted, shape-only structure", () => {
     const canon = canonicalizeRegistry(defineSyncRegistry({ items: items() }));
     expect(canon).toHaveLength(1);

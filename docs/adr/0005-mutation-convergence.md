@@ -102,6 +102,18 @@ split.
   `destroy({ force: true })`, so logout/erasure never silently drops owed writes. Proven in
   `tests/integration/client-contract.integration.test.ts`.
 
+**Post-review hardening (2026-06-22).** A review found a structural batch failure was only
+*delayed*, not contained: the server applies a batch atomically, so one structurally-invalid
+mutation `400`s the whole POST, and the client — unable to attribute the fault — kept the entire
+batch retryable until the shared attempt cap, then quarantined *every* member, including
+unrelated valid offline writes. The server now returns per-mutation `rejections` on a `400`
+validation failure (`packages/contracts/src/mutation.ts`, `batchMutationErrorSchema`); the client
+quarantines exactly the named mutations and leaves innocent siblings immediately retryable, so the
+flush drain re-sends them without the poison. Genuinely unattributable failures (transport /
+`5xx` / auth / malformed envelope) keep the jittered-backoff-then-cap behaviour. Pinned by the
+attribution case in `tests/unit/mutation-quarantine.test.ts` and the rollback/attribution case in
+`tests/integration/server-contract.integration.test.ts`.
+
 References: [ADR-0006](0006-local-schema-evolution.md) (drop primitive, quarantine
 state); `CONTEXT.md` (Mutation journal, Overlay);
 [docs/plans/0005-mutation-convergence.md](../plans/0005-mutation-convergence.md).

@@ -729,9 +729,20 @@ describe("write api demo auth RLS", () => {
     );
 
     await expectResponseStatus(response, 400);
+    const reason =
+      "authors/de76c555-659c-40be-af41-848a845d6f2c includes server-managed fields: ownerId, modifiedBy, createdAtUs, updatedAtUs";
     expect(await response.json()).toEqual({
-      message:
-        "Payload validation failed: authors/de76c555-659c-40be-af41-848a845d6f2c includes server-managed fields: ownerId, modifiedBy, createdAtUs, updatedAtUs",
+      message: `Payload validation failed: ${reason}`,
+      // The 400 attributes the rejection to the offending mutation so the client can quarantine
+      // exactly it and keep innocent siblings retryable.
+      rejections: [
+        {
+          tableName: "authors",
+          mutationId: "de76c555-659c-40be-af41-848a845d6f2c",
+          mutationSeq: 1,
+          reason,
+        },
+      ],
     });
   });
 

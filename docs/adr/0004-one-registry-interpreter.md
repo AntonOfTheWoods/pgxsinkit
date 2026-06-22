@@ -80,6 +80,14 @@ bug, pinned by `tests/unit/sql-identifier.test.ts`. `fingerprintRegistry` /
 `ClientProjectionSpec` to a new server-authority `ServerProjectionSpec`
 (`entry.serverProjection.rowTransform`), read by the proxy.
 
+**Post-review hardening (2026-06-22).** A review noted the fingerprint records only the
+*presence* of a `customWhere` (its body is a closure and cannot be hashed), so changing the
+authorization *logic* inside it left the fingerprint — and therefore the local cache and shape
+subscriptions — untouched. `RowFilterSpec` now carries an opaque `revision` tag that folds into
+the canonical filter: bumping it on a `customWhere` (or function-valued `sharedUserId`) logic
+change shifts the fingerprint and forces the ADR-0006 rebuild + resubscribe. Pinned by the
+revision case in `tests/unit/registry-fingerprint.test.ts`.
+
 References: [ADR-0006](0006-local-schema-evolution.md) (consumes the fingerprint);
 `CONTEXT.md` (Read model, Overlay, Mutation journal);
 [docs/plans/0004-one-registry-interpreter.md](../plans/0004-one-registry-interpreter.md).

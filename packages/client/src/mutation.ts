@@ -33,6 +33,7 @@ function jsonStringifyPayload(value: unknown): string {
 import type {
   BatchMutationAck,
   MutationDiagnostics,
+  MutationRejection,
   SyncTableCreateInput,
   SyncTableEntry,
   SyncTableName,
@@ -41,6 +42,7 @@ import type {
   SyncTableUpdateInput,
 } from "@pgxsinkit/contracts";
 import {
+  batchMutationErrorSchema,
   escapeSqlLiteral as escapeSqlString,
   fingerprintRegistry,
   getProjectedColumns as getProjectedTableColumns,
@@ -1526,12 +1528,21 @@ async function flushBatch(
       throw new MutationRequestError(
         text.length > 0 ? text : `Bulk write responded with ${response.status}`,
         response.status,
+        parseBatchRejections(text),
       );
     }
   } catch (error) {
-    // All mutations in the batch fail together on a transport or server error.
     const failedAtUs = nowMicroseconds();
     const httpStatus = error instanceof MutationRequestError ? error.status : null;
+    const errorMessage = error instanceof Error ? error.message : "Unknown batch write failure";
+    // The server attributed the failure to specific mutations (a structural validation
+    // rejection of an atomic batch). When present, we quarantine exactly those and leave the
+    // innocent siblings immediately retryable; absent (transport / 5xx / auth / malformed
+    // envelope), the whole batch stays retryable under the shared attempt cap.
+    const rejectionById =
+      error instanceof MutationRequestError && error.rejections
+        ? new Map(error.rejections.map((rejection) => [rejection.mutationId, rejection]))
+        : null;
 
     for (const rows of pendingByTable.values()) {
       await applyMutationStatusUpdates(
@@ -1539,11 +1550,44 @@ async function flushBatch(
         rows[0]!.context,
         rows.map((row) => {
           const attemptCount = row.attemptCount + 1;
-          // A batch-level failure is not attributable to any one mutation, so it must NOT
-          // quarantine on a structural 4xx (a stray 404/413/malformed envelope would
-          // permanently kill unrelated valid writes). It stays retryable; only the hard
-          // attempt cap escalates to quarantined. Per-mutation structural rejection is handled
-          // on the ack path below, where the server names the offending mutation.
+
+          if (rejectionById) {
+            const rejection = rejectionById.get(row.mutationId);
+
+            if (rejection) {
+              // Named as the cause: terminal quarantine (it will never succeed unchanged).
+              quarantinedMutationIds.push(row.mutationId);
+              return {
+                mutationId: row.mutationId,
+                status: "quarantined" as const,
+                attemptCount,
+                updatedAtUs: failedAtUs,
+                lastError: rejection.reason,
+                nextRetryAtUs: null,
+                lastHttpStatus: httpStatus,
+                conflictReason: rejection.reason,
+              };
+            }
+
+            // Innocent sibling: nothing was applied (atomic batch), so make it immediately
+            // retryable — no backoff (the fault was the now-quarantined mutation, not
+            // congestion) — and the next flush proceeds without the poison.
+            return {
+              mutationId: row.mutationId,
+              status: "failed" as const,
+              attemptCount,
+              updatedAtUs: failedAtUs,
+              lastError: "Batch rejected due to a sibling mutation; retrying without it",
+              nextRetryAtUs: null,
+              lastHttpStatus: httpStatus,
+              conflictReason: null,
+            };
+          }
+
+          // Unattributed batch-level failure: stays retryable with jittered backoff; only the
+          // hard attempt cap escalates to terminal quarantined. A structural 4xx is NOT
+          // quarantined here (a stray 404/413/malformed envelope would otherwise permanently
+          // kill unrelated valid writes).
           const outcome = resolveBatchFailureOutcome(attemptCount, maxAttempts, failedAtUs);
 
           if (outcome.status === "quarantined") {
@@ -1555,7 +1599,7 @@ async function flushBatch(
             status: outcome.status,
             attemptCount,
             updatedAtUs: failedAtUs,
-            lastError: error instanceof Error ? error.message : "Unknown batch write failure",
+            lastError: errorMessage,
             nextRetryAtUs: outcome.nextRetryAtUs,
             lastHttpStatus: httpStatus,
             conflictReason: null,
@@ -1995,10 +2039,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 class MutationRequestError extends Error {
   readonly status: number;
+  /** Per-mutation attribution the server returned for a structural rejection, or null. */
+  readonly rejections: MutationRejection[] | null;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, rejections: MutationRejection[] | null = null) {
     super(message);
     this.name = "MutationRequestError";
     this.status = status;
+    this.rejections = rejections;
   }
+}
+
+/**
+ * Extract per-mutation attribution from a non-2xx batch-write body. The server names the
+ * offending mutations on a structural (validation) rejection; an absent, non-JSON, or
+ * empty-`rejections` body yields null, so the failure is treated as non-attributable
+ * (whole batch stays retryable).
+ */
+function parseBatchRejections(body: string): MutationRejection[] | null {
+  if (body.length === 0) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+
+  const result = batchMutationErrorSchema.safeParse(parsed);
+  const rejections = result.success ? result.data.rejections : undefined;
+  return rejections && rejections.length > 0 ? rejections : null;
 }

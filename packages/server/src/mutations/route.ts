@@ -177,7 +177,21 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
         });
       }
 
-      return context.json({ message: `Payload validation failed: ${validationErrors.join("; ")}` }, 400);
+      // Attribute the rejection to the specific offending mutations. The batch is atomic
+      // (nothing was applied), so the client can quarantine exactly these and keep the
+      // innocent siblings retryable — one bad mutation never poisons the whole offline queue.
+      return context.json(
+        {
+          message: `Payload validation failed: ${validationErrors.join("; ")}`,
+          rejections: invalidMutations.map(({ mutation, message }) => ({
+            tableName: mutation.tableName,
+            mutationId: mutation.mutationId,
+            mutationSeq: mutation.mutationSeq,
+            reason: message,
+          })),
+        },
+        400,
+      );
     }
 
     const acks: MutationAck[] = [];
