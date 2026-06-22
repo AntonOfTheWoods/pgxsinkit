@@ -6,7 +6,7 @@
  * Source:  https://github.com/electric-sql/pglite/tree/2eba679f64c4a9ddef57d25c052ec4f0287cc497/packages/pglite-sync
  * License: Apache-2.0 (upstream © ElectricSQL; see NOTICE). Ported from Vitest to bun:test;
  *          the test bodies are preserved so they remain a faithful behavioural oracle for the
- *          vendored read-path engine ahead of ADR-0009's internalization. It is intentionally
+ *          read-path engine now internalized into client/src/sync (ADR-0009). It is intentionally
  *          @ts-nocheck + oxlint-disable: we hold upstream's tests to upstream's standards, run
  *          them as a runtime oracle, and keep refresh cheap (re-pull + re-apply the framework
  *          shim below). Only the shim and the bun `.rejects`-takes-a-promise form are changed.
@@ -29,7 +29,7 @@ const MockMultiShapeStream = mock(() => ({
 }));
 await mock.module("@electric-sql/experimental", () => ({ MultiShapeStream: MockMultiShapeStream }));
 
-const { electricSync } = await import("../../packages/pglite-sync/src/index");
+const { electricSync } = await import("../../packages/client/src/sync/index");
 
 // The vendored engine commits sync batches fire-and-forget (`void commitUpToLsn`) — a late commit
 // can reject after a test has unsubscribed/closed its PGlite, surfacing as an unhandled rejection

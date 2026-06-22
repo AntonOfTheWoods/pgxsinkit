@@ -401,7 +401,7 @@ function qualifyIdentifier(schemaName: string, objectName: string) {
   if (schemaName === "public") {
     // Quote only when required so existing generated SQL stays stable, but a table/view named
     // after a reserved word (e.g. `group`) is a valid Postgres identifier and MUST be quoted or
-    // the generated DDL and read queries fail to parse. The row-applier (pglite-sync) always quotes.
+    // the generated DDL and read queries fail to parse. The row-applier (src/sync) always quotes.
     return maybeQuoteIdentifier(objectName);
   }
 

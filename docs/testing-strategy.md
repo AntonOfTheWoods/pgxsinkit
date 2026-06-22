@@ -61,7 +61,7 @@ The canonical scenarios are:
 
 ## Upgrade gates
 
-When changing PostgreSQL, ElectricSQL, PGlite, or the vendored `packages/pglite-sync` implementation, add at least one regression test for any newly observed drift.
+When changing PostgreSQL, ElectricSQL, PGlite, or the internalized read-path engine (`packages/client/src/sync`), add at least one regression test for any newly observed drift.
 
 ## Performance tests
 

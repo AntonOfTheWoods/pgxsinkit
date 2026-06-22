@@ -8,7 +8,7 @@ The repository is split into three boundaries:
 
 ## 2. Sync adapter
 
-`packages/pglite-sync` vendors the upstream `@electric-sql/pglite-sync` implementation. This keeps upstream behavior visible and gives the repo a stable place to apply version-specific patches.
+`packages/client/src/sync` is the read-path ingest engine — internalized into the client (ADR-0009), originally vendored from upstream `@electric-sql/pglite-sync`. It is ours to evolve: a serialized commit queue, a type-driven apply ladder, and registry-declared consistency groups, with no upstream-compatibility constraint. We still sync with Electric via `@electric-sql/client` + `@electric-sql/experimental`.
 
 `@pgxsinkit/client` wraps that vendored adapter internally (`packages/client/src/shape-sync.ts`) — the place to layer retries and instrumentation. There is no separate sync-engine package (see [adr/0007](adr/0007-absorb-sync-engine.md)).
 
@@ -27,7 +27,7 @@ The repository is split into three boundaries:
 7. The API writes to PostgreSQL through the in-database apply function `pgxsinkit_apply_mutations` (`POST /api/mutations`).
 8. ElectricSQL exposes shape data from PostgreSQL.
 9. The write API shape proxy (`/v1/electric-proxy`) forwards read requests to Electric and enforces owner filtering for protected tables unless caller role is admin.
-10. PGlite subscribes through the vendored `packages/pglite-sync` implementation.
+10. PGlite subscribes through the client's internal read-path engine (`packages/client/src/sync`).
 11. Acked overlay rows are cleared only after the synced echo reaches the acknowledged server `updated_at_us` value.
 12. The integration tests assert eventual convergence inside local PGlite.
 

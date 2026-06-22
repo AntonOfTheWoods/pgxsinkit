@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 
 import type { PGlite } from "@electric-sql/pglite";
 
-import { applyInsertsToTable, applyMessageToTable } from "../../packages/pglite-sync/src/apply";
+import { applyInsertsToTable, applyMessageToTable } from "../../packages/client/src/sync/apply";
 import { createFreshTestPGlite } from "../support/pglite";
 
 interface TestInsertMessage {

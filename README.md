@@ -46,7 +46,7 @@ policy depends on the column).
 
 ## Goals
 
-- Keep the downward sync path aligned with upstream `@electric-sql/pglite-sync`, while vendoring locally for hardening.
+- Own the downward read-path ingest end-to-end (ADR-0009): we still sync with Electric (`@electric-sql/client` + `@electric-sql/experimental`), but the ingest engine is an internal module of `@pgxsinkit/client`, not a separate vendored package.
 - Put the write path behind a typed API using Bun, Drizzle, and Zod.
 - Maintain fast unit tests plus container-backed integration tests.
 - Make upgrades of Drizzle, PostgreSQL, ElectricSQL, and PGlite routine and measurable.
@@ -56,7 +56,7 @@ policy depends on the column).
 - `apps/web`: React + Vite demo UI using local PGlite.
 - `apps/write-api`: Bun + Hono write API.
 - `packages/contracts`: shared validation schemas and DTOs.
-- `packages/pglite-sync`: vendored upstream sync implementation.
+- `packages/client`: offline client — local store, mutation runtime, and the internalized read-path sync engine (`src/sync/`, ADR-0009).
 - `packages/test-utils`: shared test helpers.
 - `infra/compose`: compose files for PostgreSQL and ElectricSQL.
 - `infra/drizzle`: drizzle migrations for PostgreSQL.

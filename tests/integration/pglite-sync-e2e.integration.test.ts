@@ -15,7 +15,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { PGlite, type PGliteInterfaceExtensions } from "@electric-sql/pglite";
 import { SQL } from "bun";
 
-import { electricSync, type InitialInsertMethod } from "../../packages/pglite-sync/src/index";
+import { electricSync, type InitialInsertMethod } from "../../packages/client/src/sync/index";
 
 /** Minimal node-`pg` Client shim over Bun.SQL: the suite only uses `.query()`/`.connect()`/`.end()`.
  * `max: 1` makes this a single physical connection (like node-`pg`'s Client), so the suite's raw

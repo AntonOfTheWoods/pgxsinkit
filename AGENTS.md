@@ -54,7 +54,7 @@ vocabulary.
 
 - Use `tmp/linearlite` and `tmp/pglite` only as reference inputs.
 - Do not treat `tmp/` as project code. It is reference material only.
-- Prefer the vendored `packages/pglite-sync` codebase sourced from upstream `@electric-sql/pglite-sync`, and evolve it before considering a clean-room rewrite.
+- The read-path ingest engine is internalized at `packages/client/src/sync/` (ADR-0009, originally vendored from upstream `@electric-sql/pglite-sync`). It is ours to evolve freely — there is no upstream-compatibility constraint. `tests/unit/pglite-sync-upstream.test.ts` + `tests/integration/pglite-sync-e2e.integration.test.ts` are the behavioural oracle; keep them green through refactors.
 - Keep production-facing logic in the workspace packages, not in ad hoc scripts.
 - Record any protocol or behavior drift in `docs/testing-strategy.md`.
 - Prefer small, composable helpers over framework-heavy abstractions.

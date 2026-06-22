@@ -16,8 +16,9 @@ use directly:
   the Electric shape proxy.
 - **[@pgxsinkit/react](/api/react/readme/)** — React bindings over the client.
 
-The vendored `@pgxsinkit/pglite-sync` is an internal transitive dependency of the client and is not
-documented here — see [Packages](/packages/) for where it fits.
+The Electric read-path ingest engine lives inside `@pgxsinkit/client` (`src/sync/`, ADR-0009) rather
+than a separate package, so it is not documented as its own entry — see [Packages](/packages/) for
+where it fits.
 
 New to the library? Start with [Core concepts](/concepts/) for the model, then [Packages](/packages/)
 for what to install.

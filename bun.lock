@@ -90,8 +90,9 @@
       "name": "@pgxsinkit/client",
       "version": "0.0.0",
       "dependencies": {
+        "@electric-sql/client": "^1.5.21",
+        "@electric-sql/experimental": "^6.0.21",
         "@pgxsinkit/contracts": "workspace:*",
-        "@pgxsinkit/pglite-sync": "workspace:*",
       },
       "peerDependencies": {
         "@electric-sql/pglite": "0.5.3",
@@ -105,15 +106,6 @@
       "peerDependencies": {
         "drizzle-orm": "1.0.0-rc.2",
         "zod": "^4.4.3",
-      },
-    },
-    "packages/pglite-sync": {
-      "name": "@pgxsinkit/pglite-sync",
-      "version": "0.0.0",
-      "peerDependencies": {
-        "@electric-sql/client": "^1.5.21",
-        "@electric-sql/experimental": "^6.0.21",
-        "@electric-sql/pglite": "0.5.3",
       },
     },
     "packages/react": {
@@ -247,9 +239,9 @@
 
     "@drizzle-team/brocli": ["@drizzle-team/brocli@0.11.0", "", {}, "sha512-hD3pekGiPg0WPCCGAZmusBBJsDqGUR66Y452YgQsZOnkdQ7ViEPKuyP4huUGEZQefp8g34RRodXYmJ2TbCH+tg=="],
 
-    "@electric-sql/client": ["@electric-sql/client@1.5.16", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1" }, "optionalDependencies": { "@rollup/rollup-darwin-arm64": "^4.18.1" }, "bin": { "intent": "bin/intent.mjs" } }, "sha512-HvdlSCfCLPG1ohNHA9F/BHSKcZwxTRXO4CgevnocTGU2UMmy6ttosuyTwXFQV4D0n5j6NcxvlGt1wmv7FrwzIg=="],
+    "@electric-sql/client": ["@electric-sql/client@1.5.21", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1" }, "optionalDependencies": { "@rollup/rollup-darwin-arm64": "^4.18.1" }, "bin": { "intent": "bin/intent.mjs" } }, "sha512-Aize0Aa2ZyTZySQMfMSTDPP/EJWcR1HfH7qE1DgMhI5f6dDxm1B74CN4o1fnIQeW/ZLg9TdbTgFYo1tsUg7mXg=="],
 
-    "@electric-sql/experimental": ["@electric-sql/experimental@6.0.16", "", { "optionalDependencies": { "@rollup/rollup-darwin-arm64": "^4.18.1" }, "peerDependencies": { "@electric-sql/client": "1.5.16" } }, "sha512-QiutQfvJ9y8qd/g0HdYiB5DXl3TmB1cQP87vow6DZnT7eiBMeTvun0b3b8xp1l+kIDGeLGX6A6f5KzJpqD3Tzg=="],
+    "@electric-sql/experimental": ["@electric-sql/experimental@6.0.21", "", { "optionalDependencies": { "@rollup/rollup-darwin-arm64": "^4.18.1" }, "peerDependencies": { "@electric-sql/client": "1.5.21" } }, "sha512-Y5wDQvLmF66L7mGexjH2mlziuvdQeZmHiQhAV44rMQY3Ne5BW0dN+7lJ3oI7DStzRxbd7thMV6bb54B0g+OBhA=="],
 
     "@electric-sql/pglite": ["@electric-sql/pglite@0.5.3", "", {}, "sha512-iTTYbA5Uesrl+N7zss0J5LopT7KE4j9aymYo+EZZh+rZbARQCUQOs+n2pay64JRUpc3fCkpfrniTNJnvYzOE+g=="],
 
@@ -517,8 +509,6 @@
 
     "@pgxsinkit/perf-lab": ["@pgxsinkit/perf-lab@workspace:apps/perf-lab"],
 
-    "@pgxsinkit/pglite-sync": ["@pgxsinkit/pglite-sync@workspace:packages/pglite-sync"],
-
     "@pgxsinkit/react": ["@pgxsinkit/react@workspace:packages/react"],
 
     "@pgxsinkit/schema": ["@pgxsinkit/schema@workspace:packages/schema"],
@@ -569,7 +559,7 @@
 
     "@rollup/rollup-android-arm64": ["@rollup/rollup-android-arm64@4.62.2", "", { "os": "android", "cpu": "arm64" }, "sha512-BaH7BllCACHoH1LguOU56UItGfUWjujlO65kS9LAodViaN4bwIKd7oeW/ZHJ/4ljr/7MIiENnNy3HJ0zXv8Zkw=="],
 
-    "@rollup/rollup-darwin-arm64": ["@rollup/rollup-darwin-arm64@4.60.3", "", { "os": "darwin", "cpu": "arm64" }, "sha512-vo6Y5Qfpx7/5EaamIwi0WqW2+zfiusVihKatLvtN1VFVy3D13uERk/6gZLU1UiHRL6fDXqj/ELIeVRGnvcTE1g=="],
+    "@rollup/rollup-darwin-arm64": ["@rollup/rollup-darwin-arm64@4.62.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-v39RCCvj4He82I9sFmk+M1VZ0PLM9sfsLVikjfx2hYBNALhrrOR2D3JjQA6AhlaSOgcR+RzrKY7e1+bT6SUO/A=="],
 
     "@rollup/rollup-darwin-x64": ["@rollup/rollup-darwin-x64@4.62.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-yl0y2vq3S3lHeuXhEdss6TWfKW8vkujImO12tn4ZkG/4oghr09LvdYm2RElVjokTQiUvDUGXLGsYeLqUMCKpGA=="],
 
@@ -1448,8 +1438,6 @@
     "parse-entities/@types/unist": ["@types/unist@2.0.11", "", {}, "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA=="],
 
     "parse5/entities": ["entities@6.0.1", "", {}, "sha512-aN97NXWF6AWBTahfVOIrB/NShkzi5H7F9r1s9mD3cDj4Ko5f2qhhVoYMibXF7GlLveb/D2ioWay8lxI97Ven3g=="],
-
-    "rollup/@rollup/rollup-darwin-arm64": ["@rollup/rollup-darwin-arm64@4.62.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-v39RCCvj4He82I9sFmk+M1VZ0PLM9sfsLVikjfx2hYBNALhrrOR2D3JjQA6AhlaSOgcR+RzrKY7e1+bT6SUO/A=="],
 
     "shiki/@shikijs/engine-oniguruma": ["@shikijs/engine-oniguruma@4.2.0", "", { "dependencies": { "@shikijs/types": "4.2.0", "@shikijs/vscode-textmate": "^10.0.2" } }, "sha512-hTorK1dffPkpbMUk6Z+828PgRo7d07HbnizoP0hNPFjhxMHctj0Px/qoHeGMYafc6ju+u9iMldN4JbVzNQM++g=="],
 

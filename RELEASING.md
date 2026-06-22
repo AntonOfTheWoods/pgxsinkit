@@ -3,7 +3,7 @@
 > Implements the Cross-repo TypeScript release & versioning standard — see
 > [docs/adr/0001](docs/adr/0001-unified-ts-release-versioning-tooling-standard.md).
 
-pgxsinkit publishes its public packages (`@pgxsinkit/client`, `contracts`, `pglite-sync`, `react`,
+pgxsinkit publishes its public packages (`@pgxsinkit/client`, `contracts`, `react`,
 `server`) to **two** registries:
 
 | Registry                                   | Role                                                                                                      | How it's published                                                              |

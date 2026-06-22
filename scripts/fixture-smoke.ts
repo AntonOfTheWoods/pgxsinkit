@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Public packages in dependency order, with the entry points the smoke imports from.
-const PUBLIC_PACKAGES = ["contracts", "pglite-sync", "client", "server", "react"] as const;
+const PUBLIC_PACKAGES = ["contracts", "client", "server", "react"] as const;
 
 // Peer dependencies a real consumer installs alongside the packages (pinned to the
 // versions the workspace builds against).

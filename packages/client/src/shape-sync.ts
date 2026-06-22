@@ -1,7 +1,8 @@
 import type { PGlite, PGliteInterfaceExtensions } from "@electric-sql/pglite";
 
 import { type SyncConfigInput, type TableSpecInput } from "@pgxsinkit/contracts";
-import { electricSync } from "@pgxsinkit/pglite-sync";
+
+import { electricSync } from "./sync";
 
 export interface ShapeSyncSpec {
   electricUrl: string;

@@ -1,11 +1,10 @@
 # pglite-sync conformance baseline (vendored upstream tests)
 
-The read-path sync engine under `packages/pglite-sync/` is vendored from ElectricSQL's
-`@electric-sql/pglite` (package `pglite-sync`). [ADR-0009](adr/0009-internalize-read-path-sync.md)
-rewrites that engine — internalising it into the client, adding consistency groups, a
-type-driven apply ladder, and a serialized commit queue. Before that rewrite we vendor
-**upstream's own test suites** so the rewrite has a behavioural **regression oracle**, not just
-our one thin apply test.
+The read-path sync engine — internalized at `packages/client/src/sync/` (ADR-0009 Phase 1),
+originally vendored from ElectricSQL's `@electric-sql/pglite` (package `pglite-sync`) — is being
+rewritten by [ADR-0009](adr/0009-internalize-read-path-sync.md): consistency groups, a type-driven
+apply ladder, and a serialized commit queue. Through that rewrite we keep **upstream's own test
+suites** as a behavioural **regression oracle**, not just our one thin apply test.
 
 ## What is vendored
 
@@ -62,5 +61,6 @@ transforms, swap the top import block for the shim, and update the pinned SHA he
 Porting the unit suite immediately caught a real divergence: the vendored
 `applyMessagesToTableWithJson` had **dropped the identifier quotes** upstream uses
 (`"${column_name}"`), so camelCase columns folded to lowercase and `json_to_recordset` returned
-`null`. Fixed in `packages/pglite-sync/src/apply.ts` (an ADR-0004-class unquoted-identifier bug the
-vendored engine had carried).
+`null`. Fixed in the apply module (now `packages/client/src/sync/apply.ts`) — an ADR-0004-class
+unquoted-identifier bug the vendored engine had carried; Phase 1 then routed all of apply's
+identifier quoting through the shared `quoteIdentifier` resolver.

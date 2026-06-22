@@ -25,8 +25,8 @@ PostgreSQL  →  ElectricSQL  →  write API shape proxy  →  PGlite (local)
 3. **The shape proxy** (`/v1/electric-proxy`, served by the write API) forwards shape requests to
    Electric and **enforces owner filtering** for protected tables unless the caller is an admin. In
    the real path, clients talk to the proxy, not to Electric directly.
-4. **PGlite** subscribes through the vendored `@electric-sql/pglite-sync` implementation and applies
-   the stream into local tables. The app reads from there.
+4. **PGlite** subscribes through `@pgxsinkit/client`'s internal Electric ingest engine (`src/sync/`,
+   ADR-0009) and applies the stream into local tables. The app reads from there.
 
 ## The proxy is the gateway
 

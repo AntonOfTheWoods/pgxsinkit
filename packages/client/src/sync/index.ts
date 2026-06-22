@@ -16,7 +16,7 @@ import {
   migrateSubscriptionMetadataTables,
   type SubscriptionState,
   updateSubscriptionState,
-} from "./subscriptionState";
+} from "./subscription-state";
 import type {
   ElectricSyncOptions,
   InsertChangeMessage,

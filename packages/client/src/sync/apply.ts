@@ -1,7 +1,14 @@
 import type { ChangeMessage, Row } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 
+import { quoteIdentifier } from "@pgxsinkit/contracts";
+
 import type { MapColumns, InsertChangeMessage } from "./types";
+
+/** Schema-qualified, quoted table reference via the ADR-0004 shared identifier resolver. */
+function qualifiedTable(schema: string, table: string): string {
+  return `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+}
 
 export interface ApplyMessageToTableOptions {
   pg: PGliteInterface | Transaction;
@@ -31,8 +38,8 @@ export async function applyMessageToTable({
       const upsertClause = buildUpsertClause(columns, primaryKey);
       return await pg.query(
         `
-            INSERT INTO "${schema}"."${table}"
-            (${columns.map((s) => '"' + s + '"').join(", ")})
+            INSERT INTO ${qualifiedTable(schema, table)}
+            (${columns.map((column) => quoteIdentifier(column)).join(", ")})
             VALUES
             (${columns.map((_v, i) => "$" + (i + 1)).join(", ")})
             ${upsertClause}
@@ -47,9 +54,9 @@ export async function applyMessageToTable({
       if (columns.length === 0) return;
       return await pg.query(
         `
-            UPDATE "${schema}"."${table}"
-            SET ${columns.map((column, i) => '"' + column + '" = $' + (i + 1)).join(", ")}
-            WHERE ${primaryKey.map((column, i) => '"' + column + '" = $' + (columns.length + i + 1)).join(" AND ")}
+            UPDATE ${qualifiedTable(schema, table)}
+            SET ${columns.map((column, i) => `${quoteIdentifier(column)} = $${i + 1}`).join(", ")}
+            WHERE ${primaryKey.map((column, i) => `${quoteIdentifier(column)} = $${columns.length + i + 1}`).join(" AND ")}
           `,
         [...columns.map((column) => data[column]), ...primaryKey.map((column) => data[column])],
       );
@@ -59,8 +66,8 @@ export async function applyMessageToTable({
       if (debug) console.log("deleting", data);
       return await pg.query(
         `
-            DELETE FROM "${schema}"."${table}"
-            WHERE ${primaryKey.map((column, i) => '"' + column + '" = $' + (i + 1)).join(" AND ")}
+            DELETE FROM ${qualifiedTable(schema, table)}
+            WHERE ${primaryKey.map((column, i) => `${quoteIdentifier(column)} = $${i + 1}`).join(" AND ")}
           `,
         [...primaryKey.map((column) => data[column])],
       );
@@ -166,8 +173,8 @@ export async function applyInsertsToTable({
   const executeBatch = async (batch: Row<unknown>[]) => {
     const upsertClause = buildUpsertClause(columns, primaryKey);
     const sql = `
-      INSERT INTO "${schema}"."${table}"
-      (${columns.map((s) => `"${s}"`).join(", ")})
+      INSERT INTO ${qualifiedTable(schema, table)}
+      (${columns.map((column) => quoteIdentifier(column)).join(", ")})
       VALUES
       ${batch.map((_, j) => `(${columns.map((_v, k) => "$" + (j * columns.length + k + 1)).join(", ")})`).join(", ")}
       ${upsertClause}
@@ -254,11 +261,11 @@ export async function applyMessagesToTableWithJson({
     );
     await pg.query(
       `
-        INSERT INTO "${schema}"."${table}"
+        INSERT INTO ${qualifiedTable(schema, table)}
         SELECT x.* from json_to_recordset($1) as x(${columns
           .map(
             (column) =>
-              `"${column.column_name}" ${column.udt_name.replace(/^_/, "")}` +
+              `${quoteIdentifier(column.column_name)} ${column.udt_name.replace(/^_/, "")}` +
               (column.data_type === "ARRAY" ? `[]` : ""),
           )
           .join(", ")})
@@ -334,7 +341,7 @@ export async function applyMessagesToTableWithCopy({
 
   await pg.query(
     `
-      COPY "${schema}"."${table}" (${columns.map((column) => `"${column}"`).join(", ")})
+      COPY ${qualifiedTable(schema, table)} (${columns.map((column) => quoteIdentifier(column)).join(", ")})
       FROM '/dev/blob'
       WITH (FORMAT csv, NULL '\\N')
     `,
@@ -365,13 +372,13 @@ function buildUpsertClause(columns: string[], primaryKey: string[] | undefined):
   }
 
   const nonPrimaryKeyColumns = columns.filter((column) => !primaryKey.includes(column));
-  const conflictTarget = primaryKey.map((column) => `"${column}"`).join(", ");
+  const conflictTarget = primaryKey.map((column) => quoteIdentifier(column)).join(", ");
 
   if (nonPrimaryKeyColumns.length === 0) {
     return `ON CONFLICT (${conflictTarget}) DO NOTHING`;
   }
 
   return `ON CONFLICT (${conflictTarget}) DO UPDATE SET ${nonPrimaryKeyColumns
-    .map((column) => `"${column}" = EXCLUDED."${column}"`)
+    .map((column) => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`)
     .join(", ")}`;
 }
