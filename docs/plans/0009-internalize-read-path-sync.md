@@ -14,6 +14,13 @@ Depends on / coordinates with: [ADR-0004](../adr/0004-one-registry-interpreter.m
 Each phase ends `validate`-green; streaming/atomicity/failure proofs run in the
 Podman integration lane.
 
+**Prerequisite (landed):** upstream's own pglite-sync test suites are vendored as a
+behavioural regression oracle for this rewrite — `tests/unit/pglite-sync-upstream.test.ts`
+and `tests/integration/pglite-sync-e2e.integration.test.ts`. See
+[docs/conformance-baseline.md](../conformance-baseline.md) for the contract (stay green
+through the internal rewrite; migrate test-by-test when the public API shifts to
+consistency groups) and the per-decision coverage map.
+
 ## Phase 1 — Internalize as-is (behaviour-preserving)
 
 - Move `packages/pglite-sync/src/{index,apply,subscriptionState,types}.ts` into

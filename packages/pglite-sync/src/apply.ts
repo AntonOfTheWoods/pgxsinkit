@@ -258,7 +258,8 @@ export async function applyMessagesToTableWithJson({
         SELECT x.* from json_to_recordset($1) as x(${columns
           .map(
             (column) =>
-              `${column.column_name} ${column.udt_name.replace(/^_/, "")}` + (column.data_type === "ARRAY" ? `[]` : ""),
+              `"${column.column_name}" ${column.udt_name.replace(/^_/, "")}` +
+              (column.data_type === "ARRAY" ? `[]` : ""),
           )
           .join(", ")})
         ${upsertClause}
