@@ -171,6 +171,7 @@ function TodoApp({
     pendingCount: 0,
     sendingCount: 0,
     failedCount: 0,
+    quarantinedCount: 0,
     ackedCount: 0,
   });
   const { rows: rawTodoRows } = useLiveDrizzleRows(

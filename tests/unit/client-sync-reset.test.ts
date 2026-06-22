@@ -73,7 +73,13 @@ describe("createSyncClient subscription reset", () => {
         reconcile: async () => undefined,
         retryFailed: async () => undefined,
         readMutationDetails: async () => [],
-        readMutationStats: async () => ({ pendingCount: 0, sendingCount: 0, failedCount: 0, ackedCount: 0 }),
+        readMutationStats: async () => ({
+          pendingCount: 0,
+          sendingCount: 0,
+          failedCount: 0,
+          quarantinedCount: 0,
+          ackedCount: 0,
+        }),
       }),
     }));
 

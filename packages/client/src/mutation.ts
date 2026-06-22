@@ -42,13 +42,19 @@ import type {
 } from "@pgxsinkit/contracts";
 import {
   escapeSqlLiteral as escapeSqlString,
+  fingerprintRegistry,
   getProjectedColumns as getProjectedTableColumns,
   getSyncRegistrySchema,
   maybeQuoteIdentifier,
   quoteIdentifier,
 } from "@pgxsinkit/contracts";
 
-import { assertValidMutationTransition, type MutationStatus } from "./mutation-state";
+import {
+  assertValidMutationTransition,
+  classifyFailureStatus,
+  DEFAULT_MAX_MUTATION_ATTEMPTS,
+  type MutationStatus,
+} from "./mutation-state";
 
 export type { MutationStatus } from "./mutation-state";
 export type MutationKind = "create" | "update" | "delete";
@@ -89,6 +95,8 @@ export interface MutationDetail {
   nextRetryAtUs: string | null;
   serverUpdatedAtUs: string | null;
   updatedAtUs: string;
+  /** Registry fingerprint (ADR-0004) the mutation was authored under, or null if unstamped. */
+  registryVersion: string | null;
 }
 
 export interface MutationDb {
@@ -104,6 +112,22 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
   registry: TRegistry;
   writeUrl: string;
   getAuthToken?: () => Promise<string | undefined>;
+  /**
+   * Registry fingerprint (ADR-0004) stamped onto each enqueued mutation as its
+   * `registry_version`, so a version-boundary crossing is known before sending (ADR-0006).
+   */
+  registryVersion?: string;
+  /**
+   * Hard cap on send attempts before a still-failing mutation is quarantined
+   * (ADR-0005 congestion policy). Defaults to {@link DEFAULT_MAX_MUTATION_ATTEMPTS}.
+   */
+  maxMutationAttempts?: number;
+  /**
+   * Invoked after a flush whenever mutations transition to `quarantined` (terminal,
+   * permanently rejected). Receives the newly-quarantined details so the app can surface
+   * them. The library never silently drops these (ADR-0006 decision 4).
+   */
+  onQuarantine?: (quarantined: MutationDetail[]) => void | Promise<void>;
 }
 
 interface TableContext {
@@ -183,6 +207,10 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   };
 
   const tableContexts = buildTableContexts(options.registry);
+  const maxMutationAttempts = options.maxMutationAttempts ?? DEFAULT_MAX_MUTATION_ATTEMPTS;
+  // The fingerprint (ADR-0004) stamped onto each enqueued mutation (ADR-0006). The runtime
+  // owns the registry, so it derives this itself; an explicit override is honoured for tests.
+  const registryVersion = options.registryVersion ?? fingerprintRegistry(options.registry);
   let flushQueue = Promise.resolve();
 
   const getTableContext = (table: SyncTableName<TRegistry>) => {
@@ -435,13 +463,14 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         }
       }
 
-      await insertMutationsBulk(options.db, context, plannedMutations);
+      await insertMutationsBulk(options.db, context, plannedMutations, registryVersion);
       await upsertOverlayRecordsBulk(options.db, context, [...plannedOverlays.values()]);
     }
   };
 
   const runFlush = async (table?: SyncTableName<TRegistry>) => {
     const affectedContexts = new Map<string, TableContext>();
+    const quarantinedMutationIds = new Set<string>();
     let processedCount = 0;
 
     do {
@@ -449,6 +478,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         options.db,
         tableContexts as Record<string, TableContext>,
         options.writeUrl,
+        maxMutationAttempts,
         table,
         resolveAuthToken,
       );
@@ -458,10 +488,28 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       for (const context of batchResult.affectedContexts) {
         affectedContexts.set(context.key, context);
       }
+
+      for (const mutationId of batchResult.quarantinedMutationIds) {
+        quarantinedMutationIds.add(mutationId);
+      }
     } while (processedCount > 0);
 
     for (const context of affectedContexts.values()) {
       await reconcileTable(options.db, context);
+    }
+
+    // Surface newly-quarantined mutations after reconciliation so the app never has to
+    // poll for permanently-rejected writes (ADR-0006 decision 4). Never silent loss.
+    if (quarantinedMutationIds.size > 0 && options.onQuarantine) {
+      const details = await readMutationDetailsForContexts(
+        options.db,
+        [...affectedContexts.values()],
+        quarantinedMutationIds,
+      );
+
+      if (details.length > 0) {
+        await options.onQuarantine(details);
+      }
     }
   };
 
@@ -566,6 +614,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         pendingCount: 0,
         sendingCount: 0,
         failedCount: 0,
+        quarantinedCount: 0,
         ackedCount: 0,
       };
 
@@ -575,6 +624,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
             COUNT(*) FILTER (WHERE status = 'pending')::int AS "pendingCount",
             COUNT(*) FILTER (WHERE status = 'sending')::int AS "sendingCount",
             COUNT(*) FILTER (WHERE status = 'failed')::int AS "failedCount",
+            COUNT(*) FILTER (WHERE status = 'quarantined')::int AS "quarantinedCount",
             COUNT(*) FILTER (WHERE status = 'acked')::int AS "ackedCount"
           FROM ${context.journalTable}
         `);
@@ -587,6 +637,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         totals.pendingCount += row.pendingCount;
         totals.sendingCount += row.sendingCount;
         totals.failedCount += row.failedCount;
+        totals.quarantinedCount += row.quarantinedCount;
         totals.ackedCount += row.ackedCount;
       }
 
@@ -594,53 +645,72 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     },
     readMutationDetails: async (table) => {
       const contexts = filterContexts(tableContexts, table);
-      const rows: MutationDetail[] = [];
-
-      for (const context of contexts) {
-        const result = await options.db.query<MutationDetailRow>(`
-          SELECT
-            mutation_id AS "mutationId",
-            entity_key_json AS "entityKeyJson",
-            mutation_seq AS "mutationSeq",
-            mutation_kind AS "mutationKind",
-            status,
-            attempt_count AS "attemptCount",
-            last_http_status AS "lastHttpStatus",
-            last_error AS "lastError",
-            conflict_reason AS "conflictReason",
-            next_retry_at_us::text AS "nextRetryAtUs",
-            server_updated_at_us::text AS "serverUpdatedAtUs",
-            updated_at_us::text AS "updatedAtUs"
-          FROM ${context.journalTable}
-          ORDER BY updated_at_us DESC, mutation_seq DESC
-        `);
-
-        rows.push(
-          ...result.rows.map((row) => ({
-            tableName: context.key,
-            entityKey: JSON.parse(row.entityKeyJson) as Record<string, string>,
-            mutationId: row.mutationId,
-            mutationSeq: row.mutationSeq,
-            mutationKind: row.mutationKind,
-            status: row.status,
-            attemptCount: row.attemptCount,
-            lastHttpStatus: row.lastHttpStatus,
-            lastError: row.lastError,
-            conflictReason: row.conflictReason,
-            nextRetryAtUs: row.nextRetryAtUs,
-            serverUpdatedAtUs: row.serverUpdatedAtUs,
-            updatedAtUs: row.updatedAtUs,
-          })),
-        );
-      }
-
-      return rows.sort((left, right) => Number(right.updatedAtUs) - Number(left.updatedAtUs));
+      return readMutationDetailsForContexts(options.db, contexts);
     },
     createOptimisticRecord: (table, input) => {
       const context = getTableContext(table);
       return createOptimisticRecordFromContext(context, input);
     },
   };
+}
+
+/**
+ * Read journal entries across the given contexts as {@link MutationDetail}s, newest first.
+ * Shared by the public `readMutationDetails` and the flush path's quarantine surfacing,
+ * optionally narrowed to a set of mutation ids.
+ */
+async function readMutationDetailsForContexts(
+  db: MutationDb,
+  contexts: TableContext[],
+  mutationIds?: ReadonlySet<string>,
+): Promise<MutationDetail[]> {
+  const rows: MutationDetail[] = [];
+
+  for (const context of contexts) {
+    const result = await db.query<MutationDetailRow>(`
+      SELECT
+        mutation_id AS "mutationId",
+        entity_key_json AS "entityKeyJson",
+        mutation_seq AS "mutationSeq",
+        mutation_kind AS "mutationKind",
+        status,
+        attempt_count AS "attemptCount",
+        last_http_status AS "lastHttpStatus",
+        last_error AS "lastError",
+        conflict_reason AS "conflictReason",
+        next_retry_at_us::text AS "nextRetryAtUs",
+        server_updated_at_us::text AS "serverUpdatedAtUs",
+        updated_at_us::text AS "updatedAtUs",
+        registry_version AS "registryVersion"
+      FROM ${context.journalTable}
+      ORDER BY updated_at_us DESC, mutation_seq DESC
+    `);
+
+    for (const row of result.rows) {
+      if (mutationIds && !mutationIds.has(row.mutationId)) {
+        continue;
+      }
+
+      rows.push({
+        tableName: context.key,
+        entityKey: JSON.parse(row.entityKeyJson) as Record<string, string>,
+        mutationId: row.mutationId,
+        mutationSeq: row.mutationSeq,
+        mutationKind: row.mutationKind,
+        status: row.status,
+        attemptCount: row.attemptCount,
+        lastHttpStatus: row.lastHttpStatus,
+        lastError: row.lastError,
+        conflictReason: row.conflictReason,
+        nextRetryAtUs: row.nextRetryAtUs,
+        serverUpdatedAtUs: row.serverUpdatedAtUs,
+        updatedAtUs: row.updatedAtUs,
+        registryVersion: row.registryVersion,
+      });
+    }
+  }
+
+  return rows.sort((left, right) => Number(right.updatedAtUs) - Number(left.updatedAtUs));
 }
 
 interface MutationRow extends Record<string, unknown> {
@@ -656,6 +726,7 @@ interface MutationRow extends Record<string, unknown> {
   conflictReason: string | null;
   nextRetryAtUs: string | null;
   serverUpdatedAtUs: string | null;
+  registryVersion: string | null;
 }
 
 interface MutationDetailRow extends Record<string, unknown> {
@@ -671,6 +742,7 @@ interface MutationDetailRow extends Record<string, unknown> {
   nextRetryAtUs: string | null;
   serverUpdatedAtUs: string | null;
   updatedAtUs: string;
+  registryVersion: string | null;
 }
 
 interface CurrentRecordStateRow extends Record<string, unknown> {
@@ -1041,7 +1113,12 @@ async function readCurrentRecordStates(db: MutationDb, context: TableContext, en
   return new Map(result.rows.map((row) => [row.entityKeyJson, row]));
 }
 
-async function insertMutationsBulk(db: MutationDb, context: TableContext, rows: ReadonlyArray<PlannedMutationInsert>) {
+async function insertMutationsBulk(
+  db: MutationDb,
+  context: TableContext,
+  rows: ReadonlyArray<PlannedMutationInsert>,
+  registryVersion: string | null,
+) {
   if (rows.length === 0) {
     return;
   }
@@ -1053,6 +1130,7 @@ async function insertMutationsBulk(db: MutationDb, context: TableContext, rows: 
     "mutation_seq",
     "mutation_kind",
     "status",
+    "registry_version",
     "payload_json",
     "enqueued_at_us",
     "next_retry_at_us",
@@ -1067,6 +1145,7 @@ async function insertMutationsBulk(db: MutationDb, context: TableContext, rows: 
       row.entityKeyJson,
       row.mutationKind,
       "pending",
+      registryVersion,
       row.payloadJson,
       row.nowUs,
       row.nowUs,
@@ -1082,10 +1161,11 @@ async function insertMutationsBulk(db: MutationDb, context: TableContext, rows: 
       `nextval('${escapeSqlString(context.journalSequence)}')::integer`,
       formatSqlValuePlaceholder(start + context.pkColumnNames.length + 3, "mutation_kind"),
       formatSqlValuePlaceholder(start + context.pkColumnNames.length + 4, "status"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 5, "payload_json"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 6, "enqueued_at_us"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 7, "next_retry_at_us"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 8, "updated_at_us"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 5, "registry_version"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 6, "payload_json"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 7, "enqueued_at_us"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 8, "next_retry_at_us"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 9, "updated_at_us"),
     ];
 
     return `(${valuePlaceholders.join(", ")})`;
@@ -1241,6 +1321,8 @@ interface PreparedBatchRow extends PendingBatchRow {
 interface FlushBatchResult {
   processedCount: number;
   affectedContexts: TableContext[];
+  /** Mutation ids that transitioned to `quarantined` in this slice (ADR-0006), for surfacing. */
+  quarantinedMutationIds: string[];
 }
 
 interface MutationStatusUpdate {
@@ -1291,7 +1373,11 @@ async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], no
             FROM ${context.journalTable} AS earlier
             WHERE earlier.entity_key_json = ${context.journalTable}.entity_key_json
               AND earlier.mutation_seq < ${context.journalTable}.mutation_seq
-              AND earlier.status IN ('pending', 'failed', 'sending')
+              -- A still-unresolved earlier mutation blocks later same-entity ones so the
+              -- server applies them in author order. The quarantined status is included: a
+              -- later mutation must not flush past a prerequisite the server permanently
+              -- rejected (it would itself fail); resolving the quarantine unblocks the queue.
+              AND earlier.status IN ('pending', 'failed', 'sending', 'quarantined')
           )
       `,
     )
@@ -1316,11 +1402,13 @@ async function flushBatch(
   db: MutationDb,
   tableContexts: Record<string, TableContext>,
   batchWriteUrl: string,
+  maxAttempts: number,
   tableFilter?: string,
   getAuthToken?: () => Promise<string | undefined>,
 ): Promise<FlushBatchResult> {
   const contexts = filterContexts(tableContexts, tableFilter);
   const nowUs = nowMicroseconds();
+  const quarantinedMutationIds: string[] = [];
 
   // Collect send-eligible mutations across all target tables.
   const pendingRows = await readPendingBatchRows(db, contexts, nowUs);
@@ -1369,6 +1457,7 @@ async function flushBatch(
     return {
       processedCount: 0,
       affectedContexts: [],
+      quarantinedMutationIds,
     };
   }
 
@@ -1439,6 +1528,7 @@ async function flushBatch(
   } catch (error) {
     // All mutations in the batch fail together on a transport or server error.
     const failedAtUs = nowMicroseconds();
+    const httpStatus = error instanceof MutationRequestError ? error.status : null;
 
     for (const rows of pendingByTable.values()) {
       await applyMutationStatusUpdates(
@@ -1446,15 +1536,20 @@ async function flushBatch(
         rows[0]!.context,
         rows.map((row) => {
           const attemptCount = row.attemptCount + 1;
+          const outcome = resolveFailureOutcome(httpStatus, attemptCount, maxAttempts, failedAtUs);
+
+          if (outcome.status === "quarantined") {
+            quarantinedMutationIds.push(row.mutationId);
+          }
 
           return {
             mutationId: row.mutationId,
-            status: "failed",
+            status: outcome.status,
             attemptCount,
             updatedAtUs: failedAtUs,
             lastError: error instanceof Error ? error.message : "Unknown batch write failure",
-            nextRetryAtUs: computeNextRetryAtUs(failedAtUs, attemptCount),
-            lastHttpStatus: error instanceof MutationRequestError ? error.status : null,
+            nextRetryAtUs: outcome.nextRetryAtUs,
+            lastHttpStatus: httpStatus,
             conflictReason: null,
           };
         }),
@@ -1464,6 +1559,7 @@ async function flushBatch(
     return {
       processedCount: pending.length,
       affectedContexts: [...new Set(pending.map((row) => row.context))],
+      quarantinedMutationIds,
     };
   }
 
@@ -1471,6 +1567,7 @@ async function flushBatch(
     return {
       processedCount: pending.length,
       affectedContexts: [...new Set(pending.map((row) => row.context))],
+      quarantinedMutationIds,
     };
   }
 
@@ -1486,14 +1583,22 @@ async function flushBatch(
         const ack = acksByMutationId.get(row.mutationId);
 
         if (!ack || ack.status !== "acked") {
+          const attemptCount = row.attemptCount + 1;
+          const httpStatus = ack?.httpStatus ?? null;
+          const outcome = resolveFailureOutcome(httpStatus, attemptCount, maxAttempts, failedAtUs);
+
+          if (outcome.status === "quarantined") {
+            quarantinedMutationIds.push(row.mutationId);
+          }
+
           return {
             mutationId: row.mutationId,
-            status: "failed",
-            attemptCount: row.attemptCount + 1,
+            status: outcome.status,
+            attemptCount,
             updatedAtUs: failedAtUs,
             lastError: ack?.conflictReason ?? "Batch mutation not acknowledged",
-            nextRetryAtUs: computeNextRetryAtUs(failedAtUs, row.attemptCount + 1),
-            lastHttpStatus: ack?.httpStatus ?? null,
+            nextRetryAtUs: outcome.nextRetryAtUs,
+            lastHttpStatus: httpStatus,
             conflictReason: ack?.conflictReason ?? null,
           };
         }
@@ -1534,7 +1639,27 @@ async function flushBatch(
   return {
     processedCount: pending.length,
     affectedContexts: [...new Set(pending.map((row) => row.context))],
+    quarantinedMutationIds,
   };
+}
+
+/**
+ * Resolve a flush failure into the durable journal outcome (ADR-0006). A structural
+ * rejection ({@link classifyFailureStatus}) or hitting the hard attempt cap ends the
+ * retry loop with a terminal `quarantined` (no `next_retry_at_us`); otherwise the
+ * mutation stays `failed` with a jittered backoff (ADR-0005 congestion policy).
+ */
+function resolveFailureOutcome(
+  httpStatus: number | null,
+  attemptCount: number,
+  maxAttempts: number,
+  failedAtUs: string,
+): { status: "failed" | "quarantined"; nextRetryAtUs: string | null } {
+  if (classifyFailureStatus(httpStatus) === "quarantined" || attemptCount >= maxAttempts) {
+    return { status: "quarantined", nextRetryAtUs: null };
+  }
+
+  return { status: "failed", nextRetryAtUs: computeNextRetryAtUs(failedAtUs, attemptCount) };
 }
 
 function resolveBatchMutationUrl(batchWriteUrl: string): string {

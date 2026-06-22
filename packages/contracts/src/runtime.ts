@@ -16,6 +16,8 @@ export interface MutationDiagnostics {
   sendingCount: number;
   ackedCount: number;
   failedCount: number;
+  /** Mutations the server permanently rejected (terminal); surfaced, never retried (ADR-0006). */
+  quarantinedCount: number;
   lastFlushAtUs?: string;
   lastAckAtUs?: string;
 }

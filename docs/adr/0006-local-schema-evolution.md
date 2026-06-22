@@ -106,13 +106,22 @@ drain-then-drop while online. Optimistic *attempt* yes; *silent* loss no.
   `tests/unit/registry-diff.test.ts`. The expand/contract discipline and the
   commit-the-lock enforcement model are documented in
   [docs/registry-evolution.md](../registry-evolution.md).
-- **Decisions 1–4 (drain-then-drop boot, fingerprint-keyed store, journal
-  `registry_version` stamp, transient/permanent quarantine split, `dropReadCache`)
-  — deferred.** These are the runtime cluster: they touch the local-DB boot and the
-  flush path, and the drain half must be verified against real sync (the Podman
-  integration lane), not unit fakes. They land together with ADR-0005's deferred
-  convergence driver and `destroy()` teardown (which reuses `dropReadCache`). The
-  ADR-0004 fingerprint they build on is already in place.
+- **Decision 4 (journal `registry_version` stamp + transient/permanent split) — done.**
+  `client/src/schema.ts` adds the `registry_version` journal column; the mutation runtime
+  stamps it at enqueue from the ADR-0004 fingerprint (`createSyncClient` passes
+  `fingerprintRegistry(registry)`). `mutation-state.ts` defines the `quarantined` terminal
+  state and `classifyFailureStatus`: a structural `4xx` → `quarantined` (surfaced via the
+  `onQuarantine` callback + `diagnostics().mutation.quarantinedCount`, never retried);
+  network/`5xx`/transient-`4xx` → retryable `failed`. The ADR-0005 hard attempt cap
+  (`maxMutationAttempts`, default 10) escalates an exhausted `failed` to `quarantined`, and
+  a quarantined mutation holds later same-entity mutations behind it. Pinned by
+  `tests/unit/mutation-quarantine.test.ts` + `tests/unit/mutation-state.test.ts`.
+- **Decisions 1–3 (fingerprint-keyed store, drain-then-drop boot, `dropReadCache`)
+  — deferred to the integration-verified runtime cluster.** They touch the local-DB boot
+  and the drain half must be verified against real sync (the Podman integration lane),
+  not unit fakes; they land with ADR-0005's `destroy()` teardown (which reuses
+  `dropReadCache`). The ADR-0004 fingerprint and the journal stamp they build on are in
+  place.
 - **Decision 9 (lossless offline upgrade) — deferred** as designed.
 
 References: [ADR-0004](0004-one-registry-interpreter.md) (fingerprint);

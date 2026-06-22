@@ -76,12 +76,13 @@ split.
   guards the manual `retryFailed`/`recoverSending` transitions. Pinned by
   `tests/unit/mutation-state.test.ts`. ADR-0006 extends this with the
   transient/permanent split.
-- **Decision 1 (congestion policy) — partially done.** Backoff now applies equal
-  jitter around the existing capped-exponential ceiling
-  (`computeRetryDelayMs`, injectable RNG), so a fleet does not retry in lockstep
-  after an outage. Flushes are already serialised through the runtime's `flushQueue`
-  (effective concurrency cap of 1). A hard max-attempts cap is folded into ADR-0006's
-  quarantine state (a terminal "give up" needs that state).
+- **Decision 1 (congestion policy) — done.** Backoff applies equal jitter around the
+  capped-exponential ceiling (`computeRetryDelayMs`, injectable RNG), so a fleet does
+  not retry in lockstep after an outage. Flushes are serialised through the runtime's
+  `flushQueue` (effective concurrency cap of 1). The hard max-attempts cap
+  (`maxMutationAttempts`, default `DEFAULT_MAX_MUTATION_ATTEMPTS` = 10) escalates an
+  exhausted `failed` mutation to the terminal `quarantined` state (ADR-0006), so a
+  permanently-unreachable server never produces an unbounded retry loop.
 - **Decision 3 (opt-in convergence driver) — deferred.** The driver's retry cadence
   interacts with the runtime's per-mutation `next_retry_at_us` backoff in ways that
   must be verified against real sync (the Podman integration lane), not just unit

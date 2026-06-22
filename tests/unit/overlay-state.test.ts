@@ -979,6 +979,7 @@ describe("overlay state helpers", () => {
         mutation_seq INTEGER NOT NULL,
         mutation_kind VARCHAR(24) NOT NULL,
         status VARCHAR(24) NOT NULL,
+        registry_version TEXT,
         payload_json TEXT NOT NULL,
         attempt_count INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
@@ -1419,9 +1420,11 @@ describe("overlay state helpers", () => {
       const mutations = await runtime.readMutationDetails("authors");
       const mutationById = new Map(mutations.map((mutation) => [mutation.entityKey["id"], mutation]));
 
-      // After flush + reconcile, acked entry is cleared. Failed entry remains.
+      // After flush + reconcile, the acked entry is cleared. The 409 conflict is a
+      // structural rejection the server will never accept, so it is quarantined (terminal,
+      // ADR-0006) rather than retry-looped — but its conflict metadata is retained.
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f970")).toBeUndefined();
-      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.status).toBe("failed");
+      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.status).toBe("quarantined");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.conflictReason).toBe("duplicate name");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.lastHttpStatus).toBe(409);
     } finally {

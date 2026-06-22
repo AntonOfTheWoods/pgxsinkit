@@ -91,6 +91,9 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
         `mutation_seq INTEGER NOT NULL UNIQUE DEFAULT nextval(${quoteSqlStringLiteral(qualifiedJournalSequenceName)})::integer`,
         "mutation_kind VARCHAR(24) NOT NULL",
         "status VARCHAR(24) NOT NULL",
+        // The registry fingerprint (ADR-0004) this mutation was authored under, so a
+        // version-boundary crossing is known before sending (ADR-0006 decision 4).
+        "registry_version TEXT",
         "payload_json TEXT NOT NULL",
         "attempt_count INTEGER NOT NULL DEFAULT 0",
         "last_error TEXT",

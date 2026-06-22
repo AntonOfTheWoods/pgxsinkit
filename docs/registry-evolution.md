@@ -13,9 +13,27 @@ decision are in [adr/0006](adr/0006-local-schema-evolution.md).
 
 Drop + resync is right for the **read cache** and wrong for the **journal/overlay**.
 The default upgrade path is therefore _drain-then-drop_: flush + confirm acks, then
-rebuild the read cache only. (The runtime that performs this — the fingerprint-keyed
-store, drain-then-drop boot, and the `quarantined` failure state — lands with the
-convergence driver on the integration lane; see ADR-0005 / ADR-0006 status.)
+rebuild the read cache only.
+
+## What the runtime does at send time
+
+The runtime never silently drops an owed write. Every mutation is stamped at enqueue
+with the registry fingerprint it was authored under (`registry_version`), and a flush
+failure resolves into one of two durable states:
+
+- **`failed` (transient, retryable):** a network/transport error, any `5xx`, or a
+  transient `4xx` (auth `401`/`403`, timeout `408`, too-early `425`, rate-limit `429`).
+  The mutation keeps its place and retries under a jittered, bounded backoff.
+- **`quarantined` (permanent, terminal):** a structural `4xx` (`400`/`404`/`409`/`422`/…)
+  the server will never accept as-is, **or** a mutation that has exhausted the hard
+  attempt cap (`maxMutationAttempts`, default 10). It is **surfaced** — via the
+  `onQuarantine` callback and `diagnostics().mutation.quarantinedCount` — and **never
+  retried**. A later mutation for the same entity is held behind it (author-order
+  integrity) until the quarantine is resolved.
+
+This is the one loss case the runtime _can_ catch at send time. The silent case it
+**cannot** catch — a same-named column whose meaning quietly changed — is caught instead
+at authoring time by the registry-diff gate below.
 
 ## Use expand/contract (parallel change)
 

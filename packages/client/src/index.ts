@@ -41,6 +41,16 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   onStatusChange?: (status: SyncRuntimeStatus) => void;
   onTableInitialSync?: (tableKey: string) => void;
   pgliteInstance?: ClientPGlite;
+  /**
+   * Hard cap on send attempts before a still-failing mutation is quarantined
+   * (ADR-0005 congestion policy). Defaults to the library's built-in cap.
+   */
+  maxMutationAttempts?: number;
+  /**
+   * Invoked when mutations are quarantined (permanently rejected by the server, terminal).
+   * The library surfaces them here rather than silently dropping or retry-looping (ADR-0006).
+   */
+  onQuarantine?: (quarantined: MutationDetail[]) => void | Promise<void>;
 }
 
 export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey extends SyncTableName<TRegistry>> {
@@ -159,6 +169,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     registry: options.registry,
     writeUrl: options.writeUrl,
     ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
+    ...(options.maxMutationAttempts != null ? { maxMutationAttempts: options.maxMutationAttempts } : {}),
+    ...(options.onQuarantine ? { onQuarantine: options.onQuarantine } : {}),
   });
 
   await mutationRuntime.recoverSending();
