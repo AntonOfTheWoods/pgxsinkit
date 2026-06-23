@@ -12,10 +12,13 @@ while read -r _local_ref local_sha _remote_ref _remote_sha; do
   fi
 done
 
-if ((have_update == 0)); then
+if [ "${have_update}" -eq 0 ]; then
   echo "Nothing to validate (delete-only push)."
   exit 0
 fi
 
+# Run with stdin detached from the push ref-list pipe git handed this hook: the
+# validation chain (bun/test tooling) must never read or block on git's stdin,
+# which could otherwise stall or fail the push after a clean validation run.
 echo "→ Running full validation before push: bun run validate:full"
-bun run validate:full
+bun run validate:full </dev/null
