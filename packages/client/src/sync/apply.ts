@@ -3,6 +3,7 @@ import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 
 import { quoteIdentifier, type SyncColumnType } from "@pgxsinkit/contracts";
 
+import { generateCopyData } from "./copy";
 import type { MapColumns, InsertChangeMessage } from "./types";
 
 /** Schema-qualified, quoted table reference via the ADR-0004 shared identifier resolver. */
@@ -306,12 +307,52 @@ export async function applyMessagesToTableWithJson({
   }
 }
 
+/**
+ * Maps each column to its Postgres `udt_name` for the COPY serializer, which needs it only to
+ * disambiguate `json`/`jsonb` (whose parsed values are indistinguishable from SQL arrays/objects by
+ * runtime type alone). Prefers the registry-supplied {@link SyncColumnType}s (ADR-0009 decision 3 —
+ * no DB round-trip); falls back to an `information_schema` probe for the registry-less generic caller.
+ */
+async function resolveCopyColumnUdts(
+  pg: PGliteInterface | Transaction,
+  table: string,
+  schema: string,
+  columnTypes: SyncColumnType[] | undefined,
+): Promise<Record<string, string>> {
+  if (columnTypes) {
+    const map: Record<string, string> = {};
+    for (const column of columnTypes) {
+      const base = column.sqlType
+        .replace(/\(.*\)/g, "")
+        .trim()
+        .toLowerCase();
+      if (base === "json" || base === "jsonb") {
+        map[column.name] = column.isArray ? `_${base}` : base;
+      }
+    }
+    return map;
+  }
+
+  const rows = (
+    await pg.query<{ column_name: string; udt_name: string }>(
+      `
+        SELECT column_name, udt_name
+        FROM information_schema.columns
+        WHERE table_name = $1 AND table_schema = $2
+      `,
+      [table, schema],
+    )
+  ).rows;
+  return Object.fromEntries(rows.map((column) => [column.column_name, column.udt_name]));
+}
+
 export async function applyMessagesToTableWithCopy({
   pg,
   table,
   schema = "public",
   messages,
   mapColumns,
+  columnTypes,
   debug,
 }: BulkApplyMessagesToTableOptions) {
   if (debug) console.log("applying messages with COPY");
@@ -325,41 +366,25 @@ export async function applyMessagesToTableWithCopy({
   }
   const columns = Object.keys(firstRow);
 
-  const csvData = data
-    .map((message) => {
-      return columns
-        .map((column) => {
-          const value = message[column];
-          if (value === null) {
-            return "\\N";
-          }
-          // jsonb values arrive as parsed objects; COPY expects their json text.
-          const text =
-            typeof value === "string"
-              ? value
-              : typeof value === "number" || typeof value === "boolean" || typeof value === "bigint"
-                ? value.toString()
-                : (JSON.stringify(value) ?? "\\N");
-          if (text.includes(",") || text.includes('"') || text.includes("\n")) {
-            return `"${text.replace(/"/g, '""')}"`;
-          }
-          return text;
-        })
-        .join(",");
-    })
-    .join("\n");
+  // Serialize rows using Postgres' own COPY TEXT format — a faithful port of the backend's
+  // CopyAttributeOutText / array_out routines (see ./copy) — so arrays (incl. multi-dimensional),
+  // json/jsonb, bytea, timestamps and strings with embedded delimiters/newlines all round-trip,
+  // unlike the previous hand-rolled CSV encoder.
+  const columnUdts = await resolveCopyColumnUdts(pg, table, schema, columnTypes);
+  const copyData = generateCopyData(data, columns, columnUdts);
+  const copyBlob = new Blob([copyData], { type: "text/plain" });
 
-  const csvBlob = new Blob([csvData], { type: "text/csv" });
-
+  // TEXT is the default COPY format; its default delimiter is a tab and NULL marker is `\N`, both of
+  // which generateCopyData emits.
   await pg.query(
     `
       COPY ${qualifiedTable(schema, table)} (${columns.map((column) => quoteIdentifier(column)).join(", ")})
       FROM '/dev/blob'
-      WITH (FORMAT csv, NULL '\\N')
+      WITH (FORMAT text)
     `,
     [],
     {
-      blob: csvBlob,
+      blob: copyBlob,
     },
   );
 

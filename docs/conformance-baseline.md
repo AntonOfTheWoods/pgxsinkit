@@ -48,7 +48,13 @@ transforms, swap the top import block for the shim, and update the pinned SHA he
   oracle exercises. New proofs: `tests/unit/apply-strategy.test.ts` (classifier tiers, fast) and
   `tests/unit/apply-ladder.test.ts` (each tier on the pinned PGlite, incl. jsonb + bigint[] via the
   `columnTypes` json path). The two oracle COPY tests and the camelCase json test stay green on the
-  fallback path, unchanged.
+  fallback path, unchanged. The COPY path itself now serializes via a faithful port of Postgres' own
+  COPY **TEXT** format (`CopyAttributeOutText` + `array_out`, in `sync/copy.ts`, ported from upstream
+  `electric-sql/pglite` PR #1035), replacing the hand-rolled CSV encoder that mangled arrays,
+  json/jsonb, bytea and embedded delimiters — proven by `tests/unit/copy.test.ts` (serializer units +
+  real-PGlite `COPY FROM` round-trips for scalars/arrays/multi-dim/json/jsonb/`jsonb[]`/timestamps/
+  bytea). json/jsonb disambiguation comes from the registry `columnTypes` (information_schema only as
+  the generic-caller fallback), like the json path.
 - **`electric.syncing` flag set during sync** → decision 6 (keep the sync-origin GUC, renamed).
 - **Subscription persist/resume, clears+restarts on refetch, must-refetch** → decision 4/5
   (serialized commit queue + failure surfacing; Electric `must-refetch` stays its own path).
