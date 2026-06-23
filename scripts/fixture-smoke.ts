@@ -84,6 +84,10 @@ const registry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
   }),
 });
 

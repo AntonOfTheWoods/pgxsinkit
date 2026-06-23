@@ -27,6 +27,9 @@ const projectsSyncEntry = defineSyncTable({
   tableName: "projects",
   makeColumns: makeProjectsColumns,
   mode: "readwrite",
+  // ADR-0015: reject-if-stale — the focused conflict-detection proof table (no RLS, single Server
+  // version column), so an interleaving external write surfaces a conflict instead of clobbering.
+  conflictPolicy: "reject-if-stale",
   governance: {
     // ADR-0010: updated_at_us is the Server version — server-stamped, strictly monotonic.
     managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
@@ -63,6 +66,7 @@ const fkParentsSyncEntry = defineSyncTable({
     updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
   mode: "readwrite",
+  conflictPolicy: "last-write-wins",
   governance: {
     managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
   },
@@ -81,6 +85,7 @@ const fkChildrenSyncEntry = defineSyncTable({
     updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
   mode: "readwrite",
+  conflictPolicy: "last-write-wins",
   governance: {
     managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
     deferrableConstraints: [
@@ -114,6 +119,7 @@ const rlsTodosSyncEntry = defineSyncTable({
     ownerSqlColumn: "owner_id",
   }),
   mode: "readwrite",
+  conflictPolicy: "last-write-wins",
   governance: {
     managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
   },
@@ -206,6 +212,7 @@ const workItemsSyncEntry = defineSyncTable({
     },
   }),
   mode: "readwrite",
+  conflictPolicy: "last-write-wins",
   governance: {
     managedFields: [
       { column: "ownerId", applyOn: ["create"], strategy: "authUid" },

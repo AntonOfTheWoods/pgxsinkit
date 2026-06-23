@@ -109,6 +109,7 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
       policies: buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
       ...(syntheticSchema ? { schema: syntheticSchema } : {}),
       mode: "readwrite",
+      conflictPolicy: "last-write-wins",
       governance: {
         managedFields: [
           { column: "ownerId", applyOn: ["create"], strategy: "authUid" },

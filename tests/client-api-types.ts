@@ -19,6 +19,7 @@ const projectedRegistry = defineSyncRegistry({
       notes: varchar("notes", { length: 255 }),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     clientProjection: {
       omitColumns: ["ownerId"],
     },
@@ -38,6 +39,7 @@ const locallyManagedRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     governance: {
       managedFields: [
         { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },

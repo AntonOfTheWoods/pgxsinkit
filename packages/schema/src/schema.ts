@@ -26,6 +26,8 @@ const authorsSyncEntry = defineSyncTable({
     role: authenticatedRole,
   }),
   mode: "readwrite",
+  // ADR-0015: keep the demo author table's historical implicit behaviour, now a named choice.
+  conflictPolicy: "last-write-wins",
   governance: {
     managedFields: [
       { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
@@ -59,6 +61,8 @@ const todosSyncEntry = defineSyncTable({
     role: authenticatedRole,
   }),
   mode: "readwrite",
+  // ADR-0015: exercise the safety policy in the demo — a stale todo edit is surfaced, not clobbered.
+  conflictPolicy: "reject-if-stale",
   governance: {
     deferrableConstraints: [
       {

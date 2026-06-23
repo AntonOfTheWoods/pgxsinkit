@@ -71,6 +71,7 @@ describe("sync config contracts", () => {
         tableName: "projected_contracts_items",
         makeColumns: makeProjectedContractsColumns,
         mode: "readwrite",
+        conflictPolicy: "last-write-wins",
         clientProjection: { omitColumns: ["id"] },
         governance: {
           managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
@@ -92,6 +93,7 @@ describe("sync config contracts", () => {
           updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
         }),
         mode: "readwrite",
+        conflictPolicy: "last-write-wins",
         primaryKey: ["tenant_id", "id"],
         clientProjection: { omitColumns: ["tenantId"] },
         governance: {
@@ -107,6 +109,7 @@ describe("sync config contracts", () => {
         tableName: "projected_contracts_items",
         makeColumns: makeProjectedContractsColumns,
         mode: "readwrite",
+        conflictPolicy: "last-write-wins",
         clientProjection: { omitColumns: ["title"] },
         governance: {
           managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
@@ -120,6 +123,7 @@ describe("sync config contracts", () => {
       tableName: "projected_contracts_items",
       makeColumns: makeProjectedContractsColumns,
       mode: "readwrite",
+      conflictPolicy: "last-write-wins",
       clientProjection: { omitColumns: ["ownerId", "modifiedBy"] },
       governance: {
         managedFields: [
@@ -156,6 +160,46 @@ describe("sync config contracts", () => {
         makeColumns: makeVersionlessColumns,
         mode: "readonly",
       }),
+    ).not.toThrow();
+  });
+
+  it("requires a Conflict policy on writable tables, accepting both v1 values (ADR-0015)", () => {
+    const makeConflictColumns = () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    });
+
+    // No silent default: an undeclared policy on a writable table is rejected (the third hard-require).
+    expect(() =>
+      defineSyncTable({
+        tableName: "no_conflict_policy_items",
+        makeColumns: makeConflictColumns,
+        mode: "readwrite",
+        governance: {
+          managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+        },
+      }),
+    ).toThrow(/must declare a Conflict policy/);
+
+    // Both v1 values are accepted.
+    for (const conflictPolicy of ["last-write-wins", "reject-if-stale"] as const) {
+      expect(() =>
+        defineSyncTable({
+          tableName: "conflict_policy_items",
+          makeColumns: makeConflictColumns,
+          mode: "readwrite",
+          conflictPolicy,
+          governance: {
+            managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+          },
+        }),
+      ).not.toThrow();
+    }
+
+    // A readonly table needs no policy (it has no write path).
+    expect(() =>
+      defineSyncTable({ tableName: "conflict_policy_readonly", makeColumns: makeConflictColumns, mode: "readonly" }),
     ).not.toThrow();
   });
 

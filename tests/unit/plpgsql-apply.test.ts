@@ -20,6 +20,7 @@ const projectedPlpgsqlRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     clientProjection: {
       omitColumns: ["ownerId", "internalNote"],
     },
@@ -89,6 +90,7 @@ const compositeThingsRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     primaryKey: ["tenant_id", "id"],
     governance: {
       managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
@@ -107,6 +109,7 @@ const renamedPkRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     primaryKey: ["group_id"],
     governance: {
       managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
@@ -255,6 +258,7 @@ const groupTodosRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     primaryKey: ["id"],
     governance: {
       managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],

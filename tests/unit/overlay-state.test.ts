@@ -30,6 +30,7 @@ const routeOptionalBatchRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     governance: {
       managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
     },
@@ -53,6 +54,7 @@ const defaultedColumnRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     governance: {
       managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
     },
@@ -70,6 +72,7 @@ const renamedPkRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    conflictPolicy: "last-write-wins",
     primaryKey: ["group_id"],
     governance: {
       managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],

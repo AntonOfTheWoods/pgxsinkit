@@ -6,6 +6,31 @@ import { escapeSqlLiteral } from "./sql-identifier";
 export type TableMode = "readonly" | "writeonly" | "readwrite";
 
 /**
+ * The per-writable-table Conflict policy (ADR-0015): what happens to a **stale** write — one whose
+ * Base server version is behind the row's current Server version at apply (an external write
+ * interleaved). It is a **required** declaration on every writable table; there is no silent default
+ * (registry validation rejects an undeclared writable table — the third hard-require). v1:
+ *
+ * - `last-write-wins` — apply the stale write anyway. This is today's implicit behaviour, but now a
+ *   conscious, named choice rather than silent clobbering.
+ * - `reject-if-stale` — do not apply; surface the conflict so the user's edit is kept (the optimistic
+ *   Overlay stays, marked conflicted) and resolved as a new write.
+ *
+ * `field-merge` (apply only the changed fields over the current row) and `custom-resolver` (a client
+ * re-resolution protocol) are reserved; the union is additive so they slot in without a breaking
+ * change.
+ */
+export type ConflictPolicy = "last-write-wins" | "reject-if-stale";
+
+/** The Conflict policy values accepted in v1 (ADR-0015). Source of truth for registry validation. */
+export const CONFLICT_POLICIES = ["last-write-wins", "reject-if-stale"] as const satisfies readonly ConflictPolicy[];
+
+/** Type guard: is `value` one of the v1 {@link ConflictPolicy} values? */
+export function isConflictPolicy(value: unknown): value is ConflictPolicy {
+  return typeof value === "string" && (CONFLICT_POLICIES as readonly string[]).includes(value);
+}
+
+/**
  * Minimal verified-JWT claim shape the sync layer understands. Providers may
  * attach arbitrary extra claims; those stay reachable through index access and
  * ownership claim paths (e.g. "app_metadata.person_id"). Parse decoded JWT

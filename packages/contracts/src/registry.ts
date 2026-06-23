@@ -22,18 +22,21 @@ import type { ExtractTablesWithRelations } from "drizzle-orm/relations";
 import { getColumns } from "drizzle-orm/utils";
 
 import { type ApplyStrategy, classifyApplyStrategy, type SyncColumnType } from "./apply-strategy";
-import type {
-  ClientProjectionSpec,
-  DeferrableConstraintSpec,
-  ManagedFieldApplyOn,
-  ManagedFieldSpec,
-  ManagedFieldStrategy,
-  PrimaryKeySpec,
-  ServerProjectionSpec,
-  ShapeSpec,
-  ShapeSpecInput,
-  TableGovernanceSpec as TableGovernanceSpecBase,
-  TableMode,
+import {
+  CONFLICT_POLICIES,
+  isConflictPolicy,
+  type ClientProjectionSpec,
+  type ConflictPolicy,
+  type DeferrableConstraintSpec,
+  type ManagedFieldApplyOn,
+  type ManagedFieldSpec,
+  type ManagedFieldStrategy,
+  type PrimaryKeySpec,
+  type ServerProjectionSpec,
+  type ShapeSpec,
+  type ShapeSpecInput,
+  type TableGovernanceSpec as TableGovernanceSpecBase,
+  type TableMode,
 } from "./config";
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
@@ -105,6 +108,12 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
   clientProjection?: ClientProjectionSpecForTable<TTable>;
   serverProjection?: ServerProjectionSpec;
   governance?: TableGovernanceSpecForTable<TTable>;
+  /**
+   * Conflict policy (ADR-0015): what happens to a stale write on this table. **Required for writable
+   * tables** (registry validation rejects an undeclared one — the third hard-require); ignored for
+   * `readonly` tables (they have no write path). See {@link ConflictPolicy}.
+   */
+  conflictPolicy?: ConflictPolicy;
   /**
    * Consistency group (ADR-0009 decision 2). Tables sharing a `consistencyGroup` are synced on one
    * `MultiShapeStream` and committed atomically at a shared LSN frontier, so a local reader never
@@ -207,6 +216,12 @@ export type SyncTableInput<
   /** Server-side response-path projection (e.g. `rowTransform`). Server authority, not client shape. */
   serverProjection?: ServerProjectionSpec;
   governance?: SyncTableInputGovernance<TColumns>;
+  /**
+   * Conflict policy (ADR-0015): what happens to a stale write on this table. **Required for writable
+   * tables** — `defineSyncTable`/`defineSyncRegistry` reject a writable table without one. See
+   * {@link ConflictPolicy}.
+   */
+  conflictPolicy?: ConflictPolicy;
   /**
    * Bind this table into a consistency group (ADR-0009 decision 2): grouped tables sync on one
    * `MultiShapeStream` and commit atomically. Omit for the default singleton group. See
@@ -597,6 +612,19 @@ function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
     throw new Error(
       `writable table ${tableName} must declare a Server version: a managed field with strategy ` +
         `"nowMicroseconds" and applyOn including "update" (conventionally updated_at_us) — ADR-0010`,
+    );
+  }
+
+  // ADR-0015: every writable table must declare a Conflict policy — what happens to a stale write.
+  // There is no silent default: silent last-write-wins is exactly the data loss the policy exists to
+  // turn into a conscious per-table decision. This is the third hard-require (after the Server version
+  // above and the server-PK-in-projection rule below), accepted as consistent with the footgun-averse
+  // stance.
+  if (entry.mode !== "readonly" && !isConflictPolicy(entry.conflictPolicy)) {
+    throw new Error(
+      `writable table ${tableName} must declare a Conflict policy (ADR-0015): conflictPolicy must be ` +
+        `one of ${CONFLICT_POLICIES.join(", ")}` +
+        (entry.conflictPolicy === undefined ? " (none was declared)" : ` (got ${String(entry.conflictPolicy)})`),
     );
   }
 
