@@ -24,13 +24,24 @@ source row per target PK** — and the two paths reach that guarantee differentl
    the Shape inbox (ADR-0011 / ISS-06) replays each PK's operations in LSN order down to **one net
    operation**:
    - trailing `delete` ⇒ **DELETE**;
-   - any `insert` with no trailing delete ⇒ **INSERT** with merged final values;
+   - `insert` with no delete in the run ⇒ **INSERT** with merged final values (a *plain* insert —
+     a genuine PK collision still surfaces);
    - only `update`s ⇒ **UPDATE** with merged values;
-   - `[delete, insert]` ⇒ **INSERT** (re-created); `[delete, update]` is malformed and rejected.
+   - re-created (`[delete, … , insert, …]`, no trailing delete) ⇒ **DELETE then INSERT**: the delete
+     clears the **pre-existing** row so the insert cannot collide with it. (Folding this to a *plain*
+     INSERT — the obvious reading — is wrong: under faithful replication the local row mirrors the
+     server, so a `[delete, insert]` means the row *did* exist and is being replaced; dropping the
+     delete leaves the old row in place and the INSERT collides. This was corrected from the literal
+     decision during the Phase 2 build, where the property test runs against non-empty initial state.)
+   - `[delete, update]` (update after a delete) is malformed for a faithful stream — an update asserts
+     the row exists — and is rejected.
 
-   The applier then runs exactly three bulk statements per shape — `INSERT`, `UPDATE … FROM (VALUES …)`,
-   `DELETE … USING (VALUES …)` — and because each PK folds into exactly **one** of them, no PK is touched
-   by two statements, so their order within the (atomic) commit is irrelevant. The fold lives in the
+   The applier then runs exactly three bulk statements per shape, **in the order `DELETE … USING
+   (VALUES …)` → `INSERT` → `UPDATE … FROM (VALUES …)`**. Every PK folds into exactly **one** net op
+   except a re-created PK, the *only* PK in two statements (its delete and its insert) — and running
+   DELETE before INSERT is exactly what makes that safe (faithful to the per-row `DELETE`-then-`INSERT`).
+   Every other PK is touched by one statement, so the rest of the order is irrelevant within the
+   (atomic) commit. The fold lives in the
    *pure* Shape inbox, so it is property-tested against random same-PK sequences with the oracle
    *fold-then-bulk ≡ ordered per-row apply*. Folding preserves the faithful-apply rule (a net `INSERT` is
    a plain `INSERT`, so a genuine PK collision still surfaces rather than silently upserting — commit
