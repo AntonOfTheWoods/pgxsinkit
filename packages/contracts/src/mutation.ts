@@ -17,6 +17,15 @@ export const mutationEnvelopeSchema = z
     kind: mutationKindSchema,
     payload: z.unknown(),
     clientTimestampUs: unixMicrosecondsSchema,
+    /**
+     * The Base server version this write was authored against (ADR-0015): the row's Server version
+     * at enqueue for a chain head, or its predecessor's resolved version for a chained write. The
+     * applier compares the row's *current* Server version to it — `current > base` ⇒ a stale write
+     * (an external write interleaved). Absent on a `create` (its conflict is a PK collision, a
+     * separate concern) and on any write whose table predates the policy; absence means no stale
+     * check runs.
+     */
+    baseServerVersion: unixMicrosecondsSchema.optional(),
   })
   .strict();
 

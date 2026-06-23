@@ -50,6 +50,7 @@ import {
   getSyncRegistrySchema,
   maybeQuoteIdentifier,
   quoteIdentifier,
+  resolveServerVersionColumnName,
 } from "@pgxsinkit/contracts";
 
 import {
@@ -143,6 +144,14 @@ interface TableContext {
   journalSequence: string;
   pkColumnNames: string[];
   pkPropertyKeys: string[];
+  /**
+   * The Server version (ADR-0010) column name (e.g. `updated_at_us`) and its drizzle property key,
+   * resolved from the table's managed fields. Used to capture the Base server version (ADR-0015) at
+   * enqueue — the value the user's edit was authored against. `null` would mean no Server version,
+   * which registry validation already forbids for a writable table.
+   */
+  serverVersionColumnName: string | null;
+  serverVersionPropertyKey: string | null;
   recordIncludesOverlayState: boolean;
   columns: Array<{
     propertyKey: string;
@@ -365,6 +374,9 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
                 value: item.input,
               }),
               nowUs: item.nowUs,
+              // A create has no Base server version (ADR-0015): its conflict is a PK collision, a
+              // separate concern from the stale-write check.
+              baseServerVersion: null,
             });
 
             entityState.record = item.optimisticRecord;
@@ -390,6 +402,9 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               throw new Error(`${context.key} is already queued for deletion`);
             }
 
+            // ADR-0015: capture the Base server version BEFORE the record is replaced by the
+            // optimistic value below (which overwrites the Server version with the client clock).
+            const updateBaseServerVersion = captureChainHeadBase(context, entityState);
             const overlayKind = entityState.overlayKind === "pending_create" ? "pending_create" : "pending_update";
             const optimisticRecord = ensureRecord(
               buildOptimisticRecord(
@@ -415,6 +430,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
                 patch: item.patch,
               }),
               nowUs: item.nowUs,
+              baseServerVersion: updateBaseServerVersion,
             });
 
             entityState.record = optimisticRecord;
@@ -440,6 +456,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               throw new Error(`${context.key} is already queued for deletion`);
             }
 
+            const deleteBaseServerVersion = captureChainHeadBase(context, entityState);
             plannedMutations.push({
               mutationId: item.mutationId,
               entityKey: item.entityKey,
@@ -450,6 +467,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
                 entityKey: item.entityKey,
               }),
               nowUs: item.nowUs,
+              baseServerVersion: deleteBaseServerVersion,
             });
 
             entityState.overlayKind = "pending_delete";
@@ -784,6 +802,13 @@ interface PlannedMutationInsert {
   mutationKind: MutationKind;
   payloadJson: string;
   nowUs: string;
+  /**
+   * The Base server version (ADR-0015) stamped at enqueue: the synced Server version the user saw,
+   * for a **chain head** (the first staged write on the entity). `null` for a `create` (no base) and
+   * for a **chained** write — the latter resolves its base at flush from its acked predecessor
+   * (readPendingBatchRows), by Per-entity flush serialization (ADR-0014).
+   */
+  baseServerVersion: string | null;
 }
 
 interface PlannedOverlayUpsert {
@@ -836,6 +861,33 @@ type NormalizedBatchItem =
       order: number;
     };
 
+/**
+ * The Base server version (ADR-0015) to stamp at enqueue for an update/delete. Only a **chain head**
+ * — the first staged write on the entity (no earlier unresolved mutation) — captures an enqueue-time
+ * base: the synced Server version the user's edit was authored against, so a genuine external write
+ * between view and apply is caught. A **chained** write (an earlier same-entity mutation is still
+ * owed) returns `null` here; it resolves its base at flush from its acked predecessor, so an entity's
+ * own successive edits never self-conflict (decision 2).
+ */
+function captureChainHeadBase(context: TableContext, entityState: BatchEntityState): string | null {
+  if ((entityState.latestMutationSeq ?? 0) !== 0) {
+    return null;
+  }
+
+  if (!context.serverVersionPropertyKey || !entityState.record) {
+    return null;
+  }
+
+  // The Server version is a bigint count of microseconds, surfaced as a string/number/bigint
+  // depending on the read path. Anything else (null/object) means no observable base.
+  const raw = entityState.record[context.serverVersionPropertyKey];
+  if (typeof raw === "string" || typeof raw === "number" || typeof raw === "bigint") {
+    return String(raw);
+  }
+
+  return null;
+}
+
 function buildTableContexts<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
   const localSchema = getSyncRegistrySchema(registry);
 
@@ -866,6 +918,11 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     return column.propertyKey;
   });
 
+  const serverVersionColumnName = resolveServerVersionColumnName(entry) ?? null;
+  const serverVersionPropertyKey = serverVersionColumnName
+    ? (columns.find((candidate) => candidate.column.name === serverVersionColumnName)?.propertyKey ?? null)
+    : null;
+
   return {
     key,
     entry,
@@ -884,6 +941,8 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     journalSequence: qualifyLocalIdentifier(localSchema, buildJournalSequenceName(entry.clientProjection.journalTable)),
     pkColumnNames: [...entry.primaryKey.columns],
     pkPropertyKeys,
+    serverVersionColumnName,
+    serverVersionPropertyKey,
     recordIncludesOverlayState: "overlayTable" in (entry.clientProjection ?? {}),
     columns,
   };
@@ -1141,6 +1200,7 @@ async function insertMutationsBulk(
     "mutation_kind",
     "status",
     "registry_version",
+    "base_server_version",
     "payload_json",
     "enqueued_at_us",
     "next_retry_at_us",
@@ -1156,6 +1216,7 @@ async function insertMutationsBulk(
       row.mutationKind,
       "pending",
       registryVersion,
+      row.baseServerVersion,
       row.payloadJson,
       row.nowUs,
       row.nowUs,
@@ -1172,10 +1233,11 @@ async function insertMutationsBulk(
       formatSqlValuePlaceholder(start + context.pkColumnNames.length + 3, "mutation_kind"),
       formatSqlValuePlaceholder(start + context.pkColumnNames.length + 4, "status"),
       formatSqlValuePlaceholder(start + context.pkColumnNames.length + 5, "registry_version"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 6, "payload_json"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 7, "enqueued_at_us"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 8, "next_retry_at_us"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 9, "updated_at_us"),
+      `$${start + context.pkColumnNames.length + 6}::bigint`,
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 7, "payload_json"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 8, "enqueued_at_us"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 9, "next_retry_at_us"),
+      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 10, "updated_at_us"),
     ];
 
     return `(${valuePlaceholders.join(", ")})`;
@@ -1316,6 +1378,8 @@ function buildBatchEntityJoinClause(context: TableContext, tableAlias: string, i
 interface PendingBatchRow extends MutationRow {
   tableKey: string;
   enqueuedAtUs: string;
+  /** The resolved Base server version (ADR-0015), or null when the table predates the policy. */
+  baseServerVersion: string | null;
 }
 
 interface PreparedBatchRow extends PendingBatchRow {
@@ -1343,10 +1407,36 @@ interface MutationStatusUpdate {
   replaceAckedAtUs?: boolean;
   serverUpdatedAtUs?: string | null;
   replaceServerUpdatedAtUs?: boolean;
+  baseServerVersion?: string | null;
+  replaceBaseServerVersion?: boolean;
   lastError?: string | null;
   nextRetryAtUs?: string | null;
   lastHttpStatus?: number | null;
   conflictReason?: string | null;
+}
+
+/**
+ * The resolved Base server version (ADR-0015) for a row at flush. A **chain head** already carries
+ * `base_server_version` (stamped at enqueue), so COALESCE returns it untouched — keeping the
+ * enqueue-time base means a genuine external write between view and apply is still caught. A
+ * **chained** write has NULL there; it resolves to its **acked predecessor's** Server version (by
+ * Per-entity flush serialization the predecessor is already acked when this row flushes), falling
+ * back to the entity's current synced version once that predecessor has been reconciled away. Either
+ * fallback yields the entity's own latest server state, so its own chain never self-conflicts.
+ */
+function buildResolvedBaseServerVersionSql(context: TableContext): string {
+  const journal = context.journalTable;
+  const predecessor = `(SELECT MAX(pred.server_updated_at_us) FROM ${journal} AS pred WHERE pred.entity_key_json = ${journal}.entity_key_json AND pred.mutation_seq < ${journal}.mutation_seq AND pred.status = 'acked')`;
+
+  const syncedFallback = context.serverVersionColumnName
+    ? `(SELECT synced.${quoteIdentifier(context.serverVersionColumnName)} FROM ${context.syncedTable} AS synced WHERE ${buildColumnEquality(context.pkColumnNames, "synced", journal)})`
+    : null;
+
+  const expression = syncedFallback
+    ? `COALESCE(${journal}.base_server_version, ${predecessor}, ${syncedFallback})`
+    : `COALESCE(${journal}.base_server_version, ${predecessor})`;
+
+  return `${expression}::text`;
 }
 
 async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], nowUs: string) {
@@ -1371,6 +1461,7 @@ async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], no
           conflict_reason AS "conflictReason",
           next_retry_at_us::text AS "nextRetryAtUs",
           server_updated_at_us::text AS "serverUpdatedAtUs",
+          ${buildResolvedBaseServerVersionSql(context)} AS "baseServerVersion",
           enqueued_at_us::text AS "enqueuedAtUs"
         FROM ${context.journalTable}
         WHERE status IN ('pending', 'failed')
@@ -1482,6 +1573,10 @@ async function flushBatch(
         updatedAtUs: sentAtUs,
         sentAtUs,
         replaceSentAtUs: true,
+        // Persist the resolved Base server version (ADR-0015) so a chained write's flush-resolved
+        // base is durable and matches exactly what the envelope carries to the server.
+        baseServerVersion: row.baseServerVersion,
+        replaceBaseServerVersion: true,
         lastError: null,
         nextRetryAtUs: null,
         lastHttpStatus: null,
@@ -1499,6 +1594,9 @@ async function flushBatch(
       kind: row.mutationKind as "create" | "update" | "delete",
       payload: row.envelopePayload,
       clientTimestampUs: sentAtUs,
+      // ADR-0015: carry the resolved Base server version so the applier can detect a stale write.
+      // Omitted for a create / a table that predates the policy (null) — then no stale check runs.
+      ...(row.baseServerVersion != null ? { baseServerVersion: row.baseServerVersion } : {}),
     };
   });
 
@@ -1904,6 +2002,8 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
     "replace_acked_at_us",
     "server_updated_at_us",
     "replace_server_updated_at_us",
+    "base_server_version",
+    "replace_base_server_version",
     "last_error",
     "next_retry_at_us",
     "last_http_status",
@@ -1924,6 +2024,8 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
       update.replaceAckedAtUs ?? false,
       update.serverUpdatedAtUs ?? null,
       update.replaceServerUpdatedAtUs ?? false,
+      update.baseServerVersion ?? null,
+      update.replaceBaseServerVersion ?? false,
       update.lastError ?? null,
       update.nextRetryAtUs ?? null,
       update.lastHttpStatus ?? null,
@@ -1939,6 +2041,7 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
           columnName === "sent_at_us" ||
           columnName === "acked_at_us" ||
           columnName === "server_updated_at_us" ||
+          columnName === "base_server_version" ||
           columnName === "next_retry_at_us"
         ) {
           return `$${position}::bigint`;
@@ -1951,7 +2054,8 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
         if (
           columnName === "replace_sent_at_us" ||
           columnName === "replace_acked_at_us" ||
-          columnName === "replace_server_updated_at_us"
+          columnName === "replace_server_updated_at_us" ||
+          columnName === "replace_base_server_version"
         ) {
           return `$${position}::boolean`;
         }
@@ -1980,6 +2084,10 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
           WHEN updates.replace_server_updated_at_us THEN updates.server_updated_at_us::bigint
           ELSE journal.server_updated_at_us
         END,
+        base_server_version = CASE
+          WHEN updates.replace_base_server_version THEN updates.base_server_version::bigint
+          ELSE journal.base_server_version
+        END,
         last_error = updates.last_error,
         next_retry_at_us = updates.next_retry_at_us::bigint,
         last_http_status = updates.last_http_status,
@@ -1997,6 +2105,8 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
         replace_acked_at_us,
         server_updated_at_us,
         replace_server_updated_at_us,
+        base_server_version,
+        replace_base_server_version,
         last_error,
         next_retry_at_us,
         last_http_status,
