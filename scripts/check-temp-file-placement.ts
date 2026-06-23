@@ -18,6 +18,7 @@ const allowedRootEntries = new Set([
   ".vscode",
   "AGENTS.md",
   "CLAUDE.md",
+  "CONTEXT-MAP.md",
   "CONTEXT.md",
   "NOTICE",
   "README.md",
