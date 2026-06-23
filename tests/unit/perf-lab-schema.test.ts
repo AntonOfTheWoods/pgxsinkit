@@ -76,7 +76,10 @@ describe("perf-lab scenario schemas", () => {
 
     expect(truncateSql).toBe(`TRUNCATE TABLE "${schemaName}"."perf_items_000", "${schemaName}"."perf_items_001";`);
     expect(functionDdl).toContain(`CREATE OR REPLACE FUNCTION "${schemaName}"."pgxsinkit_apply_mutations"(`);
-    expect(functionDdl).toContain(`INSERT INTO "${schemaName}"."perf_items_000" (%s) VALUES (%s)`);
+    // ADR-0014 Phase 4: set-based create over jsonb_to_recordset, not a per-mutation VALUES.
+    expect(functionDdl).toContain(
+      `INSERT INTO "${schemaName}"."perf_items_000" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)`,
+    );
   });
 
   it("maps built-in scenarios onto deterministic schema names", () => {

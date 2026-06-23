@@ -110,56 +110,89 @@ function buildTableBranch(entry: SyncTableEntry): string {
     })
     .join(", ");
 
-  // WHERE over the full pk tuple. v_entity_key (EXECUTE arg $2) is column-keyed (ADR-0012), so
-  // each pk column reads `$2->>'<columnName>'` with its own registry-derived cast. The pk names
-  // and types are static, so the predicate is inlined (its single quotes are doubled by the
-  // template's `.replace` below); only the per-column value extraction is runtime.
-  const updateWhereClause = primaryKeyColumns
-    .map((pk) => `${quoteIdent(pk.name)} = ($2->>'${toSqlLiteral(pk.name)}')::${pk.type}`)
+  // Set-based apply (ADR-0014 Phase 4): one statement per (table, kind, payload column-set) group,
+  // over the group's rows materialised by jsonb_to_recordset. The PK match spans the full tuple
+  // (ADR-0012): DELETE matches the recordset's typed PK columns directly; UPDATE matches each row's
+  // entity key carried as `x.k` jsonb. Safe from the same-PK `UPDATE … FROM` join hazard because the
+  // Per-entity flush serialization invariant leaves at most one mutation per entity in a batch.
+  const pkRecordDef = primaryKeyColumns.map((pk) => `${quoteIdent(pk.name)} ${pk.type}`).join(", ");
+  const pkDeleteJoin = primaryKeyColumns
+    .map((pk) => `t.${quoteIdent(pk.name)} = x.${quoteIdent(pk.name)}`)
     .join(" AND ");
-  const deleteWhereClause = primaryKeyColumns
-    .map((pk) => `${quoteIdent(pk.name)} = (v_entity_key->>'${toSqlLiteral(pk.name)}')::${pk.type}`)
+  const pkUpdateJoin = primaryKeyColumns
+    .map((pk) => `t.${quoteIdent(pk.name)} = (x.k->>'${toSqlLiteral(pk.name)}')::${pk.type}`)
     .join(" AND ");
 
-  const createSqlTemplate = `INSERT INTO ${qualifiedTableName} (%s) VALUES (%s)`.replace(/'/g, "''");
-  const updateSqlTemplate = `UPDATE ${qualifiedTableName} SET %s WHERE ${updateWhereClause}`.replace(/'/g, "''");
+  // Templates the runtime format() fills with the per-group column list. Single quotes are doubled
+  // because these are embedded as PL/pgSQL string literals.
+  const insertTemplate =
+    `INSERT INTO ${qualifiedTableName} (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)`.replace(/'/g, "''");
+  const updateTemplate =
+    `UPDATE ${qualifiedTableName} AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE ${pkUpdateJoin}`.replace(
+      /'/g,
+      "''",
+    );
+  const deleteSql =
+    `DELETE FROM ${qualifiedTableName} AS t USING jsonb_to_recordset($1) AS x(${pkRecordDef}) WHERE ${pkDeleteJoin}`.replace(
+      /'/g,
+      "''",
+    );
 
-  const createBranch = `
-        SELECT format(
-          '${createSqlTemplate}',
-          concat_ws(', ', nullif(string_agg(quote_ident(col_name), ', '), ''), ${toSqlTextOrNull(createManagedColumnsSql)}),
-          concat_ws(', ', nullif(string_agg(format('($1->>%L)::%s', col_name, col_type), ', '), ''), ${toSqlTextOrNull(createManagedValuesSql)})
-        )
-        INTO dml_sql
+  // The create/update column fragments come from the group signature (∩ writable columns) plus the
+  // static managed fields. An empty intersection ⇒ NULL fragment ⇒ a managed-only statement (the
+  // Server version still bumps on a PK-only update, exactly as the per-mutation path did).
+  const createColumnSelect = allColumnPairs.length
+    ? `SELECT
+          string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
+          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_cols, v_vals
         FROM (VALUES
             ${allColumnPairs}
         ) AS col_types(col_name, col_type)
-        WHERE v_payload ? col_name;
+        WHERE col_name = ANY(string_to_array(v_sig, ','));`
+    : `v_cols := NULL; v_vals := NULL;`;
 
-        IF dml_sql IS NOT NULL THEN
-          EXECUTE dml_sql USING v_payload;
-        END IF;
-      `.trim();
-
-  const updateBranch = `
-        SELECT format(
-          '${updateSqlTemplate}',
-          concat_ws(', ', nullif(string_agg(format('%I = ($1->>%L)::%s', col_name, col_name, col_type), ', '), ''), ${toSqlTextOrNull(updateManagedAssignmentsSql)})
-        )
-        INTO dml_sql
+  const updateSetSelect = nonPrimaryKeyColumnPairs.length
+    ? `SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_set
         FROM (VALUES
             ${nonPrimaryKeyColumnPairs}
         ) AS col_types(col_name, col_type)
-        WHERE v_payload ? col_name;
+        WHERE col_name = ANY(string_to_array(v_sig, ','));`
+    : `v_set := NULL;`;
 
-        IF dml_sql IS NOT NULL THEN
-          EXECUTE dml_sql USING v_payload, v_entity_key;
-        END IF;
+  const createBranch = `
+        ${createColumnSelect}
+
+        dml_sql := format(
+          '${insertTemplate}',
+          concat_ws(', ', nullif(v_cols, ''), ${toSqlTextOrNull(createManagedColumnsSql)}),
+          concat_ws(', ', nullif(v_vals, ''), ${toSqlTextOrNull(createManagedValuesSql)})
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+      `.trim();
+
+  const updateBranch = `
+        ${updateSetSelect}
+
+        dml_sql := format(
+          '${updateTemplate}',
+          concat_ws(', ', nullif(v_set, ''), ${toSqlTextOrNull(updateManagedAssignmentsSql)})
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb))), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
       `.trim();
 
   const deleteBranch = `
-      DELETE FROM ${qualifiedTableName}
-        WHERE ${deleteWhereClause};
+        EXECUTE '${deleteSql}' USING (
+          SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
       `.trim();
 
   return `
@@ -196,15 +229,14 @@ CREATE OR REPLACE FUNCTION ${functionName}(
   p_user_claims jsonb
 ) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
-  mutation jsonb;
   dml_sql text;
   v_table text;
   v_kind text;
-  v_payload jsonb;
-  v_entity_key jsonb;
-  v_mutation_id text;
-  v_mutation_seq integer;
-  v_client_timestamp_us bigint;
+  v_sig text;
+  v_rows jsonb;
+  v_cols text;
+  v_vals text;
+  v_set text;
   _claims jsonb;
   _target_role text;
   _previous_role text;
@@ -243,16 +275,34 @@ BEGIN
     RAISE EXCEPTION 'Batch payload mutations must be a JSON array';
   END IF;
 
-  FOR mutation IN SELECT value FROM jsonb_array_elements(p_batch->'mutations')
+  -- Group the batch by (table, kind, payload column-set) and apply each group with one statement
+  -- (ADR-0014 Phase 4). Groups run in ascending min(mutationSeq) so submission order is preserved
+  -- across tables (FK-safe; the batch transaction also runs SET CONSTRAINTS ALL DEFERRED).
+  FOR v_table, v_kind, v_sig, v_rows IN
+    SELECT
+      grouped.table_name,
+      grouped.kind,
+      grouped.sig,
+      jsonb_agg(grouped.mutation ORDER BY grouped.mutation_seq)
+    FROM (
+      SELECT
+        m->>'tableName' AS table_name,
+        m->>'kind' AS kind,
+        COALESCE((
+          SELECT string_agg(payload_key, ',' ORDER BY payload_key)
+          FROM jsonb_object_keys(COALESCE(m->'payload', '{}'::jsonb)) AS payload_key
+        ), '') AS sig,
+        m AS mutation,
+        (m->>'mutationSeq')::integer AS mutation_seq
+      FROM jsonb_array_elements(p_batch->'mutations') AS m
+    ) AS grouped
+    GROUP BY grouped.table_name, grouped.kind, grouped.sig
+    ORDER BY MIN(grouped.mutation_seq)
   LOOP
     dml_sql := NULL;
-    v_table := mutation->>'tableName';
-    v_kind := mutation->>'kind';
-    v_payload := COALESCE(mutation->'payload', '{}'::jsonb);
-    v_entity_key := COALESCE(mutation->'entityKey', '{}'::jsonb);
-    v_mutation_id := mutation->>'mutationId';
-    v_mutation_seq := (mutation->>'mutationSeq')::integer;
-    v_client_timestamp_us := NULLIF(mutation->>'clientTimestampUs', '')::bigint;
+    v_cols := NULL;
+    v_vals := NULL;
+    v_set := NULL;
 
     IF FALSE THEN
       NULL;
@@ -260,35 +310,39 @@ BEGIN
     ELSE
       RAISE EXCEPTION 'Unknown table "%" in batch mutation', v_table;
     END IF;
-
-    IF p_log_enabled THEN
-      INSERT INTO operations_log (
-        table_name,
-        operation_kind,
-        entity_key_json,
-        payload_json,
-        status,
-        http_status,
-        mutation_id,
-        mutation_seq,
-        client_timestamp_us,
-        request_path,
-        server_timestamp_us
-      ) VALUES (
-        v_table,
-        v_kind,
-        v_entity_key,
-        v_payload,
-        'succeeded',
-        200,
-        v_mutation_id::uuid,
-        v_mutation_seq,
-        v_client_timestamp_us,
-        p_request_path,
-        CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-      );
-    END IF;
   END LOOP;
+
+  IF p_log_enabled THEN
+    -- One batched log insert (the whole batch is a single transaction, so a per-mutation loop
+    -- bought nothing): a runtime apply failure above rolls the whole transaction back, log rows
+    -- included, preserving the existing whole-batch-failure semantics.
+    INSERT INTO operations_log (
+      table_name,
+      operation_kind,
+      entity_key_json,
+      payload_json,
+      status,
+      http_status,
+      mutation_id,
+      mutation_seq,
+      client_timestamp_us,
+      request_path,
+      server_timestamp_us
+    )
+    SELECT
+      m->>'tableName',
+      m->>'kind',
+      COALESCE(m->'entityKey', '{}'::jsonb),
+      COALESCE(m->'payload', '{}'::jsonb),
+      'succeeded',
+      200,
+      (m->>'mutationId')::uuid,
+      (m->>'mutationSeq')::integer,
+      NULLIF(m->>'clientTimestampUs', '')::bigint,
+      p_request_path,
+      CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
+    FROM jsonb_array_elements(p_batch->'mutations') AS m;
+  END IF;
 
   IF p_rls_enabled THEN
     -- Restore the caller's prior role/claims captured above, so the RLS context applied for

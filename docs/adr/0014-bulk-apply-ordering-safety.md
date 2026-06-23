@@ -49,8 +49,13 @@ source row per target PK** — and the two paths reach that guarantee differentl
    is unaffected).
 
 2. **Write path — apply set-based, safe by the Per-entity flush serialization invariant.** The Mutation
-   applier groups a batch by `(table, kind)` and applies each group set-based via `json_to_recordset`.
-   Its safety from the join hazard rests on the **Per-entity flush serialization** invariant
+   applier groups a batch by `(table, kind, payload column-set)` and applies each group set-based via
+   `jsonb_to_recordset` (one statement per group, replacing the per-mutation `EXECUTE` loop). Grouping
+   by the column-set too — refined during the Phase 4 build, the same shape the read-path fold reaches
+   (decision 1) — keeps each `UPDATE … FROM` / `INSERT … SELECT` statement's column list uniform, since
+   a sparse update sets only the columns it changed. Groups run in ascending `min(mutationSeq)` so
+   submission order is preserved across tables (FK-safe; the batch already `SET CONSTRAINTS ALL
+   DEFERRED`). Its safety from the join hazard rests on the **Per-entity flush serialization** invariant
    (`CONTEXT.md`): `readPendingBatchRows` (`mutation.ts:1376-1386`) selects a mutation only when no
    earlier same-entity mutation is still owed, so a POSTed batch holds **at most one operation per
    Entity identity** — no same-PK duplicates, regardless of the batch-size limit. Set-based apply

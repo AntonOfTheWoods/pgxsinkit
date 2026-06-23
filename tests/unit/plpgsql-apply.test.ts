@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, integer, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
@@ -144,17 +144,20 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
   it("matches update and delete over the full server primary-key tuple", () => {
     const ddl = buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry);
 
-    // update WHERE — inside the format() template, so its single quotes are doubled.
-    expect(ddl).toContain(`"tenant_id" = ($2->>''tenant_id'')::uuid AND "id" = ($2->>''id'')::uuid`);
-    // delete WHERE — direct PL/pgSQL.
-    expect(ddl).toContain(`"tenant_id" = (v_entity_key->>'tenant_id')::uuid AND "id" = (v_entity_key->>'id')::uuid`);
+    // Set-based update (ADR-0014 Phase 4) joins each row's entity key (x.k jsonb) over the FULL
+    // tuple; inside the format() template, so its single quotes are doubled.
+    expect(ddl).toContain(`t."tenant_id" = (x.k->>''tenant_id'')::uuid AND t."id" = (x.k->>''id'')::uuid`);
+    // Set-based delete matches the recordset's typed PK columns directly, over the FULL tuple.
+    expect(ddl).toContain(`x("tenant_id" uuid, "id" uuid)`);
+    expect(ddl).toContain(`t."tenant_id" = x."tenant_id" AND t."id" = x."id"`);
   });
 
   it("resolves a property≠column primary key by its column name, never the drizzle property", () => {
     const ddl = buildPlpgsqlBatchFunctionDdl(renamedPkRegistry);
 
-    expect(ddl).toContain(`"group_id" = ($2->>''group_id'')::uuid`);
-    expect(ddl).toContain(`"group_id" = (v_entity_key->>'group_id')::uuid`);
+    expect(ddl).toContain(`t."group_id" = (x.k->>''group_id'')::uuid`);
+    expect(ddl).toContain(`x("group_id" uuid)`);
+    expect(ddl).toContain(`t."group_id" = x."group_id"`);
     expect(ddl).not.toContain("groupId");
   });
 
@@ -234,6 +237,137 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
         [id],
       );
       expect(row.rows[0]?.updatedAtUs).toBe("10000000000000000");
+    } finally {
+      await db.close();
+    }
+  });
+});
+
+// ADR-0014 Phase 4: the applier groups a batch by (table, kind, payload column-set) and applies each
+// group with one set-based statement (json_to_recordset), instead of one EXECUTE per mutation.
+const groupTodosRegistry = defineSyncRegistry({
+  todos: defineSyncTable({
+    tableName: "group_todos",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+      priority: integer("priority").notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
+    mode: "readwrite",
+    primaryKey: ["id"],
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+
+const ID_A = "30000000-0000-4000-8000-00000000000a";
+const ID_B = "30000000-0000-4000-8000-00000000000b";
+const ID_C = "30000000-0000-4000-8000-00000000000c";
+
+function todoMutation(
+  kind: "create" | "update" | "delete",
+  seq: number,
+  entityKey: Record<string, unknown>,
+  payload: Record<string, unknown>,
+) {
+  return {
+    tableName: "group_todos",
+    kind,
+    entityKey,
+    payload,
+    mutationId: `00000000-0000-4000-8000-00000000000${seq}`,
+    mutationSeq: seq,
+    clientTimestampUs: "1000",
+  };
+}
+
+async function applyMutations(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, mutations: unknown[]) {
+  await db.query(`SELECT pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb)`, [
+    JSON.stringify({ mutations }),
+  ]);
+}
+
+describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase 4)", () => {
+  async function freshDb() {
+    const db = await createFreshTestPGlite();
+    await db.exec(`CREATE TABLE group_todos (
+      id uuid PRIMARY KEY,
+      title varchar(120) NOT NULL,
+      priority integer NOT NULL,
+      updated_at_us bigint NOT NULL DEFAULT 0
+    )`);
+    await db.exec(buildPlpgsqlBatchFunctionDdl(groupTodosRegistry));
+    return db;
+  }
+
+  it("inserts many rows of one (table, kind, column-set) in a single grouped statement, stamping managed fields", async () => {
+    const db = await freshDb();
+    try {
+      await applyMutations(db, [
+        todoMutation("create", 1, { id: ID_A }, { id: ID_A, title: "A", priority: 1 }),
+        todoMutation("create", 2, { id: ID_B }, { id: ID_B, title: "B", priority: 2 }),
+      ]);
+
+      const rows = await db.query<{ id: string; title: string; priority: number; stamped: boolean }>(
+        `SELECT id, title, priority, (updated_at_us > 0) AS stamped FROM group_todos ORDER BY title`,
+      );
+      expect(rows.rows).toEqual([
+        { id: ID_A, title: "A", priority: 1, stamped: true },
+        { id: ID_B, title: "B", priority: 2, stamped: true },
+      ]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("groups partial updates by column-set so each row's untouched columns survive, and bumps every Server version", async () => {
+    const db = await freshDb();
+    try {
+      await db.query(`INSERT INTO group_todos (id, title, priority, updated_at_us) VALUES ($1,'A',1,5), ($2,'B',2,5)`, [
+        ID_A,
+        ID_B,
+      ]);
+
+      // Row A updates only title (column-set {title}); row B only priority (column-set {priority}) —
+      // two distinct groups. A single uniform UPDATE..FROM would null the other column on each row.
+      await applyMutations(db, [
+        todoMutation("update", 1, { id: ID_A }, { title: "A2" }),
+        todoMutation("update", 2, { id: ID_B }, { priority: 99 }),
+      ]);
+
+      const rows = await db.query<{ id: string; title: string; priority: number; bumped: boolean }>(
+        `SELECT id, title, priority, (updated_at_us > 5) AS bumped FROM group_todos ORDER BY id`,
+      );
+      expect(rows.rows).toEqual([
+        { id: ID_A, title: "A2", priority: 1, bumped: true }, // priority untouched
+        { id: ID_B, title: "B", priority: 99, bumped: true }, // title untouched
+      ]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("applies a mixed create/update/delete batch across groups in one call", async () => {
+    const db = await freshDb();
+    try {
+      await db.query(
+        `INSERT INTO group_todos (id, title, priority, updated_at_us) VALUES ($1,'old',1,5), ($2,'doomed',2,5)`,
+        [ID_A, ID_B],
+      );
+
+      await applyMutations(db, [
+        todoMutation("create", 1, { id: ID_C }, { id: ID_C, title: "C", priority: 3 }),
+        todoMutation("update", 2, { id: ID_A }, { title: "new" }),
+        todoMutation("delete", 3, { id: ID_B }, { id: ID_B }),
+      ]);
+
+      const rows = await db.query<{ id: string; title: string }>(`SELECT id, title FROM group_todos ORDER BY id`);
+      expect(rows.rows).toEqual([
+        { id: ID_A, title: "new" }, // updated
+        { id: ID_C, title: "C" }, // created (ID_B deleted)
+      ]);
     } finally {
       await db.close();
     }
