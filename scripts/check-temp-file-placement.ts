@@ -4,12 +4,15 @@ import path from "node:path";
 const workspaceRoot = process.cwd();
 
 const allowedRootEntries = new Set([
+  ".claude",
+  ".codex",
   ".env",
   ".env.example",
   ".git",
   ".githooks",
   ".github",
   ".gitignore",
+  ".intent",
   ".oxfmtrc.jsonc",
   ".oxlintrc.jsonc",
   ".vscode",
