@@ -5,7 +5,15 @@ import { useMemo } from "react";
 import { useAuth } from "../auth/auth";
 import { useIssueActions } from "../board/use-issue-actions";
 import { TeamPageShell } from "../components/team-page-shell";
-import { buildAssignableByTeam, useProfileMap, useTeamIssues, useTeamMemberships, useTeams } from "../data";
+import {
+  buildAssignableByTeam,
+  useIssueConvergence,
+  useProfileMap,
+  useServerIssueValues,
+  useTeamIssues,
+  useTeamMemberships,
+  useTeams,
+} from "../data";
 import { BoardColumns, type TeamOption } from "../features/board";
 
 export function TeamBoardRoute() {
@@ -16,6 +24,8 @@ export function TeamBoardRoute() {
   const memberships = useTeamMemberships();
   const { teams } = useTeams();
   const actions = useIssueActions();
+  const convergenceById = useIssueConvergence();
+  const serverValueById = useServerIssueValues();
 
   const assignableByTeam = useMemo(() => buildAssignableByTeam(memberships, profiles), [memberships, profiles]);
   // Cross-team move is Admin-only (the board trigger rejects it for anyone else), so only an Admin
@@ -34,6 +44,8 @@ export function TeamBoardRoute() {
           profiles={profiles}
           actions={actions}
           assignableByTeam={assignableByTeam}
+          convergenceById={convergenceById}
+          serverValueById={serverValueById}
           moveTeams={moveTeams}
         />
       )}

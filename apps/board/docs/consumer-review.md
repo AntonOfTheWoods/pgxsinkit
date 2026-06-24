@@ -162,3 +162,33 @@ finding:
     table, assert a default-enabled write still applies and the table stays absent). A docs
     note on the operations-log feature ("either create the table or it auto-disables; it is
     never auto-created") is the matching content gap.
+
+## Phase 6 — conflict surfacing (reject-if-stale, inline)
+
+The conflict primitives consumed cleanly — `issue_sync_state.conflict_state` (ADR-0011)
+is a live, per-row signal; the synced base table holds the server value to show against the
+kept optimistic overlay; `discardConflict` and a re-applied `issue.update` are the two
+resolutions. Verified live by staging a real stale write (block `board-sync`, advance the
+row server-side, write against the now-old base): the loser surfaces inline ("the server
+now has this in _In progress_"), never snaps back, and **both** resolutions work — "Use
+server's" reverts to the synced value, "Keep mine" re-applies and converges. But staging it
+exposed a real **toolkit convergence bug**:
+
+15. **A resolved conflict's banner never cleared — the conflicted journal row orphaned.**
+    Two sites retire a `conflicted` row once a later write resolves it: `reconcileTable`
+    (the post-flush bulk pass) and the `<table>_reconcile_on_sync` **trigger** (real-time,
+    fires when the resolver's echo lands). Only `reconcileTable` did the retire; the trigger
+    just cleared the acked resolver. So when the resolution's echo beat the post-flush
+    `reconcileTable` pass (the common case — local Electric is fast), the trigger deleted the
+    acked resolver _before_ `reconcileTable` could see it, and the `conflicted` row orphaned:
+    its `conflict_state` surfaced a long-resolved conflict forever (a stuck "edited by
+    someone else" banner after a successful "Keep mine"). The two cleanup sites are meant to
+    be in parity (they already share the resolution-barrier predicate), but the
+    conflicted-retire was missing from the trigger. → **ergonomics** (fixed upstream,
+    `packages/client/src/schema.ts`): the reconcile-on-sync trigger now does the
+    supersede-retire too, _before_ its acked-clear (same ordering as `reconcileTable`), so a
+    resolution clears the conflict deterministically regardless of which path wins. New unit
+    regression (`conflict-handling.test.ts`) crafts `conflicted` + acked-resolver journal
+    rows and fires only the trigger; it asserts the conflicted row is retired (it fails
+    without the fix — the row orphans). Verified end-to-end on the board: "Keep mine" now
+    clears the banner with no manual reconcile.

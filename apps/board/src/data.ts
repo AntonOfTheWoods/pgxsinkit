@@ -1,9 +1,17 @@
 import { eq } from "drizzle-orm";
 import { useMemo } from "react";
 
-import { channelTable, issueView, messageView, profileTable, teamMemberView, teamTable } from "@pgxsinkit/board-schema";
+import {
+  channelTable,
+  issueTable,
+  issueView,
+  messageView,
+  profileTable,
+  teamMemberView,
+  teamTable,
+} from "@pgxsinkit/board-schema";
 
-import { useLiveDrizzleRows } from "./board-client";
+import { useLiveDrizzleRows, useLiveRows } from "./board-client";
 
 // The read surface over the local PGlite store. Readonly tables (profile/team/channel) are read from
 // their synced local tables; readwrite tables (issue/message) from their `_read_model` views (which
@@ -122,6 +130,71 @@ export function useTeamIssues(teamId: string) {
 export function useAllIssues() {
   const { rows, loading } = useLiveDrizzleRows((client) => client.drizzle.select(issueColumns).from(issueView), []);
   return { issues: rows, loading };
+}
+
+export type ServerIssueValue = { status: string; assigneeId: string | null };
+
+/**
+ * The **server** value of every Issue, read straight from the synced base table (`issue`) — NOT the
+ * `issue_read_model` view the board renders, which merges the optimistic overlay on top. The two
+ * diverge exactly when a local write has not yet converged; the conflict surface shows this value as
+ * "the server moved it to …" against the optimistic value still on the card (board Phase 6).
+ */
+export function useServerIssueValues(): Map<string, ServerIssueValue> {
+  const { rows } = useLiveDrizzleRows(
+    (client) =>
+      client.drizzle
+        .select({ id: issueTable.id, status: issueTable.status, assigneeId: issueTable.assigneeId })
+        .from(issueTable),
+    [],
+  );
+  return useMemo(() => {
+    const map = new Map<string, ServerIssueValue>();
+    for (const row of rows) map.set(row.id, { status: row.status, assigneeId: row.assigneeId });
+    return map;
+  }, [rows]);
+}
+
+export type IssueConvergence = {
+  /** The reject-if-stale rejection reason while a write is `conflicted`, else null (ADR-0015). */
+  conflictState: string | null;
+  /** Retryable writes still owed to the server (pending/sending/failed) — drives the "syncing" dot. */
+  pendingCount: number;
+  /** Terminal writes the server permanently rejected (ADR-0006); surfaced in the Inspector (Phase 8). */
+  quarantinedCount: number;
+  quarantineState: string | null;
+};
+
+type SyncStateRow = {
+  id: string;
+  conflict_state: string | null;
+  pending_count: number;
+  quarantined_count: number;
+  quarantine_state: string | null;
+};
+
+/**
+ * Per-Issue convergence state from the toolkit's derived `issue_sync_state` view (ADR-0011): one row
+ * per Issue that has any local activity. A live raw query (the view isn't a Drizzle object) — the
+ * board reads `conflict_state` to surface reject-if-stale conflicts inline (Phase 6) and
+ * `pending_count`/`quarantined_count` for the convergence dots + Inspector (Phase 8).
+ */
+export function useIssueConvergence(): Map<string, IssueConvergence> {
+  const { rows } = useLiveRows<SyncStateRow>(
+    "SELECT id, conflict_state, pending_count, quarantined_count, quarantine_state FROM issue_sync_state",
+  );
+  return useMemo(() => {
+    const map = new Map<string, IssueConvergence>();
+    for (const row of rows) {
+      map.set(row.id, {
+        conflictState: row.conflict_state,
+        pendingCount: Number(row.pending_count),
+        quarantinedCount: Number(row.quarantined_count),
+        quarantineState: row.quarantine_state,
+      });
+    }
+    return map;
+  }, [rows]);
 }
 
 export function useChannels() {

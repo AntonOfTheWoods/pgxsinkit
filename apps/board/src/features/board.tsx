@@ -1,8 +1,17 @@
-import { ActionIcon, Avatar, Badge, Card, Group, Menu, Stack, Text, Tooltip } from "@mantine/core";
+import { ActionIcon, Alert, Avatar, Badge, Button, Card, Group, Menu, Stack, Text, Tooltip } from "@mantine/core";
 import { useRef, useState } from "react";
 
 import type { IssueActions } from "../board/use-issue-actions";
-import { type IssueRow, type IssueStatus, PRIORITY_META, type ProfileRow, STATUS_LABEL, STATUS_ORDER } from "../data";
+import {
+  type IssueConvergence,
+  type IssueRow,
+  type IssueStatus,
+  PRIORITY_META,
+  type ProfileRow,
+  type ServerIssueValue,
+  STATUS_LABEL,
+  STATUS_ORDER,
+} from "../data";
 
 function initials(name: string): string {
   return name
@@ -146,6 +155,76 @@ function IssueMenu({
   );
 }
 
+/**
+ * Inline reject-if-stale conflict surface (board Phase 6 / ADR-0015). The optimistic write was
+ * declined because the row moved on the server; the toolkit KEEPS the optimistic overlay (never a
+ * silent snap-back), so the card still shows the rejected value. This banner names the server's
+ * current value and offers the two resolutions: re-apply ("Keep mine", a fresh write that re-bases
+ * and converges) or `discardConflict` ("Use server's", drop the overlay → fall back to the server
+ * value). `serverValue` is read from the synced base table (data.useServerIssueValues).
+ */
+function ConflictNotice({
+  issue,
+  serverValue,
+  profiles,
+  actions,
+}: {
+  issue: IssueRow;
+  serverValue: ServerIssueValue | undefined;
+  profiles: Map<string, ProfileRow>;
+  actions: IssueActions;
+}) {
+  const serverStatusLabel =
+    serverValue != null ? (STATUS_LABEL[serverValue.status as IssueStatus] ?? serverValue.status) : null;
+  const serverAssignee = serverValue?.assigneeId != null ? profiles.get(serverValue.assigneeId) : undefined;
+  const assigneeChanged = serverValue != null && serverValue.assigneeId !== issue.assigneeId;
+  return (
+    <Alert
+      color="orange"
+      variant="light"
+      radius="sm"
+      p="xs"
+      title="Edited by someone else"
+      icon={<Text fw={700}>!</Text>}
+    >
+      <Stack gap={8}>
+        <Text size="xs">
+          {serverValue != null ? (
+            <>
+              The server now has this in <b>{serverStatusLabel}</b>
+              {assigneeChanged
+                ? serverAssignee != null
+                  ? `, assigned to ${serverAssignee.displayName}`
+                  : ", unassigned"
+                : ""}
+              . Your change wasn&apos;t applied.
+            </>
+          ) : (
+            <>Your change wasn&apos;t applied — the issue moved on the server.</>
+          )}
+        </Text>
+        <Group gap="xs">
+          <Button
+            size="compact-xs"
+            color="orange"
+            onClick={() =>
+              void actions.keepMine(issue.id, {
+                status: issue.status as IssueStatus,
+                assigneeId: issue.assigneeId,
+              })
+            }
+          >
+            Keep mine
+          </Button>
+          <Button size="compact-xs" variant="default" onClick={() => void actions.discardConflict(issue.id)}>
+            Use server&apos;s
+          </Button>
+        </Group>
+      </Stack>
+    </Alert>
+  );
+}
+
 export function IssueCard({
   issue,
   profiles,
@@ -153,6 +232,8 @@ export function IssueCard({
   assignable,
   moveTeams,
   actions,
+  convergence,
+  serverValue,
   onDragStart,
   onDragEnd,
 }: {
@@ -162,10 +243,13 @@ export function IssueCard({
   assignable: readonly ProfileRow[];
   moveTeams: readonly TeamOption[];
   actions: IssueActions;
+  convergence?: IssueConvergence;
+  serverValue?: ServerIssueValue;
   onDragStart: () => void;
   onDragEnd: () => void;
 }) {
   const priority = PRIORITY_META[issue.priority] ?? PRIORITY_META["none"]!;
+  const conflicted = convergence?.conflictState != null;
   return (
     <Card
       withBorder
@@ -202,6 +286,7 @@ export function IssueCard({
           </Group>
           <AssigneeAvatar profile={issue.assigneeId != null ? profiles.get(issue.assigneeId) : undefined} />
         </Group>
+        {conflicted && <ConflictNotice issue={issue} serverValue={serverValue} profiles={profiles} actions={actions} />}
       </Stack>
     </Card>
   );
@@ -218,6 +303,8 @@ export function BoardColumns({
   profiles,
   actions,
   assignableByTeam,
+  convergenceById,
+  serverValueById,
   teamNameById,
   moveTeams = [],
 }: {
@@ -225,6 +312,8 @@ export function BoardColumns({
   profiles: Map<string, ProfileRow>;
   actions: IssueActions;
   assignableByTeam: Map<string, ProfileRow[]>;
+  convergenceById?: Map<string, IssueConvergence>;
+  serverValueById?: Map<string, ServerIssueValue>;
   teamNameById?: Map<string, string>;
   moveTeams?: readonly TeamOption[];
 }) {
@@ -274,6 +363,8 @@ export function BoardColumns({
             <Stack gap="xs" mih={40}>
               {columnIssues.map((issue) => {
                 const teamName = teamNameById?.get(issue.teamId);
+                const convergence = convergenceById?.get(issue.id);
+                const serverValue = serverValueById?.get(issue.id);
                 return (
                   <IssueCard
                     key={issue.id}
@@ -290,6 +381,8 @@ export function BoardColumns({
                       setOverStatus(null);
                     }}
                     {...(teamName != null ? { teamName } : {})}
+                    {...(convergence != null ? { convergence } : {})}
+                    {...(serverValue != null ? { serverValue } : {})}
                   />
                 );
               })}

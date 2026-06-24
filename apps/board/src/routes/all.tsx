@@ -4,7 +4,15 @@ import { useEffect, useMemo } from "react";
 
 import { useAuth } from "../auth/auth";
 import { useIssueActions } from "../board/use-issue-actions";
-import { buildAssignableByTeam, useAllIssues, useProfileMap, useTeamMemberships, useTeams } from "../data";
+import {
+  buildAssignableByTeam,
+  useAllIssues,
+  useIssueConvergence,
+  useProfileMap,
+  useServerIssueValues,
+  useTeamMemberships,
+  useTeams,
+} from "../data";
 import { BoardColumns } from "../features/board";
 
 // Admin-only cross-team view: every Issue the store holds, labelled by Team. For an Admin the read
@@ -20,6 +28,8 @@ export function AllRoute() {
   const memberships = useTeamMemberships();
   const { teams } = useTeams();
   const actions = useIssueActions();
+  const convergenceById = useIssueConvergence();
+  const serverValueById = useServerIssueValues();
 
   const teamNameById = useMemo(() => new Map(teams.map((team) => [team.id, team.name])), [teams]);
   const assignableByTeam = useMemo(() => buildAssignableByTeam(memberships, profiles), [memberships, profiles]);
@@ -46,6 +56,8 @@ export function AllRoute() {
           profiles={profiles}
           actions={actions}
           assignableByTeam={assignableByTeam}
+          convergenceById={convergenceById}
+          serverValueById={serverValueById}
           teamNameById={teamNameById}
           moveTeams={teams}
         />

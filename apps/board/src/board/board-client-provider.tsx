@@ -45,6 +45,12 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
           return;
         }
         created = next;
+        // Dev-only console handle for poking the live client (stage a conflict, inspect convergence,
+        // flush on demand). Never shipped — gated on the Vite dev build. The Phase 8 Sync Inspector is
+        // the in-app surface; this is the REPL escape hatch behind it.
+        if (import.meta.env.DEV) {
+          (globalThis as typeof globalThis & { __boardClient?: BoardSyncClient }).__boardClient = next;
+        }
         setStatus(next.status);
         setClient(next);
       } catch (cause) {
@@ -55,6 +61,9 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
     return () => {
       active = false;
       if (created) void created.stop();
+      if (import.meta.env.DEV) {
+        delete (globalThis as typeof globalThis & { __boardClient?: BoardSyncClient }).__boardClient;
+      }
     };
   }, [userId]);
 

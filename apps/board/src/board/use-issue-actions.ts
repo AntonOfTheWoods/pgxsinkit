@@ -11,6 +11,15 @@ export interface IssueActions {
   /** Cross-Team move — offered only to an Admin (the `board_block_cross_team_move` trigger rejects it
    * server-side for anyone else, so a non-Admin write would optimistically apply then be quarantined). */
   moveToTeam: (issueId: string, teamId: string) => Promise<void>;
+  /**
+   * "Keep mine" — resolve a reject-if-stale conflict by re-applying the optimistic value as a NEW
+   * write (board Phase 6 / ADR-0015). It re-authors against the now-current server version, so it
+   * converges; the toolkit's reconcile then retires the superseded `conflicted` journal row.
+   */
+  keepMine: (issueId: string, value: { status: IssueStatus; assigneeId: string | null }) => Promise<void>;
+  /** "Use server's" — discard the conflicted write, dropping the kept overlay so the Read model falls
+   * back to the synced (server) value (ADR-0015 `discardConflict`). */
+  discardConflict: (issueId: string) => Promise<void>;
 }
 
 /**
@@ -27,6 +36,9 @@ export function useIssueActions(): IssueActions {
       setStatus: (issueId, status) => client.tables.issue.update({ id: issueId }, { status }),
       setAssignee: (issueId, assigneeId) => client.tables.issue.update({ id: issueId }, { assigneeId }),
       moveToTeam: (issueId, teamId) => client.tables.issue.update({ id: issueId }, { teamId }),
+      keepMine: (issueId, value) =>
+        client.tables.issue.update({ id: issueId }, { status: value.status, assigneeId: value.assigneeId }),
+      discardConflict: (issueId) => client.discardConflict("issue", { id: issueId }),
     }),
     [client],
   );
