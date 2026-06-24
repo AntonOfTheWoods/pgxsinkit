@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { createIntervalConvergenceTrigger, createSyncClient } from "@pgxsinkit/client";
 import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
-import { createSyncServer } from "@pgxsinkit/server";
+import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
@@ -427,6 +427,81 @@ describe("client facade contract", () => {
         await client.destroy({ force: true });
       }
     } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("read path recovers from token expiry: surfaces auth-needed, then resumes on re-auth without a restart (ADR-0013)", async () => {
+    const dataDir = await createPersistentDataDir();
+    // A real Electric session gated behind an auth proxy: only a valid Bearer token is forwarded
+    // to Electric; anything else 401s — exactly the JWT-expiry case a boot-time token freeze wedged.
+    const VALID_TOKEN = "valid-session-token";
+    let currentToken = "expired-token"; // invalid at boot → the read path 401s
+
+    // A real auth-gating proxy in front of Electric, on Bun.serve (the path proven by the
+    // membership/asymmetric integration tests) so the streaming shape response is relayed faithfully.
+    const authGate = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        if (request.headers.get("Authorization") !== `Bearer ${VALID_TOKEN}`) {
+          return new Response(JSON.stringify({ message: "token expired" }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        // Authenticated → forward the shape request to the real Electric (projects has no row filter).
+        return proxyElectricShapeRequest(
+          request,
+          { role: "authenticated", sub: "01965156-5884-7a0b-a24e-31b5c9be00a1" },
+          { registry: projectsSyncRegistry, electricUrl: env.electricUrl },
+        );
+      },
+    });
+    const proxyUrl = `http://127.0.0.1:${authGate.port}/v1/electric-proxy`;
+
+    try {
+      await server.drizzle.insert(projectsTable).values({
+        id: "01965156-5884-7a0b-a24e-31b5c9be000a",
+        name: "Visible after re-auth",
+      });
+
+      const phases: string[] = [];
+      const client = await createSyncClient({
+        registry: projectsSyncRegistry,
+        electricUrl: proxyUrl,
+        writeUrl: `http://127.0.0.1:${writeApiPort}`,
+        dataDir,
+        // Per-request token (ADR-0013): consulted fresh on every shape fetch and every retry.
+        getAuthToken: async () => currentToken,
+        onStatusChange: (status) => phases.push(status.phase),
+      });
+
+      try {
+        // While the token is dead the read stream 401s every retry; it must NOT stop — it surfaces a
+        // distinct auth-needed status (prompt re-login) and keeps retrying forever with backoff.
+        await waitFor(async () => {
+          expect(client.status.phase).toBe("auth-needed");
+        });
+
+        // Re-authenticate: the next per-request Authorization header resolves the valid token, the
+        // proxy forwards, and sync resumes — with NO client restart and no manual re-subscribe.
+        currentToken = VALID_TOKEN;
+
+        await waitFor(async () => {
+          const rows = await client.drizzle.select().from(projectsTable);
+          expect(rows).toHaveLength(1);
+          expect(rows[0]?.name).toBe("Visible after re-auth");
+        });
+
+        expect(client.status.phase).toBe("ready");
+        // The status channel saw the distinct auth-needed indication and then cleared it on resume.
+        expect(phases).toContain("auth-needed");
+        expect(phases.at(-1)).toBe("ready");
+      } finally {
+        await client.destroy({ force: true });
+      }
+    } finally {
+      await authGate.stop(true);
       await rm(dataDir, { recursive: true, force: true });
     }
   }, 30_000);
