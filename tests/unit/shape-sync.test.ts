@@ -137,4 +137,38 @@ describe("shape sync", () => {
     expect(tableSyncs.sort()).toEqual(["discussion", "post", "profile"]);
     expect(initialSyncCount).toBe(1);
   });
+
+  it("attaches a per-shape onError auth-recovery handler to every shape (ADR-0013 Phase 2)", async () => {
+    const capturedShapes: Record<string, { shape: { onError?: unknown } }> = {};
+    const namespace = {
+      initMetadataTables: async () => {},
+      syncShapesToTables: async (opts: {
+        shapes: Record<string, { shape: { onError?: unknown } }>;
+        onInitialSync?: () => void;
+      }) => {
+        Object.assign(capturedShapes, opts.shapes);
+        opts.onInitialSync?.();
+        return { unsubscribe: () => {}, isUpToDate: true, streams: {} };
+      },
+    };
+    const pg = { electric: namespace } as unknown as Parameters<typeof startConfiguredSync>[0];
+
+    await startConfiguredSync(pg, {
+      syncConfig: {
+        electricUrl: "http://localhost:3000/v1/shape",
+        localSchema: "app_local",
+        tables: {
+          projects: {
+            mode: "readwrite",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "projects", shapeKey: "projects-shape" },
+          },
+        },
+      },
+    });
+
+    // The per-shape onError (the only onError that can request a retry) must be wired so a 401/403
+    // recovers the read path instead of permanently stopping it.
+    expect(typeof capturedShapes["projects"]?.shape.onError).toBe("function");
+  });
 });

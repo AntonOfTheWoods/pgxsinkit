@@ -9,6 +9,7 @@ import {
 } from "@pgxsinkit/contracts";
 
 import { electricSync } from "./sync";
+import { createShapeAuthErrorHandler } from "./sync-auth";
 
 export interface ShapeSyncSpec {
   electricUrl: string;
@@ -206,6 +207,11 @@ interface StartGroupSyncOptions {
 export async function startGroupSync(pg: SyncEnginePGlite, input: StartGroupSyncOptions) {
   const shapeHeaders = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
 
+  // Recover the read path from auth errors at the per-shape onError (ADR-0013 Phase 2): a 401/403
+  // returns retry so Electric re-resolves the async Authorization header for a fresh token, instead
+  // of permanently stopping the stream (Electric does not auto-retry 4xx).
+  const onError = createShapeAuthErrorHandler();
+
   const shapes = Object.fromEntries(
     input.specs.map((spec) => [
       spec.key,
@@ -213,6 +219,7 @@ export async function startGroupSync(pg: SyncEnginePGlite, input: StartGroupSync
         shape: {
           url: buildShapeUrl(spec.electricUrl, spec.electricTable ?? spec.tableName),
           ...(shapeHeaders ? { headers: shapeHeaders } : {}),
+          onError,
         },
         table: spec.tableName,
         ...(spec.schema !== undefined ? { schema: spec.schema } : {}),
