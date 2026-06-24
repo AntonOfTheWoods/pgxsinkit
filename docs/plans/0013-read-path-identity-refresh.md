@@ -77,3 +77,56 @@ lane against real Electric.
   status, and resumes on re-auth — it never silently wedges or permanently stops.
 - The refresh-deduping provider contract is documented.
 - `validate` green; the expiry-then-recover proof green in the integration lane.
+
+## Build notes (BUILT — all four phases, order P1 → P2 → P3 → P4 + integration proof)
+
+Built in order, each phase its own `validate:full`-green commit on `develop`.
+
+- **P1 — per-request token.** New `packages/client/src/sync-auth.ts` `buildAuthShapeHeaders` returns
+  `Authorization` as an async function (`async () => Bearer ${await getAuthToken()}`); an absent
+  token resolves to `""` (unauthenticated), never `Bearer undefined`. `createSyncClient` drops the
+  boot-time `syncAuthToken = await getAuthToken()` freeze and installs this when `getAuthToken` is
+  set. The shape-sync wrapper header types widen from `Record<string,string>` to Electric's
+  `ExternalHeadersRecord` (string | async-function values).
+- **P2 — recovery at the per-shape onError.** `createShapeAuthErrorHandler` returns retry (`{}`) on a
+  401/403 and `undefined` otherwise; `startGroupSync` attaches it to **every** shape's
+  `ShapeStreamOptions.onError`. `{}` re-issues the request, re-resolving the async header for a fresh
+  token (verified end-to-end — see below). Auth detection reads the `FetchError` **`status`** field
+  by duck-typing, not `instanceof FetchError`: the client and experimental packages can resolve to
+  different `@electric-sql/client` copies (1.5.16 + 1.5.21 both installed), so an `instanceof` can
+  miss a `FetchError` from the other copy; and the root test lane cannot import `@electric-sql/client`
+  directly (it is a nested dep of `packages/client`), so duck-typing is also what makes the handler
+  unit-testable.
+- **P3 — surface auth-needed.** New `SyncRuntimePhase` member `"auth-needed"` (distinct from
+  `degraded`). `startGroupSync` threads `onAuthError` into the handler and an `onSyncActivity` hook
+  into the engine — the latter fires at the top of the `MultiShapeStream.subscribe` callback (a
+  delivered batch = a fetch succeeded). `createSyncClient` flips to `auth-needed` on the first auth
+  error and clears it back to the steady-state phase (`ready` if initial sync completed, else
+  `syncing`) on the next activity — only when a `getAuthToken` provider exists.
+- **P4 — provider contract.** `docs/architecture.md` gains a "Read-path identity" section; a unit
+  test pins the refresh-deduping contract with a reference single-flight provider (five concurrent
+  header resolutions → one refresh).
+- **Integration proof** (`client-contract.integration.test.ts`, Podman + real Electric): full
+  `createSyncClient` behind an auth-gating proxy; a dead token surfaces `auth-needed` and keeps
+  retrying, then on re-auth the fresh token forwards and sync resumes to `ready` with no restart.
+
+### Electric-internals caveats found during build
+
+- **`MultiShapeStream` forwards per-shape `onError`.** It constructs each child
+  `new ShapeStream({ ...shape })`, so the per-shape `onError` (the only `onError` that can request a
+  retry) reaches the child stream. The `MultiShapeStream.subscribe` `onError` stays notification-only
+  (decision 2 holds).
+- **"Retry forever" is bounded at 50 by Electric.** `ShapeStream` has a
+  `maxConsecutiveErrorRetries = 50` guard: after 50 **consecutive** `onError`-handled retries that
+  never succeed, it tears the stream down regardless of the handler returning `{}`. A single success
+  resets the counter, so in practice this is "retry until re-auth, provided re-auth happens within 50
+  consecutive failures" — with the default backoff (1s→32s) that is many minutes. Decision 3's "no
+  hard attempt cap, retries forever" is therefore the toolkit's intent but is ultimately capped by
+  Electric; faithful and almost always sufficient, but recorded here as a real bound.
+- **`{}` re-resolves the async header.** Confirmed against real Electric: after re-auth, the proxy saw
+  repeated forwards all carrying the freshly-resolved `Bearer <valid>` token (not the stale one), so
+  returning `{}` does re-invoke the header function — no need to return `{ headers }`.
+- **The integration auth proxy must be `Bun.serve`.** The node:http `startFetchServer` helper relays
+  via `arrayBuffer()` + `setHeader`, which cannot faithfully proxy Electric's streaming shape
+  response — forwards returned but delivered no batch. The membership/asymmetric read proofs already
+  use `Bun.serve`; this proof does too.
