@@ -4,7 +4,14 @@ import { authenticatedRole } from "drizzle-orm/supabase";
 
 import { defineSyncTable } from "@pgxsinkit/contracts";
 
-import { buildIssuePolicies, buildMessagePolicies, buildTeamMemberPolicies } from "./policies";
+import {
+  buildChannelPolicies,
+  buildIssuePolicies,
+  buildMessagePolicies,
+  buildProfilePolicies,
+  buildTeamMemberPolicies,
+  buildTeamPolicies,
+} from "./policies";
 
 export const issueStatusEnum = pgEnum("issue_status", ["backlog", "todo", "in_progress", "done"]);
 export const issuePriorityEnum = pgEnum("issue_priority", ["none", "urgent", "high", "medium", "low"]);
@@ -19,6 +26,7 @@ const nowMicrosecondsSql = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) 
 const TEAM_SCOPE = "team-scope";
 
 // profile — readonly, synced to everyone (renders assignees + message authors). id = Supabase auth user id.
+// SELECT-only RLS: visible to any authenticated identity, no client writes.
 const profileSyncEntry = defineSyncTable({
   tableName: "profile",
   makeColumns: () => ({
@@ -26,10 +34,11 @@ const profileSyncEntry = defineSyncTable({
     displayName: varchar("display_name", { length: 120 }).notNull(),
     avatarColor: varchar("avatar_color", { length: 24 }).notNull().default("indigo"),
   }),
+  policies: buildProfilePolicies(authenticatedRole),
   mode: "readonly",
 });
 
-// team — readonly, seeded.
+// team — readonly, seeded. SELECT-only RLS: members read their Teams, Admin reads all, no writes.
 const teamSyncEntry = defineSyncTable({
   tableName: "team",
   makeColumns: () => ({
@@ -37,6 +46,7 @@ const teamSyncEntry = defineSyncTable({
     name: varchar("name", { length: 120 }).notNull(),
     createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
+  policies: buildTeamPolicies(authenticatedRole),
   mode: "readonly",
   consistencyGroup: TEAM_SCOPE,
 });
@@ -67,7 +77,8 @@ const teamMemberSyncEntry = defineSyncTable({
   },
 });
 
-// channel — readonly, seeded. One global Channel (team_id null) plus one per Team.
+// channel — readonly, seeded. One global Channel (team_id null) plus one per Team. SELECT-only RLS:
+// readable when global or in one of your Teams (Admin reads all), no writes.
 const channelSyncEntry = defineSyncTable({
   tableName: "channel",
   makeColumns: () => ({
@@ -77,6 +88,7 @@ const channelSyncEntry = defineSyncTable({
     name: varchar("name", { length: 120 }).notNull(),
     createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
+  policies: buildChannelPolicies(authenticatedRole),
   mode: "readonly",
   consistencyGroup: TEAM_SCOPE,
 });

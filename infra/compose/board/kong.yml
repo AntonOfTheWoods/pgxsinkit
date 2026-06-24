@@ -1,9 +1,15 @@
 _format_version: "3.0"
 _transform: true
 
-# Board demo API gateway (Kong, DB-less). Routes the three surfaces the board client touches through
+# Board demo API gateway (Kong, DB-less). Routes the two surfaces the board client touches through
 # one origin (http://localhost:54331), so `@supabase/supabase-js` is configured with a single
 # SUPABASE_URL. `strip_path: true` removes the `/<surface>/v1` prefix before proxying.
+#
+# NB: PostgREST (`/rest/v1`) is deliberately NOT routed. The board never uses the auto-CRUD data API
+# — reads go through `board-sync` (Electric, registry-filtered) and writes through `board-write` (the
+# governed mutation ingress). Exposing PostgREST would let an authenticated user bypass board-write
+# and hit tables directly; closing the route removes that surface entirely (defence in depth on top
+# of the RLS that already governs every table). The `rest` service is dropped from the compose stack.
 #
 # Deliberately minimal: no key-auth/acl. The Edge functions verify the GoTrue JWT themselves
 # (supabase/functions/_shared/auth.ts), so gateway-level key-auth would only add bring-up fragility
@@ -17,16 +23,6 @@ services:
         strip_path: true
         paths:
           - /auth/v1/
-    plugins:
-      - name: cors
-
-  - name: rest-v1
-    url: http://rest:3000/
-    routes:
-      - name: rest-v1-route
-        strip_path: true
-        paths:
-          - /rest/v1/
     plugins:
       - name: cors
 

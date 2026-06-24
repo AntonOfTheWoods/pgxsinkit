@@ -70,18 +70,12 @@ services:
     ports:
       - "54334:9999"
 
-  rest:
-    image: docker.io/postgrest/postgrest:v14.12
-    container_name: board-rest
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: anon
-      PGRST_JWT_SECRET: ${JWT_SECRET}
-      PGRST_DB_USE_LEGACY_GUCS: "false"
+  # NB: PostgREST (the `rest` service) is intentionally absent. The board does not use the auto-CRUD
+  # data API — reads go through board-sync (Electric, registry-filtered) and writes through
+  # board-write (the governed mutation ingress) — and exposing it would let an authenticated user
+  # bypass board-write to reach tables directly. RLS governs every table regardless, but dropping the
+  # service + its Kong route removes the surface entirely. (Studio's table editor needs PostgREST, so
+  # it is non-functional here; schema introspection via postgres-meta still works.)
 
   meta:
     image: docker.io/supabase/postgres-meta:v0.96.6
@@ -120,7 +114,6 @@ services:
     container_name: board-kong
     depends_on:
       - auth
-      - rest
       - functions
     environment:
       KONG_DATABASE: "off"
