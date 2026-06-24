@@ -3,6 +3,7 @@ import { Outlet } from "@tanstack/react-router";
 
 import { useAuth } from "../auth/auth";
 import { useBoardSyncStatus } from "../board/board-client-provider";
+import { TeamNav } from "../components/team-nav";
 
 const PHASE_BADGE: Record<string, { label: string; color: string }> = {
   booting: { label: "Starting…", color: "yellow" },
@@ -26,11 +27,16 @@ function SyncBadge() {
 }
 
 // The shell every route renders inside. When signed in, the header shows the identity, live sync
-// status, and a sign-out action. The team switcher + Sync Inspector drawer attach here in later phases.
+// status, and a sign-out action, and the left navbar is the Team switcher (the Sync Inspector drawer
+// attaches here in Phase 8). The navbar is omitted on the unauthenticated (login) screen.
 export function RootLayout() {
   const { session, signOut } = useAuth();
   return (
-    <AppShell header={{ height: 56 }} padding="md">
+    <AppShell
+      header={{ height: 56 }}
+      padding="md"
+      {...(session ? { navbar: { width: 220, breakpoint: "xs" as const } } : {})}
+    >
       <AppShell.Header>
         <Group h="100%" px="md" justify="space-between">
           <Text fw={700}>pgxsinkit board</Text>
@@ -51,6 +57,11 @@ export function RootLayout() {
           )}
         </Group>
       </AppShell.Header>
+      {session && (
+        <AppShell.Navbar p="xs">
+          <TeamNav />
+        </AppShell.Navbar>
+      )}
       <AppShell.Main>
         <Outlet />
       </AppShell.Main>

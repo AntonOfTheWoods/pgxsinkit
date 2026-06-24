@@ -8,6 +8,8 @@ interface AuthState {
   session: Session | null;
   /** True until the initial `getSession()` settles, so the app does not flash the login screen. */
   loading: boolean;
+  /** `app_metadata.roles` contains `admin` — the global bypass identity (board ADR-0005). */
+  isAdmin: boolean;
   /** One-click sign-in: every seeded identity shares the demo password (scripts/seed-board.ts). */
   signInAs: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -39,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       session,
       loading,
+      isAdmin: Boolean((session?.user.app_metadata?.["roles"] as string[] | undefined)?.includes("admin")),
       signInAs: async (email: string) => {
         const { error } = await supabase.auth.signInWithPassword({ email, password: boardConfig.seedPassword });
         if (error) throw error;
