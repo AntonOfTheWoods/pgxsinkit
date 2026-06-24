@@ -1996,11 +1996,29 @@ async function discardConflictedEntity(
 }
 
 async function reconcileTable(db: MutationDb, context: TableContext) {
-  // PK-match only — no timestamp gate. The trigger on the synced table
-  // handles real-time cleanup; this is a bulk recovery/fallback path.
+  // The Convergence barrier (ADR-0010) gates the acked-row clearing below; the synced-table trigger
+  // handles real-time cleanup, and this is the bulk recovery/fallback path that runs after every flush.
   await db.exec("BEGIN");
 
   try {
+    // ADR-0015: retire a terminal `conflicted` row once the user has RESOLVED it — i.e. a LATER write
+    // on the same entity has been acked (resolution is an ordinary new mutation). Without this, the old
+    // conflicted row lingers forever: `<table>_sync_state.conflict_state` keeps surfacing the resolved
+    // conflict and `diagnostics().conflictedCount` never drops. Run before the acked-clear below so the
+    // resolving row is still present to supersede it. (`discardConflict` is the explicit throw-away path.)
+    await db.query(
+      "DELETE FROM " +
+        context.journalTable +
+        " AS conflicted " +
+        "USING " +
+        context.journalTable +
+        " AS resolver " +
+        "WHERE conflicted.status = 'conflicted' " +
+        "AND resolver.entity_key_json = conflicted.entity_key_json " +
+        "AND resolver.mutation_seq > conflicted.mutation_seq " +
+        "AND resolver.status = 'acked'",
+    );
+
     // Clear acknowledged non-delete mutations + matching overlays. ADR-0010: gated by the
     // Convergence barrier (same predicate as the trigger) — the acked write clears only once the
     // synced echo's Server version has reached its acked version. Joining the synced table makes

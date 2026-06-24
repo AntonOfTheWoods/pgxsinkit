@@ -21,6 +21,17 @@ interface ResolvedProjection {
   readModel: string;
   /** The per-table `<table>_sync_state` convergence view (writable tables only — ADR-0011). */
   syncState: string;
+  /**
+   * The reconcile trigger's function — schema-qualified, because a function is a schema object.
+   * Suffix-then-qualify (never `${qualifiedTable}_reconcile_on_sync`, which double-quotes a
+   * non-public schema's qualified name into invalid SQL).
+   */
+  reconcileFunction: string;
+  /**
+   * The reconcile trigger itself — an UNqualified identifier. A trigger is not a schema object; it
+   * is bound to its table via `ON <qualified table>`, so its name must not be schema-qualified.
+   */
+  reconcileTrigger: string;
 }
 
 /**
@@ -150,8 +161,6 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     // Trigger: automatically clear overlay + journal entries when the sync
     // echo arrives. Fires on INSERT/UPDATE (new data from Electric) and DELETE
     // (row removed on server, synced back via Electric).
-    const triggerFnName = `${projection.syncedTable}_reconcile_on_sync`;
-
     const pkMatchSql = (alias: string) =>
       primaryKeyColumns
         .map((col) => `"${alias}"."${col.name}" = COALESCE(NEW."${col.name}", OLD."${col.name}")`)
@@ -169,10 +178,10 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     const resolutionBarrier = buildOverlayResolutionBarrier(entry, { syncedAlias: "NEW" });
 
     statements.push(
-      `CREATE OR REPLACE FUNCTION ${triggerFnName}() RETURNS TRIGGER AS $$\n` +
+      `CREATE OR REPLACE FUNCTION ${projection.reconcileFunction}() RETURNS TRIGGER AS $$\n` +
         `BEGIN\n` +
-        `  DELETE FROM ${projection.journalTable}\n` +
-        `  WHERE status = 'acked' AND (${pkMatchSql(projection.journalTable)})\n` +
+        `  DELETE FROM ${projection.journalTable} AS "journal"\n` +
+        `  WHERE status = 'acked' AND (${pkMatchSql("journal")})\n` +
         `    AND (\n` +
         `      (TG_OP <> 'DELETE' AND mutation_kind <> 'delete' AND ${resolutionBarrier})\n` +
         `      OR (TG_OP = 'DELETE' AND mutation_kind = 'delete')\n` +
@@ -189,9 +198,9 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     );
 
     statements.push(
-      `CREATE OR REPLACE TRIGGER ${triggerFnName}\n` +
+      `CREATE OR REPLACE TRIGGER ${projection.reconcileTrigger}\n` +
         `AFTER INSERT OR UPDATE OR DELETE ON ${projection.syncedTable}\n` +
-        `FOR EACH ROW EXECUTE FUNCTION ${triggerFnName}();`,
+        `FOR EACH ROW EXECUTE FUNCTION ${projection.reconcileFunction}();`,
     );
 
     statements.push(
@@ -418,6 +427,8 @@ function getClientProjection(entry: SyncTableEntry, tableKey: string, localSchem
     ...(projection.journalTable ? { journalTable: qualifyIdentifier(localSchema, projection.journalTable) } : {}),
     readModel: qualifyIdentifier(localSchema, readModelName),
     syncState: qualifyIdentifier(localSchema, `${syncedTableName}_sync_state`),
+    reconcileFunction: qualifyIdentifier(localSchema, `${syncedTableName}_reconcile_on_sync`),
+    reconcileTrigger: maybeQuoteIdentifier(`${syncedTableName}_reconcile_on_sync`),
   };
 }
 
@@ -457,13 +468,12 @@ export function buildDropReadCacheSql<TRegistry extends SyncTableRegistry>(regis
 
   for (const [tableKey, entry] of Object.entries(registry)) {
     const projection = getClientProjection(entry, tableKey, localSchema);
-    const triggerName = `${projection.syncedTable}_reconcile_on_sync`;
 
     if (entry.mode !== "readonly") {
       statements.push(`DROP VIEW IF EXISTS ${projection.syncState};`);
       statements.push(`DROP VIEW IF EXISTS ${projection.readModel};`);
-      statements.push(`DROP TRIGGER IF EXISTS ${triggerName} ON ${projection.syncedTable};`);
-      statements.push(`DROP FUNCTION IF EXISTS ${triggerName}();`);
+      statements.push(`DROP TRIGGER IF EXISTS ${projection.reconcileTrigger} ON ${projection.syncedTable};`);
+      statements.push(`DROP FUNCTION IF EXISTS ${projection.reconcileFunction}();`);
     }
 
     statements.push(`DROP TABLE IF EXISTS ${projection.syncedTable} CASCADE;`);

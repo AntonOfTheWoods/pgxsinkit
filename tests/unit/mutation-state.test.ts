@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
+import { mutationStatusSchema } from "@pgxsinkit/contracts";
+
 import {
   assertValidMutationTransition,
   classifyFailureStatus,
@@ -11,6 +13,13 @@ import {
 // The one named definition of the mutation-journal transitions (ADR-0005, ADR-0006).
 
 describe("mutation state machine (ADR-0005)", () => {
+  // Drift guard: the public contract enum must list exactly the journal's statuses. Previously the
+  // contract `mutationStatusSchema` lagged the client state machine (missing `quarantined`/`conflicted`),
+  // an undetected public-API/implementation desync.
+  it("keeps the contract mutationStatusSchema in lockstep with the journal state machine", () => {
+    expect(Object.keys(MUTATION_TRANSITIONS).sort()).toEqual([...mutationStatusSchema.options].sort());
+  });
+
   it("allows the journal lifecycle transitions", () => {
     expect(isValidMutationTransition("pending", "sending")).toBe(true);
     expect(isValidMutationTransition("sending", "acked")).toBe(true);

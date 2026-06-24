@@ -5,7 +5,8 @@ import { bigint, integer, jsonb, pgEnum, pgSchema, real, uuid, varchar } from "d
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, buildSyntheticRegistrySchemaName, demoSyncRegistry } from "@pgxsinkit/schema";
 
-import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { buildDropReadCacheSql, generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { createFreshTestPGlite } from "../support/pglite";
 
 const projectedClientRegistry = defineSyncRegistry({
   projectedItems: defineSyncTable({
@@ -129,6 +130,31 @@ describe("client local schema generation", () => {
     );
     expect(sql).toContain(`CREATE TABLE IF NOT EXISTS "${schemaName}"."perf_items_000_mutations"`);
     expect(sql).toContain(`CREATE OR REPLACE VIEW "${schemaName}"."perf_items_000_read_model" AS`);
+  });
+
+  // Regression: the test above only asserts the generated SQL *string*. A schema-qualified writable
+  // registry also emits the reconcile trigger/function — whose name was built by suffixing the
+  // already-qualified table name (`"s"."t"_reconcile_on_sync`), invalid SQL no string assertion
+  // caught. Generated DDL must be *executed*, not just pattern-matched.
+  it("executes a non-public writable registry's generated schema (trigger/function/views) in PGlite", async () => {
+    const schemaName = buildSyntheticRegistrySchemaName({ tableCount: 1, extraColumnCount: 4 });
+    const { registry } = buildSyntheticRegistry({ tableCount: 1, extraColumnCount: 4, schemaName });
+
+    const db = await createFreshTestPGlite();
+    try {
+      // generate → drop the read cache → regenerate: exercises both the CREATE and DROP paths for the
+      // schema-qualified function (qualified) and trigger (unqualified).
+      await db.exec(generateLocalSchemaSql(registry));
+      await db.exec(buildDropReadCacheSql(registry));
+      await db.exec(generateLocalSchemaSql(registry));
+
+      const view = await db.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM "${schemaName}"."perf_items_000_sync_state"`,
+      );
+      expect(view.rows[0]?.count).toBe(0);
+    } finally {
+      await db.close();
+    }
   });
 
   it("omits projected-away columns from synced, overlay, and read-model SQL", () => {

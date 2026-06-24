@@ -3,7 +3,13 @@ import { z } from "zod";
 import { unixMicrosecondsSchema } from "./common";
 
 export const mutationKindSchema = z.enum(["create", "update", "delete"]);
-export const mutationStatusSchema = z.enum(["pending", "sending", "acked", "failed"]);
+/**
+ * The full Mutation-journal status machine — every status a journal row can hold, including the two
+ * terminal states (`quarantined`, ADR-0006; `conflicted`, ADR-0015). Kept in lockstep with the
+ * client's `MutationStatus` (packages/client/src/mutation-state.ts). Distinct from
+ * {@link mutationAckStatusSchema}, the narrower *transport* subset a server ack may carry.
+ */
+export const mutationStatusSchema = z.enum(["pending", "sending", "acked", "failed", "quarantined", "conflicted"]);
 export const mutationAckStatusSchema = z.enum(["acked", "failed", "conflicted"]);
 
 export const entityKeySchema = z.record(z.string().trim().min(1), z.string().trim().min(1));

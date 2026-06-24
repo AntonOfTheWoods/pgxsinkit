@@ -201,6 +201,20 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
 
       const resolution = await readJournalStatus(db, 2);
       expect(resolution?.status).toBe("acked");
+
+      // ...and the SUPERSEDED conflicted row (seq 1) is retired by the resolution, so the conflict
+      // does not linger forever. Without this, conflict_state + conflictedCount would surface the
+      // already-resolved conflict indefinitely.
+      expect(await readJournalStatus(db, 1)).toBeUndefined();
+
+      const syncState = await db.query<{ conflictState: string | null }>(
+        `SELECT conflict_state AS "conflictState" FROM projects_sync_state WHERE id = $1`,
+        [PROJECT_ID],
+      );
+      expect(syncState.rows[0]?.conflictState ?? null).toBeNull();
+
+      const stats = await runtime.readMutationStats("projects");
+      expect(stats.conflictedCount).toBe(0);
     } finally {
       await db.close();
     }
