@@ -12,7 +12,7 @@ const ENV_FILE = "infra/compose/board.env";
 
 const BOARD_DATABASE_URL =
   process.env["BOARD_DATABASE_URL"] ??
-  "postgresql://supabase_admin:your-super-secret-and-long-postgres-password@localhost:54322/postgres?sslmode=disable";
+  "postgresql://postgres:your-super-secret-and-long-postgres-password@localhost:54322/postgres?sslmode=disable";
 
 function run(command: string, args: string[], env: NodeJS.ProcessEnv): void {
   const result = spawnSync(command, args, { env, stdio: "inherit" });

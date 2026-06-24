@@ -1,4 +1,4 @@
-_format_version: "2.1"
+_format_version: "3.0"
 _transform: true
 
 # Board demo API gateway (Kong, DB-less). Routes the three surfaces the board client touches through

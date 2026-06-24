@@ -13,33 +13,74 @@
  * Bun→Deno boundary; see apps/board/docs/consumer-review.md (Phase 2) for the consumption finding.
  */
 
-import { rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { join } from "node:path";
 
 import type { BunPlugin } from "bun";
 
-const FUNCTIONS = ["main", "board-write", "board-sync"] as const;
+// Only the board functions are bundled (they pull unpublished @pgxsinkit/* source). `main` is the
+// OFFICIAL Supabase edge-runtime router, vendored unmodified — it runs as raw TS (it imports `jose`
+// from a URL, which a bundler can't inline), so it is copied verbatim, not built.
+const BUNDLED = ["board-write", "board-sync"] as const;
 const SOURCE_ROOT = "supabase/functions";
 const DIST_ROOT = "supabase/functions-dist";
 
-// Bun's `target: "node"` leaves builtins external but as BARE specifiers (`import net from "net"`).
-// Deno only resolves builtins under the `node:` scheme, so a bare `"net"` import would fail to load
-// in the Edge runtime. This plugin normalizes every builtin (postgres.js reaches for net/tls/crypto/
-// stream/os/…) to its `node:` form and keeps it external for Deno to provide.
-const nodeProtocolPlugin: BunPlugin = {
-  name: "node-protocol-externals",
+// What we bundle vs. what Deno loads at runtime:
+//
+// We bundle ONLY the unpublished `@pgxsinkit/*` workspace source (which Deno cannot load directly —
+// extensionless imports — and has no `npm:` form). Every real npm library is left EXTERNAL as an
+// `npm:` specifier so Deno's own npm compatibility loads it. This is deliberate: Bun.build miscompiles
+// zod 4 (drops an internal `_regex` binding) and externalizes builtins as bare `"net"`/`"perf_hooks"`
+// which Deno rejects — both vanish when zod/hono/drizzle/postgres come from `npm:` instead, since
+// `npm:postgres` etc. resolve their own `node:` builtins correctly. The bundle is then just the
+// toolkit glue.
+const NPM_EXTERNALS: Record<string, string> = {
+  zod: "npm:zod@4.4.3",
+  hono: "npm:hono@4.12.27",
+  "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.2",
+  postgres: "npm:postgres@3.4.9",
+};
+
+const externalsPlugin: BunPlugin = {
+  name: "deno-externals",
   setup(build) {
-    const builtins = new Set(builtinModules);
+    const externalNames = [...Object.keys(NPM_EXTERNALS), ...builtinModules];
     build.onResolve({ filter: /.*/ }, (args) => {
-      const bare = args.path.startsWith("node:") ? args.path.slice("node:".length) : args.path;
-      if (builtins.has(bare)) {
-        return { path: `node:${bare}`, external: true };
+      const base = args.path.replace(/^node:/, "").split("/")[0]!;
+      // Mark every npm library + node builtin (and their subpaths) external — they must NOT be
+      // inlined (Bun.build miscompiles zod 4; Deno loads them correctly from npm:/node:). The exact
+      // specifier is rewritten in `rewriteExternals` below, because Bun keeps the original specifier
+      // for externals and ignores a path returned here.
+      if (externalNames.includes(base)) {
+        return { path: args.path, external: true };
       }
+      // Everything else (@pgxsinkit/* source, relative _shared imports) is bundled.
       return undefined;
     });
   },
 };
+
+const builtinSet = new Set(builtinModules);
+
+/**
+ * Rewrites the bundle's bare external specifiers to ones Deno resolves: npm libraries → pinned `npm:`,
+ * node builtins → the `node:` scheme. Bun externalizes these but leaves them bare, which the Edge
+ * runtime (Deno) rejects. Operates on the `from "…"` / `import("…")` clauses only.
+ */
+function rewriteExternals(code: string): string {
+  return code.replace(/(\bfrom\s*|\bimport\s*\(\s*)(["'])([^"']+)\2/g, (match, head, quote, spec) => {
+    const base = spec.replace(/^node:/, "").split("/")[0];
+    if (NPM_EXTERNALS[base]) {
+      const remainder = spec.slice(base.length); // keeps any `/subpath`
+      return `${head}${quote}${NPM_EXTERNALS[base]}${remainder}${quote}`;
+    }
+    if (builtinSet.has(base) && !spec.startsWith("node:")) {
+      return `${head}${quote}node:${spec}${quote}`;
+    }
+    return match;
+  });
+}
 
 async function buildOne(name: string): Promise<void> {
   const entrypoint = join(SOURCE_ROOT, name, "index.ts");
@@ -57,7 +98,7 @@ async function buildOne(name: string): Promise<void> {
     format: "esm",
     sourcemap: "none",
     minify: false,
-    plugins: [nodeProtocolPlugin],
+    plugins: [externalsPlugin],
   });
 
   if (!result.success) {
@@ -67,16 +108,28 @@ async function buildOne(name: string): Promise<void> {
     throw new Error(`Failed to bundle Edge function '${name}'.`);
   }
 
-  const [artifact] = result.outputs;
-  console.log(`✓ ${name} → ${outdir}/index.js (${artifact ? (artifact.size / 1024).toFixed(0) : "?"} KiB)`);
+  const outFile = join(outdir, "index.js");
+  const rewritten = rewriteExternals(readFileSync(outFile, "utf8"));
+  writeFileSync(outFile, rewritten);
+
+  const sizeKib = (Buffer.byteLength(rewritten) / 1024).toFixed(0);
+  console.log(`✓ ${name} → ${outFile} (${sizeKib} KiB)`);
+}
+
+function copyMainRouter(): void {
+  const dst = join(DIST_ROOT, "main");
+  mkdirSync(dst, { recursive: true });
+  copyFileSync(join(SOURCE_ROOT, "main", "index.ts"), join(dst, "index.ts"));
+  console.log(`✓ main → ${dst}/index.ts (raw, vendored official router)`);
 }
 
 async function main(): Promise<void> {
   rmSync(DIST_ROOT, { recursive: true, force: true });
-  for (const name of FUNCTIONS) {
+  copyMainRouter();
+  for (const name of BUNDLED) {
     await buildOne(name);
   }
-  console.log(`\nBundled ${FUNCTIONS.length} Edge functions into ${DIST_ROOT}/.`);
+  console.log(`\nPrepared ${BUNDLED.length + 1} Edge functions in ${DIST_ROOT}/.`);
 }
 
 await main();

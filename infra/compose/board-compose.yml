@@ -1,40 +1,50 @@
-# Board demo — a trimmed self-hosted Supabase + Electric stack (board ADR-0001).
+# Board demo — a TRIMMED but VERSION-MATCHED self-hosted Supabase + Electric stack (board ADR-0001).
 #
-# Separate from the toolkit harness (infra/compose/docker-compose.yml): the board runs on its OWN
-# database + ports so it can stand up alongside the integration lane without colliding. Trimmed to
-# what the demo exercises — db, auth (GoTrue), rest (PostgREST), meta + studio, kong (gateway),
-# functions (edge-runtime running board-write/board-sync), and electric. Dropped vs. full Supabase:
-# realtime, storage, imgproxy, analytics, vector, pooler (Storage/attachments are a board v2).
+# Mirrors the official Supabase self-hosted compose at a single matched release (image tags + their
+# UNMODIFIED init scripts in ./board/db-init = Supabase's own roles.sql + jwt.sql). We never modify a
+# Supabase-owned schema object — the board touches only the `public` schema (its drizzle migrations).
+# This is what lets the same board run unchanged against cloud Supabase (BaaS): there, Supabase owns
+# the platform; here we just stand up a faithful local mirror.
 #
-# Relative paths are resolved from THIS file's directory (infra/compose). Bring up with
-# `bun run infra:up` (passes --env-file board.env). Image tags track the official self-hosted compose
-# and may need periodic bumps; electric + postgres match the harness.
+# Trimmed vs. full self-hosted: dropped realtime, storage, imgproxy, analytics, vector, supavisor
+# (Storage/attachments are a board v2). Kept: db / auth / rest / meta + studio / kong / functions
+# (edge-runtime) + electric. Board-only ports so it coexists with the harness. Every service connects
+# as `postgres`/`authenticator`/`supabase_auth_admin` (passwords set to ${POSTGRES_PASSWORD} by the
+# image + the official roles.sql). Bring up with `bun run infra:up`.
 
 name: pgxsinkit-board
 
 services:
   db:
-    image: docker.io/supabase/postgres:17.6.1.116
+    image: docker.io/supabase/postgres:17.6.1.136
     container_name: board-db
-    # No entrypoint mask here (unlike the harness): the image's own init runs in full so the auth
-    # schema + standard roles exist. 99-board-roles.sql is ADDED (not masked over) to set service-role
-    # passwords + (re)assert the auth.uid()/role()/jwt() helpers the toolkit RLS reads.
+    # Supabase's OWN init scripts (vendored byte-unmodified), mounted at the SAME paths the official
+    # self-hosted compose uses. Order matters: the image's migrate.sh runs init-scripts/*.sql under
+    # `set -e`, so 99-roles.sql (which ALTERs supabase_functions_admin's password) MUST be preceded by
+    # 98-webhooks.sql, which creates that role. Omitting webhooks.sql makes roles.sql fail, which
+    # aborts migrate.sh before it runs the image's own migrations/ set — including the migration that
+    # hands auth.uid/role/email to supabase_auth_admin, which GoTrue needs to boot. webhooks.sql is
+    # self-contained (only needs pg_net, bundled in the image); we don't run DB webhooks, but it's the
+    # role's birthplace in the official chain. jwt.sql sets the database JWT GUCs.
     volumes:
-      - ./board/db-init/99-board-roles.sql:/docker-entrypoint-initdb.d/99-board-roles.sql:ro
+      - ./board/db-init/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:ro
+      - ./board/db-init/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:ro
+      - ./board/db-init/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:ro
     environment:
-      POSTGRES_USER: supabase_admin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: ${JWT_EXPIRY}
     ports:
       - "54322:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d ${POSTGRES_DB}"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
+      test: ["CMD-SHELL", "pg_isready -U postgres -h localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   auth:
-    image: docker.io/supabase/gotrue:v2.179.0
+    image: docker.io/supabase/gotrue:v2.189.0
     container_name: board-auth
     depends_on:
       db:
@@ -48,19 +58,20 @@ services:
       GOTRUE_SITE_URL: ${BOARD_SITE_URL}
       GOTRUE_URI_ALLOW_LIST: "*"
       GOTRUE_DISABLE_SIGNUP: "false"
-      GOTRUE_JWT_SECRET: ${JWT_SECRET}
-      GOTRUE_JWT_EXP: "3600"
-      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_ISSUER: ${BOARD_API_EXTERNAL_URL}/auth/v1
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
       # No mail server in the demo: confirm signups automatically so admin-API-seeded users log in.
       GOTRUE_MAILER_AUTOCONFIRM: "true"
-      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
     ports:
       - "54334:9999"
 
   rest:
-    image: docker.io/postgrest/postgrest:v12.2.12
+    image: docker.io/postgrest/postgrest:v14.12
     container_name: board-rest
     depends_on:
       db:
@@ -73,7 +84,7 @@ services:
       PGRST_DB_USE_LEGACY_GUCS: "false"
 
   meta:
-    image: docker.io/supabase/postgres-meta:v0.89.3
+    image: docker.io/supabase/postgres-meta:v0.96.6
     container_name: board-meta
     depends_on:
       db:
@@ -83,11 +94,11 @@ services:
       PG_META_DB_HOST: db
       PG_META_DB_PORT: "5432"
       PG_META_DB_NAME: ${POSTGRES_DB}
-      PG_META_DB_USER: supabase_admin
+      PG_META_DB_USER: postgres
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
 
   studio:
-    image: docker.io/supabase/studio:2025.06.30-sha-6f5982d
+    image: docker.io/supabase/studio:2026.06.03-sha-0bca601
     container_name: board-studio
     depends_on:
       - meta
@@ -100,11 +111,12 @@ services:
       SUPABASE_PUBLIC_URL: ${BOARD_API_EXTERNAL_URL}
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
     ports:
       - "54333:3000"
 
   kong:
-    image: docker.io/library/kong:2.8.1
+    image: docker.io/kong/kong:3.9.1
     container_name: board-kong
     depends_on:
       - auth
@@ -123,23 +135,24 @@ services:
       - "54331:8000"
 
   functions:
-    image: docker.io/supabase/edge-runtime:v1.69.12
+    image: docker.io/supabase/edge-runtime:v1.74.0
     container_name: board-functions
     depends_on:
       db:
         condition: service_healthy
-    # The main router (functions-dist/main) dispatches /board-write and /board-sync to their bundled
-    # workers. Bundles are produced by `bun run edge:build` into supabase/functions-dist.
-    command: ["start", "--main-service", "/home/deno/functions/main", "--port", "9000"]
+    # The vendored official main router (functions-dist/main) dispatches /board-write and /board-sync
+    # to their bundled workers. VERIFY_JWT=false: the board functions verify the GoTrue token
+    # themselves (_shared/auth.ts), keeping that the single, runtime-portable auth point.
+    command: ["start", "--main-service", "/home/deno/functions/main"]
     volumes:
       - ../../supabase/functions-dist:/home/deno/functions:ro
     environment:
       JWT_SECRET: ${JWT_SECRET}
+      VERIFY_JWT: "false"
       SUPABASE_URL: http://kong:8000
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
-      # The board functions read these directly (board-write → SUPABASE_DB_URL; board-sync → ELECTRIC).
-      SUPABASE_DB_URL: postgres://supabase_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       ELECTRIC_SHAPE_URL: http://electric:3000/v1/shape
       BOARD_ALLOWED_ORIGINS: ${BOARD_SITE_URL},http://localhost:5174
 
@@ -150,7 +163,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
       ELECTRIC_INSECURE: "true"
       # Preview feature the board's membership row-filters require (cross-table subquery `where`).
       ELECTRIC_FEATURE_FLAGS: allow_subqueries,tagged_subqueries
