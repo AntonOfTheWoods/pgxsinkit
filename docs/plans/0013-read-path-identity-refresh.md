@@ -126,7 +126,12 @@ Built in order, each phase its own `validate:full`-green commit on `develop`.
 - **`{}` re-resolves the async header.** Confirmed against real Electric: after re-auth, the proxy saw
   repeated forwards all carrying the freshly-resolved `Bearer <valid>` token (not the stale one), so
   returning `{}` does re-invoke the header function — no need to return `{ headers }`.
-- **The integration auth proxy must be `Bun.serve`.** The node:http `startFetchServer` helper relays
-  via `arrayBuffer()` + `setHeader`, which cannot faithfully proxy Electric's streaming shape
-  response — forwards returned but delivered no batch. The membership/asymmetric read proofs already
-  use `Bun.serve`; this proof does too.
+- **The integration auth proxy must return the web `Response` natively.** A handler served by
+  `Bun.serve` — directly, or via Hono (`Bun.serve({ fetch: app.fetch })`, which the
+  membership/asymmetric read proofs use) — relays `proxyElectricShapeRequest`'s streaming body +
+  headers faithfully. The node:http `startFetchServer` helper instead buffers via `arrayBuffer()` and
+  re-emits headers via `setHeader`, which mangles Electric's streaming shape response (forwards
+  returned but delivered no batch; `setHeader` can also choke on the `electric-schema` JSON header).
+  A node-`http`/`ServerResponse`-based server (raw node, Express) hits the same wall **unless** it
+  carefully streams the body and copies headers rather than buffering. So it is not "Bun.serve
+  specifically" — it is "a server that natively returns the web `Response`."
