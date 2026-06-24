@@ -14,6 +14,16 @@ Build order is dependency-first. Each phase ends `validate`-green; the cross-use
 fan-out / conflict / offline-converge proofs run in the Podman integration lane
 against real Postgres + Electric + the edge functions.
 
+## Docs review gate (runs at the end of every phase)
+
+Per [ADR-0006](../adr/0006-docs-dogfooding-gate.md), the board build is the
+toolkit's documentation dogfooding pass. Every phase's acceptance includes: triage
+the phase's entries in [`consumer-review.md`](../consumer-review.md) → update the
+Starlight content (`apps/docs/src/content/docs/`) and/or source JSDoc so a fresh
+consumer could build that phase from docs alone → `bun run --cwd apps/docs build`
+and verify the regenerated `llms.txt`/`llms-full.txt`. Fixes land in the toolkit
+docs, not the board.
+
 ## Toolkit dependencies (must be landed by the refactor session before the gated phase)
 
 The board's showcase features ride on toolkit capabilities currently in flight on
