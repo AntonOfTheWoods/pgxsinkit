@@ -8,8 +8,11 @@ everything. So `packages/board-schema` hand-authors its policies from the export
 primitives (`escapeSqlLiteral`, `pgPolicy`, `sql.raw`) on three composable
 predicates:
 
-- **admin** — `app_metadata.roles` contains `'admin'` (a `board_is_admin()` SQL
-  helper, reused by policies and the trigger below).
+- **admin** — `app_metadata.roles` contains `'admin'`, **inlined** as an `EXISTS`
+  over `current_setting('request.jwt.claims')` and reused verbatim by the trigger.
+  Deliberately _not_ a `board_is_admin()` SQL function: a `CREATE POLICY`
+  referencing a custom function would require that function to exist before the
+  generated migration runs, so inlining keeps the migration self-contained.
 - **member-of-team** — `team_id IN (SELECT team_id FROM team_member WHERE user_id = sub)`.
 - **channel-visibility** — the Channel is `global`, or its Team is one of mine.
 
@@ -34,9 +37,9 @@ single RLS `UPDATE` policy: a policy's `WITH CHECK` sees only the **new** row an
 `USING` only the **old** one — neither can compare `OLD.team_id` to `NEW.team_id`.
 WITH CHECK alone is insufficient (it blocks moving an Issue to a Team you're not
 in, but a Member of _two_ Teams could still move between them). So a **`BEFORE
-UPDATE` trigger** on `issue` raises when `team_id` changes and `board_is_admin()`
-is false. This makes the rule structural rather than dependent on the seed keeping
-Members single-Team.
+UPDATE` trigger** on `issue` raises when `team_id` changes and the caller is not an
+Admin (the same inline predicate the policies use). This makes the rule structural
+rather than dependent on the seed keeping Members single-Team.
 
 ## Considered Options
 
@@ -50,9 +53,10 @@ Members single-Team.
 
 ## Consequences
 
-- The board ships a small board-local policies module plus one migration carrying
-  `board_is_admin()` + the `issue` cross-team trigger — server authority, never
-  local, exactly what the Parity boundary anticipates.
+- The board ships a small board-local policies module; the table + RLS migration and
+  the `issue` cross-team trigger live in the board's own drizzle history
+  (`infra/board-drizzle`) — server authority, never local, exactly what the Parity
+  boundary anticipates.
 - A non-Admin cross-team move (only reachable by bypassing the Admin-only UI
   affordance) surfaces as a failed mutation, not a clean conflict — acceptable as
   defense-in-depth.

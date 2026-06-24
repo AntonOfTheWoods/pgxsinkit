@@ -10,6 +10,7 @@
     "build:public-packages": "bun scripts/build-public-packages.ts",
     "check": "bun run typecheck && bun run lint && bun run test",
     "check:fast": "bun run typecheck && bun run lint && bun run test:unit:fast",
+    "db:board:generate": "drizzle-kit generate --config=infra/board-drizzle.config.ts",
     "db:generate": "drizzle-kit generate --config=infra/drizzle.config.ts",
     "db:generate:governance": "bun scripts/generate-governance-migration.ts",
     "db:migrate": "bun --bun drizzle-kit migrate --config=infra/drizzle.config.ts",

@@ -18,7 +18,15 @@ import { pgPolicy, type PgRole } from "drizzle-orm/pg-core";
  * never local — the Parity boundary).
  */
 
-const ADMIN = "public.board_is_admin()";
+// Admin = `app_metadata.roles` contains 'admin'. **Inlined**, not a SQL helper function: a
+// `CREATE POLICY` that referenced a custom function would require that function to exist *before* the
+// policy migration runs — an ordering trap that makes the generated migration non-self-contained.
+// Reads `request.jwt.claims` (the same source as `auth.uid()`), which the Mutation applier sets
+// before applying a batch. The cross-team-move trigger reuses this predicate in PL/pgSQL.
+export const BOARD_ADMIN_PREDICATE_SQL =
+  "EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS r(role) WHERE r.role = 'admin')";
+
+const ADMIN = BOARD_ADMIN_PREDICATE_SQL;
 
 type Command = "select" | "insert" | "update" | "delete";
 

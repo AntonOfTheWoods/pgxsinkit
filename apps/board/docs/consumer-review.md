@@ -39,3 +39,16 @@ new material appears in the regenerated `llms-full.txt`).
    are server-assigned and rejected in client payloads. → **resolved**: the
    `start/getting-started` registry example now shows the managed-field block + the
    two-hard-requirements caution.
+
+## Phase 1b — board migrations (drizzle generate + cross-team trigger)
+
+7. **Custom-function-in-RLS ordering trap** — a `CREATE POLICY` (or trigger) that
+   references a custom SQL function requires that function to exist _before_ the
+   migration runs; with drizzle generating the table+policy migration first, a
+   `board_is_admin()` helper would have to be installed out-of-band. → **n/a-internal**
+   (not a pgxsinkit doc gap): the toolkit's own RLS builders **inline** the admin/owner
+   predicate over `current_setting('request.jwt.claims')` precisely to stay
+   self-contained, so a consumer using the builders never hits this. The board followed
+   suit and inlined its admin predicate (board ADR-0005). The "hand-author beyond the
+   builders" pointer added in Phase 1 finding 4 is the right home if this ever needs a
+   sentence.
