@@ -7,8 +7,8 @@
 # realtime, storage, imgproxy, analytics, vector, pooler (Storage/attachments are a board v2).
 #
 # Relative paths are resolved from THIS file's directory (infra/compose). Bring up with
-# `bun run infra:board:up` (passes --env-file board.env). Image tags track the official self-hosted
-# compose and may need periodic bumps; electric + postgres match the harness.
+# `bun run infra:up` (passes --env-file board.env). Image tags track the official self-hosted compose
+# and may need periodic bumps; electric + postgres match the harness.
 
 name: pgxsinkit-board
 

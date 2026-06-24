@@ -94,6 +94,6 @@ genuine ones plus a toolkit code fix.
 
 > Live shake-out (tracked, requires the container stack up): the exact edge-runtime
 > image tags, GoTrue/PostgREST env names, and **postgres.js running under Deno's node
-> compat** are verified by bringing the stack up (`bun run infra:board:up`) — the
+> compat** are verified by bringing the stack up (`bun run infra:up`) — the
 > static layer (bundles build to valid ESM, migrations generate, types/lint/format/tests
 > green) is all confirmed. Findings from the live run append here.

@@ -10,7 +10,7 @@
 
 # pgxsinkit
 
-`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> ElectricSQL -> PGlite` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/web`) and the integration + performance harness exist to prove and harden them. See [CONTEXT.md](./CONTEXT.md) for the canonical vocabulary.
+`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> ElectricSQL -> PGlite` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/board`), the minimal reference server (`apps/write-api`), and the integration + performance harness exist to prove and harden them. See [CONTEXT.md](./CONTEXT.md) for the canonical vocabulary.
 
 Canonical timestamps are stored as bigint microseconds since unix epoch and cross API/sync boundaries as decimal strings.
 
@@ -53,26 +53,33 @@ policy depends on the column).
 
 ## Workspace layout
 
-- `apps/web`: React + Vite demo UI using local PGlite.
-- `apps/write-api`: Bun + Hono write API.
-- `packages/contracts`: shared validation schemas and DTOs.
+- `apps/board`: the substantial demo — a Linear-style board + chat (React + Vite + Mantine, local PGlite) on a partial Supabase + Electric stack. Replaced the old generic `apps/web`.
+- `apps/write-api`: the minimal `@pgxsinkit/server` reference (Bun + Hono).
+- `packages/contracts`: shared validation schemas, registry definitions, and DTOs.
 - `packages/client`: offline client — local store, mutation runtime, and the internalized read-path sync engine (`src/sync/`, ADR-0009).
-- `packages/test-utils`: shared test helpers.
-- `infra/compose`: compose files for PostgreSQL and ElectricSQL.
-- `infra/drizzle`: drizzle migrations for PostgreSQL.
-- `tests/unit`: pure unit tests.
-- `tests/integration`: container-backed integration tests.
+- `packages/server`: the runtime-portable write API + Electric shape proxy (`createSyncServer`).
+- `packages/react`: React bindings (`createSyncClientHooks`).
+- `packages/schema`: the harness/reference demo registry (membership fixture).
+- `packages/board-schema`: the board demo's registry + hand-authored RLS.
+- `supabase/functions`: the board's Deno edge functions (`board-write` / `board-sync`); bundled by `bun run edge:build`.
+- `infra/compose`: compose files — `docker-compose.yml` (harness) and `board-compose.yml` (the board's partial Supabase stack).
+- `infra/drizzle`: harness drizzle migrations; `infra/board-drizzle`: the board's own migration history.
+- `tests/unit`: pure unit tests; `tests/integration`: container-backed integration tests.
 
 ## Quick start
+
+Run the **board demo** (the substantial example):
 
 1. `mise install`
 2. `bun install`
 3. `cp .env.example .env`
-4. `bun run infra:up`
-5. `bun run dev:api`
-6. `bun run dev:web`
+4. `bun run infra:up` — brings up the full board stack (partial Supabase + Electric), builds the edge functions, and applies the board's drizzle migration history
+5. `bun run seed:board` — GoTrue identities + fixtures
+6. `bun run dev:board`
 
-`bun run infra:up` now applies the latest committed infra/drizzle migration history, including governance and sync-function migrations.
+The board stack is self-contained on its own ports (gateway `54331`, db `54322`, electric `54330`), so it coexists with the harness. Studio is at `http://localhost:54333`.
+
+For the **minimal reference server** (`apps/write-api`) instead, use the harness stack: `bun run infra:harness:up` (PostgreSQL + Electric + the committed `infra/drizzle` history) → `bun run dev:api`. Integration and perf lanes stand up their own isolated stacks and depend on neither.
 
 ## Releasing
 
@@ -85,7 +92,7 @@ See [RELEASING.md](./RELEASING.md) for publishing the `@pgxsinkit/*` packages to
 3. Generate governance SQL when needed: `bun run db:generate:governance`.
 4. Regenerate sync function artifact when registry/strategy changes: `bun run sync:function:generate`.
 5. Review generated SQL under `infra/drizzle/`.
-6. Apply the committed migration history: `bun run db:migrate` (or `bun run infra:up`).
+6. Apply the committed migration history: `bun run db:migrate` (or `bun run infra:harness:up`). The board's own history applies via `bun run db:board:migrate` (or `bun run infra:up`).
 7. Commit governance and sync-function migrations alongside the related code changes; there is no separate apply step for them.
 
 See `docs/migrations.md` and `docs/function-artifacts.md`.
@@ -146,29 +153,18 @@ and applied to PostgreSQL in a single in-database PL/pgSQL function (`pgxsinkit_
 There is no selectable backend — the in-database bulk apply is the only strategy (see
 [docs/adr/0002](./docs/adr/0002-single-in-database-write-path.md)).
 
-Long-polling shape proxy requests may need a higher Bun idle timeout than the default 10 seconds.
+Long-polling shape proxy requests may need a higher Bun idle timeout than the default 10 seconds (the `apps/write-api` reference):
 
 - `WRITE_API_IDLE_TIMEOUT_SECONDS=120`
 
-To send batch writes from web client:
+On the board, the equivalent concern is the edge functions' wall-clock; `board-sync` is given an idle window above Electric's ~25s long-poll so live updates are not cut off (board ADR-0001).
 
-- `VITE_BATCH_WRITE_URL=http://localhost:3001`
+## Auth
 
-The web app reads `VITE_*` variables from the repository root `.env`, even when launched via `bun run dev:web`.
+Two demonstrations of the single `resolveAuthClaims` adapter both ingress paths share:
 
-If unset, stable client behavior still uses `writeUrl` for `POST /api/mutations`.
-
-## Demo auth lifecycle
-
-The demo includes an end-to-end auth simulation without external identity providers:
-
-- Web app identity selector: `none`, `user`, `admin`.
-- `user` and `admin` use fixed Supabase-style HS256 JWTs.
-- Client sends `Authorization: Bearer ...` for write and shape requests.
-- Write API validates demo JWTs and maps claims into `resolveAuthClaims`.
-- Write API exposes `/v1/electric-proxy`, forwarding to Electric and enforcing owner filters for protected tables (`authors`, `todos`) unless caller role is `admin`.
-
-If `DEMO_JWT_SECRET` is unset, the shared demo secret is used.
+- **Reference (`apps/write-api`)** — an end-to-end auth simulation with no external identity provider: fixed Supabase-style HS256 JWTs for `user` / `admin`, sent as `Authorization: Bearer …` on write and shape requests. The write API validates them into `resolveAuthClaims` and exposes `/v1/electric-proxy`, enforcing owner filters for protected tables unless the caller is `admin`. If `DEMO_JWT_SECRET` is unset, the shared demo secret is used.
+- **Board (`apps/board`)** — real **GoTrue** auth: identities are seeded through the GoTrue admin API and signed in with `signInWithPassword`; the edge functions verify the real access token (HS256, the project `JWT_SECRET`) in `resolveAuthClaims`. See [start/deploying-the-server](apps/docs/src/content/docs/start/deploying-the-server.md).
 
 ## Operations logging
 

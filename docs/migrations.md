@@ -59,7 +59,7 @@ and prod databases with sync-ready support functions.
 ## Environment rollout contract
 
 1. Dev:
-   - Use bun run infra:up to bootstrap infra and apply the latest committed infra/drizzle/ history.
+   - Use bun run infra:harness:up to bootstrap the reference infra and apply the latest committed infra/drizzle/ history. (The board demo bootstraps its own stack + history via bun run infra:up.)
 2. Staging:
    - Apply the exact migration set intended for prod, including the latest committed sync-function migration.
    - Run the contract integration suite before promotion.

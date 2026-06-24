@@ -21,13 +21,18 @@ ElectricSQL stack. Its job is twofold:
 It uses a generic example domain (authors, todos, projects). It is one _consumer_ of pgxsinkit — not
 pgxsinkit itself, and not any downstream product's data layer.
 
+The minimal reference (the `apps/write-api` Bun server) runs against the harness stack:
+
 ```bash
 mise install && bun install
 cp .env.example .env
-bun run infra:up    # PostgreSQL + Electric (with allow_subqueries,tagged_subqueries)
-bun run dev:api
-bun run dev:web
+bun run infra:harness:up   # PostgreSQL + Electric reference stack (allow_subqueries,tagged_subqueries)
+bun run dev:api            # the @pgxsinkit/server reference server
 ```
+
+The **substantial** demo is now `apps/board` (a Linear-style board + chat on a partial Supabase +
+Electric stack), which replaced the old generic `apps/web`. Run it with `bun run infra:up`
+(the full board stack) → `bun run seed:board` → `bun run dev:board`.
 
 ## The verification harness
 

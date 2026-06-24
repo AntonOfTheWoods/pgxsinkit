@@ -37,7 +37,7 @@ Run them by slice when possible:
 - `bun run test:integration:implementation` for lower-level implementation coverage
 - `bun run test:integration` for the full integration suite
 
-Use `bun run infra:up` only for manual local demo development. It applies the committed infra/drizzle migration history after infra becomes reachable. Integration scripts must not depend on or reuse that shared stack.
+Use `bun run infra:harness:up` only for manual local reference development (the `apps/write-api` minimal server). It applies the committed infra/drizzle migration history after infra becomes reachable. Integration scripts must not depend on or reuse that shared stack. (The substantial board demo uses its own stack via `bun run infra:up`.)
 
 ### Contract suites
 

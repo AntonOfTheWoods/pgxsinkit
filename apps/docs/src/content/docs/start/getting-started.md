@@ -187,14 +187,16 @@ and [Packages](/packages/) for the client entry points.
 
 ## Try the demo
 
-The repository's `apps/web` drives all of the above end-to-end against a local compose stack:
+The repository's `apps/board` (a Linear-style board + chat) drives all of the above end-to-end
+against a partial Supabase + Electric stack:
 
 ```bash
 mise install && bun install
 cp .env.example .env
-bun run infra:up      # PostgreSQL + Electric (with the required flag) via Podman compose
-bun run dev:api
-bun run dev:web
+bun run infra:up      # the full board stack (Supabase + Electric) via Podman compose
+bun run seed:board    # GoTrue identities + fixtures
+bun run dev:board
 ```
 
-See [Demo & harness](/demo-and-harness/) for what the demo and the verification suites are for.
+For the minimal `@pgxsinkit/server` reference instead, use `bun run infra:harness:up` (PostgreSQL +
+Electric) + `bun run dev:api`. See [Demo & harness](/demo-and-harness/) for what each is for.
