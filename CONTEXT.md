@@ -18,8 +18,10 @@ _Avoid_: "demo repository", "the harness" (those name parts of the repo, not the
 thing you ship), "framework".
 
 **Demo app**:
-The reference application (`apps/web`) that drives the toolkit end-to-end for a
-human to see. It is an exerciser, not the product.
+The reference application (`apps/board`, a Linear-style board + chat) that drives
+the toolkit end-to-end against a self-hosted Supabase + Electric stack for a human
+to see. It is an exerciser, not the product. (`apps/write-api` is the minimal
+server-only reference.)
 _Avoid_: calling it "pgxsinkit" — it is one consumer of pgxsinkit.
 
 **Harness**:

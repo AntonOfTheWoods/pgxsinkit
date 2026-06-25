@@ -92,6 +92,24 @@ export async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): P
   }
 }
 
+// Poll an HTTP endpoint until it answers with any non-5xx status — "the service is accepting
+// requests", not "the request succeeded" (a 401/404 still proves the service is up). Used to wait for
+// GoTrue through the gateway before seeding, since a healthy DB + open Kong port does not mean GoTrue
+// has finished booting its own auth-schema migrations.
+export async function waitForHttpOk(url: string, name: string, timeoutMs = 60_000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+      if (response.status < 500) return;
+    } catch {
+      // not up yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Timed out waiting for ${name} (${url}) to answer`);
+}
+
 // ─── Podman compose down ──────────────────────────────────────────────────────
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";

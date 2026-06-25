@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-import { waitForPgReady, waitForTcpService } from "./lib";
+import { waitForHttpOk, waitForPgReady, waitForTcpService } from "./lib";
 
 // `infra:up` — brings up the board demo stack (infra/compose/board-compose.yml, the substantial demo
 // that replaced apps/web) and applies the board's own drizzle migrations. The minimal toolkit harness
@@ -40,6 +40,11 @@ async function main(): Promise<void> {
   // Apply the board's tables + RLS + cross-team trigger + the registry's apply function. GoTrue runs
   // its own auth-schema migrations on first boot; the board only owns its public schema (Drizzle).
   run("bun", ["run", "db:board:migrate"], env);
+
+  // GoTrue boots its own auth-schema migrations after the DB is healthy, so an open Kong port does not
+  // mean the auth API answers yet. Wait for it through the gateway so an immediately-following
+  // `seed:board` (which provisions identities via the GoTrue admin API) does not race the boot.
+  await waitForHttpOk("http://localhost:54331/auth/v1/health", "board GoTrue");
 
   console.log("\nBoard stack is up:");
   console.log("  • Gateway (supabase-js SUPABASE_URL): http://localhost:54331");
