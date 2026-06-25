@@ -123,10 +123,37 @@ Splitting the write route and the shape proxy into two deployments (e.g. a `writ
   registers only the mutation route. Wrap with the path rewrite from step 2.
 - **sync** — call `proxyElectricShapeRequest(request, claims, { registry, electricUrl })` directly.
   No rewrite needed. Set the function's idle/wall-clock timeout **above** Electric's bounded
-  long-poll (~25s) so live updates are not cut off mid-cycle.
+  long-poll (~25s) so live updates are not cut off mid-cycle. If it is a **same-origin proxy with no
+  CDN**, also force `cache-control: no-store` on the response so the browser never serves a rotated
+  shape handle stale (the 409-loop fix in [Operating in production](/start/operating-in-production/)).
 
 Both import the same registry and share the same `resolveAuthClaims`, which is what keeps the two
 ingress points honest.
+
+### The gateway must speak HTTP/2 — one long-poll connection per shape
+
+Electric's client holds **one live long-poll connection open per synced shape**. A client that
+subscribes to six shapes therefore keeps six connections continuously busy. Browsers cap **HTTP/1.1 at
+~6 connections per origin**, so on a plain-HTTP gateway those long-polls consume every slot and the
+**write** request (which shares the origin) gets **Stalled in the browser's connection queue** — it is
+not even dispatched until a long-poll cycle frees a slot, adding seconds of latency that look like a
+slow server but are entirely client-side queuing.
+
+The fix is to serve the gateway over **HTTP/2** (or HTTP/3), which multiplexes every request over a
+single connection, so the per-origin cap never binds regardless of shape count. Any production-grade
+ingress already does this — Cloud Supabase, Electric Cloud, an istio/Envoy gateway, or any TLS
+reverse proxy. The one place it bites is a **local self-hosted stack served over plain `http://`**:
+browsers only negotiate HTTP/2 over TLS, so a plain-HTTP gateway is stuck on HTTP/1.1. The board demo
+fronts its kong gateway with a small TLS-terminating Caddy sidecar (h2 + h3) for exactly this reason —
+see `infra/compose/board-compose.yml`.
+
+<Aside type="caution" title="This only shows up with ≥~6 shapes over plain HTTP/1.1">
+  A demo with one or two shapes will not hit it; the symptom appears once concurrent shape long-polls
+  reach the browser's per-origin connection limit. Node and `curl` never reproduce it — they have no
+  per-host cap — so it is invisible to server-side benchmarks and only a real browser surfaces it. If
+  writes feel slow only in the browser and only once several shapes are live, check whether the gateway
+  is HTTP/2: in DevTools → Network, a stuck `write` request will show a long **Stalled** time.
+</Aside>
 
 <Aside type="note" title="Edge cold starts are a platform property, not a toolkit cost">
   On a serverless Edge platform a worker is suspended when idle and evicted after longer idle, so the

@@ -1,0 +1,110 @@
+---
+title: Operating in production
+description: The runtime gotchas a live pgxsinkit app hits — convergence cadence, edge cold starts, proxy caching, the browser connection budget, and the built-in latency instrumentation.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+The read and write primitives are fast, but a few **runtime and deployment** properties around them
+decide whether a live app _feels_ fast. None are toolkit bugs — they are how serverless edges, browser
+HTTP, and CDN-shaped caching behave — but every one of them was hit dogfooding the demo, so they are
+collected here with their fixes. If writes or sync feel slow in a real browser but your server
+benchmarks are fast, the cause is almost always on this page.
+
+## Convergence cadence: event-driven, with the interval as a fallback
+
+When you pass an `autoSync` trigger to `createSyncClient`, the client drives a `flush → reconcile` pass.
+The pass is **event-driven**: the client calls `requestPass()` the moment a mutation is enqueued, so a
+local write flushes to the server immediately — it does **not** wait for the trigger's next interval
+tick. The interval (`createBrowserConvergenceTrigger({ intervalMs })`, default **1.5s**) is therefore
+only a **fallback** for retries, recovery, and cross-tab wake-ups.
+
+Because the happy path is event-driven, you should make that fallback interval **long**. A short
+interval is the dominant idle cost: every PGlite query carries ~50ms of WASM overhead and serializes on
+the one worker thread, and an unconditional reconcile each tick fires PGlite's live-query notifications,
+re-running every mounted query. The toolkit already idle-skips an empty reconcile, but the cheapest idle
+board is still a rare interval — the board demo runs `intervalMs: 15_000`, taking idle CPU from ~70% of a
+core to ~2% with **no change to convergence latency** (latency is bounded by the Electric echo, not the
+interval).
+
+<Aside type="tip" title="Don't tie latency to the interval">
+  A common mistake is to shorten the interval to "make writes faster." It does nothing — writes already
+  flush on enqueue. Shortening it only burns idle CPU. Leave it long.
+</Aside>
+
+## Edge serverless cold starts
+
+On a serverless Edge platform a worker is suspended when idle and evicted after longer idle, so the
+**first write after a quiet period** pays a cold start while steady-state writes are instant. Measured on
+the self-hosted Supabase edge-runtime: a warm write applies in **~20ms**; a write to a worker suspended
+~15s pays **~0.45s** (a Postgres reconnect on resume); a write to a worker whose module cache is cold
+pays **~5.8s** (a fresh isolate re-imports the whole bundle). Drag the first card after the board sits
+idle and that cold worker is the entire delay — not the sync rail.
+
+This is a property of the **serverless deployment target**, not pgxsinkit: the same functions on a
+long-lived Bun or Deno process (one warm process, a pooled connection) or on a managed warm pool have no
+cold start. Two mitigations if you stay serverless:
+
+- **Keep the worker warm** with a periodic cheap request. The cheapest request that still reaches the
+  worker is a no-op write — an empty `{"mutations":[]}` POST, rejected at request validation _before_ any
+  DB work. A small sidecar pinging it every ~8s keeps writes at ~20ms after idle.
+- **Set the worker's wall-clock timeout above your longest held-open shape long-poll** (Electric's is
+  ~25s) so a live read subscription is not recycled mid-cycle, forcing a read-path reconnect. See
+  [Deploying the server](/start/deploying-the-server/).
+
+## Proxying Electric: force `cache-control: no-store`
+
+Electric tags shape responses with a long, CDN-oriented `cache-control`
+(`max-age=…, stale-while-revalidate=…`) that assumes a CDN keying on the full request URL. Behind a
+**same-origin proxy with no CDN**, the browser's HTTP cache instead serves those responses **stale** the
+moment a shape handle rotates server-side (a re-seed, a re-login, a restart). The client then loops on
+"expired shape handle" **409s** until it self-heals — a confusing, intermittent stall.
+
+The fix is one line in your shape-proxy function: force `cache-control: no-store` on the response so the
+browser never reuses a rotated shape. Resumption stays cheap because Electric's own offset/handle
+bookkeeping (persisted in the local store) is what makes it cheap — not the HTTP cache.
+
+```ts
+const response = await proxyElectricShapeRequest(request, claims, { registry, electricUrl });
+const headers = new Headers(response.headers);
+headers.set("cache-control", "no-store");
+return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+```
+
+## The browser connection budget (serve the gateway over HTTP/2)
+
+Electric's client holds **one live long-poll connection open per synced shape**. A client subscribing to
+six shapes keeps six connections continuously busy, and browsers cap **HTTP/1.1 at ~6 connections per
+origin** — so over plain HTTP those long-polls consume every slot and the **write** request (same origin)
+gets **Stalled in the browser's connection queue** for a whole long-poll cycle before it is even
+dispatched. Serve the gateway over **HTTP/2** (or HTTP/3), which multiplexes every request over one
+connection, so the cap never binds. This only bites a local stack served over plain `http://`; any
+production ingress (Cloud Supabase, Electric Cloud, an istio/Envoy gateway, a TLS reverse proxy) already
+speaks HTTP/2. Full detail and the symptom check are in
+[Deploying the server](/start/deploying-the-server/).
+
+## Debugging latency: `globalThis.__pgxsinkitDebug`
+
+`@pgxsinkit/client` ships opt-in, timestamped instrumentation that traces a write through every phase —
+exactly what localises a "writes are slow" problem to a single hop. It is **off by default** and adds
+nothing to a normal run; enable it from the console or before the client boots:
+
+```js
+globalThis.__pgxsinkitDebug = true; // then reproduce; filter the console to "pgxsinkit" + enable Verbose
+```
+
+Each line is stamped with a monotonic millisecond clock, so you read the **gaps** between phases
+directly:
+
+- `convergence pass requested` → `convergence flush` → `convergence reconcile` (with durations)
+- `board-write auth token resolved {ms}` (a stalling per-request `getSession()` shows up here)
+- `board-write responded {status, ms}` (a cold edge worker, or a browser connection stall, shows up here)
+- `sync received change batch from Electric` → `sync applied … {ms}` (the receive + local apply)
+- `live query updated → re-render` (the final UI hop)
+
+<Aside type="caution" title="Measure at the network boundary, not by polling PGlite">
+  Every PGlite query is ~50ms of WASM work on a single thread, so a tight `setInterval` that reads PGlite
+  to "watch" a value inflates the very latency it reports — a self-inflicted slowdown that repeatedly
+  masqueraded as a sync problem while dogfooding. Trust the instrumentation's network-boundary timings
+  (and a server-side `curl`) over a polling loop.
+</Aside>

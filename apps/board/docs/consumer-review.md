@@ -317,3 +317,21 @@ the very number it reports — this bit us repeatedly).
 
   Secondary, logged: reloading the board tab after editing a core client module (HMR full-reload while
   PGlite resumes a rotated shape handle) can spin a shape refetch loop to 100% — dev-only friction.
+
+- **"A write takes 6–13s to appear in the other browser" is the browser's HTTP/1.1 connection cap — not
+  the sync rail, and not even the edge cold start.** Per-phase client instrumentation
+  (`globalThis.__pgxsinkitDebug`, shipped opt-in in `@pgxsinkit/client`) localised it precisely: the
+  `board-write` POST itself measured **~13s**, while an isolated `curl` to the same endpoint was **~30ms**,
+  with a **13s gap carrying zero JS activity** — the `fetch` sat _Stalled in the browser's connection queue
+  before it was ever dispatched_. Electric's client holds **one long-poll connection per synced shape**,
+  and the board syncs **six** (the `TEAM_SCOPE` group's team/team_member/channel/issue, plus singleton
+  profile + message). Browsers cap **HTTP/1.1 at ~6 connections per origin** and only negotiate **HTTP/2
+  over TLS** — the demo ran on plain `http://`, so the six long-polls consumed every slot and `board-write`
+  (and chat sends, same origin) queued behind a whole long-poll cycle (~6–13s). h2/h3 multiplex every
+  request over **one** connection, so the cap never binds. This is a property of the **plain-HTTP/1.1
+  self-hosted gateway**, not pgxsinkit: a real deployment (istio, Cloud Supabase, Electric Cloud) already
+  serves h2 over TLS at the edge. Node and `curl` never reproduce it (no per-host cap) — only a real
+  browser does. Demo fix (infra only, see `infra/compose/board-compose.yml`): a `caddy` sidecar terminates
+  **TLS + HTTP/2 + HTTP/3** in front of kong, and the board's browser origin is the multiplexed front
+  (`https://localhost:54343`); writes drop back to ~50ms no matter how many shapes are subscribed. Prereq:
+  a trusted local cert (`mkcert -install` — QUIC/h3 in particular refuses an untrusted cert).

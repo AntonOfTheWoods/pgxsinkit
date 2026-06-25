@@ -192,11 +192,25 @@ against a partial Supabase + Electric stack:
 
 ```bash
 mise install && bun install
+mkcert -install       # one-time: trust the local CA so the browser accepts the gateway's TLS cert
 cp .env.example .env
 bun run infra:up      # the full board stack (Supabase + Electric) via Podman compose
 bun run seed:board    # GoTrue identities + fixtures
 bun run dev:board
 ```
+
+<Aside type="note" title="The board's gateway is served over HTTPS (HTTP/2) — mkcert is a prerequisite">
+  The browser holds one Electric long-poll connection **per synced shape**, and the board syncs six.
+  Over plain HTTP/1.1 those long-polls exhaust the browser's ~6-connections-per-origin cap and writes
+  starve behind them (see [Deploying the server → the gateway must speak HTTP/2](/start/deploying-the-server/)).
+  So the demo fronts its gateway with a TLS-terminating **HTTP/2 + HTTP/3** Caddy sidecar, and the
+  board's browser origin is `https://localhost:54343`. `infra:up` issues the cert with
+  [`mkcert`](https://github.com/FiloSottile/mkcert), but the local CA must be **trusted** first —
+  `mkcert -install` (one-time) — because a browser `fetch()` to an untrusted cert fails outright (no
+  click-through), and HTTP/3's QUIC refuses an untrusted cert entirely. Without mkcert the stack still
+  comes up on plain `http://localhost:54331` (used by the integration tests and seed scripts); only the
+  fast browser path is unavailable.
+</Aside>
 
 For the minimal `@pgxsinkit/server` reference instead, use `bun run infra:harness:up` (PostgreSQL +
 Electric) + `bun run dev:api`. See [Demo & harness](/demo-and-harness/) for what each is for.
