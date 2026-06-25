@@ -3,6 +3,7 @@ import { createRootRoute, createRoute, createRouter } from "@tanstack/react-rout
 import { AllRoute } from "./routes/all";
 import { HomeRoute } from "./routes/home";
 import { LoginRoute } from "./routes/login";
+import { MembersRoute } from "./routes/members";
 import { RootLayout } from "./routes/root";
 import { TeamBoardRoute } from "./routes/team-board";
 import { TeamChatRoute } from "./routes/team-chat";
@@ -39,7 +40,13 @@ const allRoute = createRoute({
   component: AllRoute,
 });
 
-const routeTree = rootRoute.addChildren([homeRoute, loginRoute, teamBoardRoute, teamChatRoute, allRoute]);
+const membersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/members",
+  component: MembersRoute,
+});
+
+const routeTree = rootRoute.addChildren([homeRoute, loginRoute, teamBoardRoute, teamChatRoute, allRoute, membersRoute]);
 
 export const router = createRouter({ routeTree });
 

@@ -192,3 +192,64 @@ exposed a real **toolkit convergence bug**:
     rows and fires only the trigger; it asserts the conflicted row is retired (it fails
     without the fix — the row orphans). Verified end-to-end on the board: "Keep mine" now
     clears the banner with no manual reconcile.
+
+## Phase 7 — chat write path + admin membership (creates, the second fan-out)
+
+Phase 7 is the demo's **first `create`** (every prior write was `issue.update`): a
+`message.create` (compose) and `team_member.create`/`.delete` (admin membership). Two
+real toolkit bugs fell out — both specific to a `create` on a table with an `authUid`
+managed field (`message.author_id`), a near-universal owner/author/created_by pattern no
+prior consumer or test had exercised. The membership add/remove + live subquery fan-out and
+the LWW message append consumed cleanly once the create path worked.
+
+16. **The optimistic overlay never stamped an `authUid` create-managed field → NOT NULL
+    violation on the very first create.** A `message.create` supplies only `{ id, channelId,
+body }` — `authorId` is an `authUid` managed field, so it is stripped from the create
+    input type and the server stamps it from `auth.uid()`. But the optimistic overlay row
+    (which the local thread renders this frame) is INSERTed with every projected column, and
+    `author_id` is `NOT NULL`, so the create threw `null value in column "author_id" of
+relation "message_overlay" violates not-null constraint`. The convention/governance fill
+    only covered `nowMicroseconds` timestamps, not `authUid`. → **ergonomics** (fixed
+    upstream, `packages/client/src/mutation.ts`): the optimistic record now stamps `authUid`
+    create-managed fields from the decoded JWT `sub` (the same value the server stamps), so
+    the row is attributed to the current user immediately and never flips on convergence; the
+    flushed payload still omits it (it is built from the original input, not the overlay), so
+    the server's managed-field-violation guard is satisfied. Resolved only when a create
+    needs it (a table with such a field), so tokenless registries pay no token lookup. New
+    unit regression (`overlay-state.test.ts`): a create omitting the `authUid` field stamps
+    the overlay from the subject and keeps it out of the journal payload.
+
+17. **The server's create-validation then required the same `authUid` field the client must
+    omit → every such create 400'd.** Even with the overlay filled, `board-write` rejected
+    the create: `createInsertSchema(table).parse(payload)` validates the FULL insert model,
+    which marks `author_id` (NOT NULL, no SQL DEFAULT) required — but the managed-field
+    -violation check (run first) rejects a payload that _includes_ a managed field. Omit it →
+    400 (validation); include it → 400 (violation): a `create` on any table with a
+    managed-on-create field lacking a column default was impossible. (Managed timestamps
+    slipped through only because their SQL DEFAULT already makes them optional in the insert
+    schema.) → **ergonomics** (fixed upstream, `packages/server/src/mutations/route.ts`):
+    `buildCreateValidationSchema` omits managed-on-create fields from the create schema (the
+    server stamps them after validation), so a NOT NULL managed column without a default is no
+    longer falsely required. New unit regression (`create-payload-validation.test.ts`):
+    accepts a payload omitting the `authUid` field, still rejects one omitting a genuinely
+    -required non-managed field. Verified end-to-end against the live stack: Alice's
+    `message.create` round-trips (200) and lands with `author_id` = her `sub`.
+
+**Verified through the real edge functions + Postgres + Electric** (the browser was wedged,
+so the write paths were exercised server-side): a `message.create` round-trips with the
+server-stamped author; a non-member posting into a team Channel is RLS-denied (no row); an
+admin `team_member.create`/`.delete` round-trips; and the **live subquery fan-out** holds —
+a live `board-sync` long-poll on Bob's `issue` shape received the 12 Growth issues the moment
+the admin added Bob to Growth (`snapshot-end → up-to-date`), then they left on removal. Note
+the membership change is a change to the _source_ of a subquery row-filter, distinct from
+Phase 5's cross-team move (a row's own `team_id`); both fan out, but only a **live-following**
+shape receives the subquery delta — a fresh `offset=-1` snapshot on the cached handle does
+not, which is worth a docs note on how subquery shapes propagate source-table changes.
+
+Content gaps for the docs (no source bug, but a fresh consumer would hit them): (a) a
+`create` only supplies non-managed fields — managed fields (`authUid`, `nowMicroseconds`) are
+stamped both optimistically (client) and authoritatively (server); the consumer never sends
+them; (b) `authUid` is filled in the optimistic overlay from the session `sub`, so an
+owner/author column renders attributed before convergence; (c) subquery row-filters propagate
+source-table membership changes to **live** subscribers (the board's add-member fan-out),
+which is the mechanism behind the team-scope consistency group's atomic appearance.

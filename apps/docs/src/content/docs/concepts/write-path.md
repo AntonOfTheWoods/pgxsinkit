@@ -49,6 +49,21 @@ Governance "managed fields" (e.g. `ownerId` via `authUid`, `createdAtUs`/`update
 `nowMicroseconds`) are written **by the database**, not the client. The write API strips any
 client-supplied values for these fields before applying.
 
+This shapes what you pass to a `create`. `SyncTableCreateInput` **omits** every managed-on-create
+field, so you supply only the non-managed columns — for a chat message that is just
+`{ id, channelId, body }`; `authorId`, `createdAt`, `updatedAt` are stamped server-side. Including a
+managed field in the payload is an error (the API rejects it), and the create-validation schema does
+**not** require them — a `NOT NULL` managed column (an owner/author with no SQL default) is still a
+valid create with the field absent.
+
+The optimistic overlay does not wait for the server, though. When you call `.create(...)`, the
+runtime fills the overlay row's managed fields locally so the UI renders a complete, attributed row
+this frame: `nowMicroseconds` fields take the client clock, and an `authUid` field takes the current
+session's subject (decoded from the auth token — the same `sub` the server stamps via `auth.uid()`).
+Because both sides resolve to the same identity, the value never flips when the server's row echoes
+back. The flushed payload still omits these fields (it is built from your original input, not the
+overlay), so the server remains authoritative.
+
 ## What this means for you
 
 - Don't look for a `WRITE_API_BACKEND` setting or a `backend` option — they don't exist.

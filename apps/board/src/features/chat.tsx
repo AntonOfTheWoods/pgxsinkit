@@ -1,6 +1,7 @@
-import { Avatar, Badge, Group, NavLink, Paper, ScrollArea, Stack, Text } from "@mantine/core";
-import { useState } from "react";
+import { Avatar, Badge, Button, Group, NavLink, Paper, ScrollArea, Stack, Text, Textarea } from "@mantine/core";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useMessageActions } from "../chat/use-message-actions";
 import { type ChannelRow, useChannelMessages, useChannels, useProfileMap, type ProfileRow } from "../data";
 
 function initials(name: string): string {
@@ -57,6 +58,15 @@ function MessageRowView({
 
 function ChannelMessages({ channelId, profiles }: { channelId: string; profiles: Map<string, ProfileRow> }) {
   const { messages, loading } = useChannelMessages(channelId);
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  // Keep the thread pinned to the newest message — on initial load and whenever a message arrives
+  // (an optimistic local post or a fan-out from another window). Length is the cheap, sufficient signal.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (viewport != null) viewport.scrollTo({ top: viewport.scrollHeight });
+  }, [messages.length]);
+
   if (loading && messages.length === 0) {
     return (
       <Text size="sm" c="dimmed">
@@ -72,7 +82,7 @@ function ChannelMessages({ channelId, profiles }: { channelId: string; profiles:
     );
   }
   return (
-    <ScrollArea.Autosize mah="62vh">
+    <ScrollArea.Autosize mah="56vh" viewportRef={viewportRef}>
       <Stack gap="md" pr="sm">
         {messages.map((message) => (
           <MessageRowView
@@ -88,8 +98,55 @@ function ChannelMessages({ channelId, profiles }: { channelId: string; profiles:
   );
 }
 
-// Read-only chat for a Team: the global Channel plus this Team's Channel (the only Channels visible to
-// a member here). Writing messages arrives in Phase 7.
+// Compose box pinned under the thread. Posts an optimistic Message into the active Channel (board
+// Phase 7); the local thread re-renders this frame and the post fans out to every other Channel member
+// on the next Electric live cycle. Enter sends, Shift+Enter inserts a newline. Mounted with a
+// `key={channelId}` by the parent, so switching Channels starts a fresh draft.
+function MessageComposer({ channelId, channelName }: { channelId: string; channelName: string }) {
+  const actions = useMessageActions();
+  const [body, setBody] = useState("");
+  const [sending, setSending] = useState(false);
+
+  const send = useCallback(async () => {
+    const trimmed = body.trim();
+    if (trimmed.length === 0 || sending) return;
+    setSending(true);
+    try {
+      await actions.post(channelId, trimmed);
+      setBody("");
+    } finally {
+      setSending(false);
+    }
+  }, [actions, body, channelId, sending]);
+
+  return (
+    <Group align="flex-end" gap="sm" wrap="nowrap" mt="md">
+      <Textarea
+        flex={1}
+        autosize
+        minRows={1}
+        maxRows={6}
+        radius="md"
+        placeholder={`Message ${channelName}`}
+        aria-label={`Message ${channelName}`}
+        value={body}
+        onChange={(event) => setBody(event.currentTarget.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            void send();
+          }
+        }}
+      />
+      <Button onClick={() => void send()} disabled={body.trim().length === 0} loading={sending}>
+        Send
+      </Button>
+    </Group>
+  );
+}
+
+// Chat for a Team: the global Channel plus this Team's Channel (the only Channels visible to a member
+// here). Each Channel is read live from the local store and writable via the composer (Phase 7).
 export function ChatView({ teamId }: { teamId: string }) {
   const { channels } = useChannels();
   const profiles = useProfileMap();
@@ -98,6 +155,7 @@ export function ChatView({ teamId }: { teamId: string }) {
   const visible: ChannelRow[] = channels.filter((channel) => channel.kind === "global" || channel.teamId === teamId);
   const active =
     activeId != null && visible.some((channel) => channel.id === activeId) ? activeId : (visible[0]?.id ?? null);
+  const activeChannel = visible.find((channel) => channel.id === active) ?? null;
 
   return (
     <Group align="flex-start" gap="lg" wrap="nowrap">
@@ -119,9 +177,12 @@ export function ChatView({ teamId }: { teamId: string }) {
           />
         ))}
       </Stack>
-      <Paper withBorder p="md" radius="md" style={{ flex: 1, minWidth: 0 }}>
-        {active != null ? (
-          <ChannelMessages channelId={active} profiles={profiles} />
+      <Paper withBorder p="md" radius="md" style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        {active != null && activeChannel != null ? (
+          <>
+            <ChannelMessages channelId={active} profiles={profiles} />
+            <MessageComposer key={active} channelId={active} channelName={activeChannel.name} />
+          </>
         ) : (
           <Text size="sm" c="dimmed">
             No channels.

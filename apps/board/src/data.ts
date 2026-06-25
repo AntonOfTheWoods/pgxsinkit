@@ -76,17 +76,20 @@ export function useProfileMap(): Map<string, ProfileRow> {
   }, [rows]);
 }
 
-export type MembershipRow = { teamId: string; userId: string };
+export type MembershipRow = { id: string; teamId: string; userId: string };
 
 /**
  * Every Team membership the store holds. The read path already scopes this to the signed-in identity
  * (a Member syncs the memberships of their own Teams; an Admin syncs all), so callers just group the
- * rows by `teamId` to build per-Team assignee lists — no extra filtering needed.
+ * rows by `teamId` to build per-Team assignee lists — no extra filtering needed. The membership `id`
+ * is the `team_member` PK, used by the Admin members page to remove a membership by key (Phase 7).
  */
 export function useTeamMemberships(): MembershipRow[] {
   const { rows } = useLiveDrizzleRows(
     (client) =>
-      client.drizzle.select({ teamId: teamMemberView.teamId, userId: teamMemberView.userId }).from(teamMemberView),
+      client.drizzle
+        .select({ id: teamMemberView.id, teamId: teamMemberView.teamId, userId: teamMemberView.userId })
+        .from(teamMemberView),
     [],
   );
   return rows;

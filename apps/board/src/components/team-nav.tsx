@@ -39,6 +39,14 @@ export function TeamNav() {
           onClick={() => void navigate({ to: "/all" })}
         />
       )}
+      {isAdmin && (
+        <NavLink
+          label="Members"
+          description="Add or remove Team members"
+          active={pathname === "/members"}
+          onClick={() => void navigate({ to: "/members" })}
+        />
+      )}
     </Stack>
   );
 }

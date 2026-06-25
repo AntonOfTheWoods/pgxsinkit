@@ -39,6 +39,22 @@ Without the flag, Electric rejects any subquery `where` with HTTP 400:
 The sync then fails **closed** — no rows stream. It never silently falls back to streaming unfiltered
 data. A blank client is the symptom of a missing flag; a data leak is not a failure mode here.
 
+## Fan-out when the membership changes
+
+The subquery is what makes membership fan-out _live_. When a row is added to the subquery's **source**
+table — a new `memberships` row granting a subject access to a container — Electric re-evaluates the
+dependent shapes and streams every newly-matched container row to that subject's **live** shape
+subscription. Removing the membership streams the deletes. This is the mechanism behind an
+"add-member → the whole container appears" moment: the new member's open client receives the
+container's rows without re-subscribing.
+
+The important qualifier is **live**. The delta arrives on an actively-followed shape (the long-poll a
+running client holds). A fresh `offset=-1` snapshot request that resumes an existing shape handle is
+served from the handle's materialised log and will not show a source-table change that post-dates it —
+so don't probe fan-out by re-fetching `offset=-1`; observe it on the live subscription (or force a
+brand-new shape). A toolkit consistency group ties the container's tables to a shared LSN frontier so
+the rows that fan out this way commit together, with no broken-join flicker.
+
 ## The enum→text rule
 
 A second consequence of Electric's where-grammar: a PostgreSQL `enum` column referenced in a shape
