@@ -5,6 +5,7 @@ import type { SyncRuntimeStatus } from "@pgxsinkit/contracts";
 
 import { createBoardSyncClient, SyncClientProvider } from "../board-client";
 import type { OfflineControl } from "./offline";
+import { createPgliteProfiler } from "./pglite-profiler";
 
 type BoardSyncClient = Awaited<ReturnType<typeof createBoardSyncClient>>["client"];
 
@@ -55,11 +56,17 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
         }
         created = next;
         setOffline(nextOffline);
-        // Dev-only console handle for poking the live client (stage a conflict, inspect convergence,
-        // flush on demand). Never shipped — gated on the Vite dev build. The Phase 8 Sync Inspector is
-        // the in-app surface; this is the REPL escape hatch behind it.
+        // Dev-only console handles. `__boardClient` pokes the live client (stage a conflict, inspect
+        // convergence, flush on demand); `__boardProfiler` is the aggregated PGlite query profiler
+        // (start()/stop() → which statements cost what — the managed alternative to PGlite's
+        // all-or-nothing logging). Never shipped — gated on the Vite dev build.
         if (import.meta.env.DEV) {
-          (globalThis as typeof globalThis & { __boardClient?: BoardSyncClient }).__boardClient = next;
+          const dev = globalThis as typeof globalThis & {
+            __boardClient?: BoardSyncClient;
+            __boardProfiler?: ReturnType<typeof createPgliteProfiler>;
+          };
+          dev.__boardClient = next;
+          dev.__boardProfiler = createPgliteProfiler(next.pglite);
         }
         setStatus(next.status);
         setClient(next);
@@ -72,7 +79,12 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
       active = false;
       if (created) void created.stop();
       if (import.meta.env.DEV) {
-        delete (globalThis as typeof globalThis & { __boardClient?: BoardSyncClient }).__boardClient;
+        const dev = globalThis as typeof globalThis & {
+          __boardClient?: BoardSyncClient;
+          __boardProfiler?: ReturnType<typeof createPgliteProfiler>;
+        };
+        delete dev.__boardClient;
+        delete dev.__boardProfiler;
       }
     };
   }, [userId]);
