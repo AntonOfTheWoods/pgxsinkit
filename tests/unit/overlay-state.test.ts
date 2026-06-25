@@ -100,6 +100,39 @@ const customServerVersionRegistry = defineSyncRegistry({
   }),
 });
 
+// A writable table with an `authUid` create-managed field that is NOT NULL (owner/author/created_by —
+// the board's `message.author_id`). The field is stripped from the create input (the server stamps
+// `auth.uid()`), so the optimistic overlay must fill it from the decoded auth subject or the overlay
+// INSERT violates NOT NULL. Regression: board Phase 7 finding (first `create` in the demo).
+const authOwnedRegistry = defineSyncRegistry({
+  authOwnedItems: defineSyncTable({
+    tableName: "auth_owned_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      ownerId: uuid("owner_id").notNull(),
+      body: varchar("body", { length: 200 }).notNull(),
+      createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
+    mode: "readwrite",
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [
+        { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+        { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
+        { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+      ],
+    },
+  }),
+});
+
+// Minimal unsigned JWT carrying just a `sub` claim (the runtime only decodes it; it never verifies).
+function fakeJwtWithSub(sub: string): string {
+  const encode = (value: object): string =>
+    btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub })}.`;
+}
+
 async function createOverlayTestContext() {
   const db = await createFreshTestPGlite();
   await db.exec(overlaySchemaSql);
@@ -261,6 +294,43 @@ describe("overlay state helpers", () => {
     );
     expect(rows.rows[0]?.modifiedAtUs).not.toBeNull();
     expect(Number(rows.rows[0]?.modifiedAtUs)).toBeGreaterThan(0);
+
+    await db.close();
+  });
+
+  it("stamps an authUid create-managed field into the optimistic overlay from the decoded subject — board Phase 7", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(generateLocalSchemaSql(authOwnedRegistry));
+    const subject = "01963227-d4c7-72db-b858-f89f6af8fc10";
+    const runtime = createMutationRuntime({
+      db,
+      registry: authOwnedRegistry,
+      writeUrl,
+      getAuthToken: async () => fakeJwtWithSub(subject),
+    });
+
+    // `ownerId` is an authUid create-managed field, so it is stripped from the create input. Before the
+    // fix the overlay INSERT passed an explicit NULL → NOT NULL violation; now it is filled from the
+    // decoded `sub` so the local row is attributed immediately.
+    await runtime.create("authOwnedItems", {
+      id: "01963227-d4c7-72db-b858-f89f6af8fc01",
+      body: "optimistic message",
+    });
+
+    const rows = await db.query<{ ownerId: string; overlayKind: string }>(
+      `SELECT owner_id AS "ownerId", overlay_kind AS "overlayKind" FROM auth_owned_items_overlay WHERE id = $1`,
+      ["01963227-d4c7-72db-b858-f89f6af8fc01"],
+    );
+    expect(rows.rows[0]).toEqual({ ownerId: subject, overlayKind: "pending_create" });
+
+    // The server stamps `auth.uid()` authoritatively, so the flushed payload must NOT carry the
+    // authUid field — the server rejects a payload that includes a server-managed field.
+    const journal = await db.query<{ payloadJson: string }>(
+      `SELECT payload_json AS "payloadJson" FROM auth_owned_items_mutations WHERE id = $1`,
+      ["01963227-d4c7-72db-b858-f89f6af8fc01"],
+    );
+    const payload = JSON.parse(journal.rows[0]!.payloadJson) as { value: Record<string, unknown> };
+    expect(payload.value).not.toHaveProperty("ownerId");
 
     await db.close();
   });

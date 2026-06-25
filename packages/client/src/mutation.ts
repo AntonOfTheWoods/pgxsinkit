@@ -175,6 +175,16 @@ interface TableContext {
    */
   managedNowMicrosecondsPropertyKeys: string[];
   updateManagedNowMicrosecondsPropertyKeys: string[];
+  /**
+   * Property keys of the table's `authUid` managed fields that apply on create (governance). The
+   * server stamps these from `auth.uid()` (the JWT `sub`), so they are stripped from the create input
+   * type and never sent in the flushed payload. But the optimistic overlay still needs a value — an
+   * `authUid` column is typically `NOT NULL` (an owner/author/created_by), so an unstamped overlay
+   * INSERT violates the constraint. The runtime fills these client-side from the decoded auth subject
+   * (the same `sub` the server will stamp), so the local row renders attributed immediately and never
+   * flips on convergence.
+   */
+  managedAuthUidCreatePropertyKeys: string[];
   recordIncludesOverlayState: boolean;
   columns: Array<{
     propertyKey: string;
@@ -222,6 +232,30 @@ export function nowMicroseconds(): string {
   return (BigInt(Date.now()) * 1000n).toString();
 }
 
+/**
+ * Best-effort decode of a JWT's `sub` claim, for stamping `authUid` managed fields into the optimistic
+ * overlay (the value the server will independently stamp from `auth.uid()`). This is **not** a
+ * verification — the token is trusted only for a local, optimistic projection that the server re-stamps
+ * authoritatively on apply; a forged `sub` could never make the server attribute the row differently.
+ * Returns `undefined` for a malformed token or a missing/non-string `sub`.
+ */
+export function decodeJwtSubject(token: string): string | undefined {
+  const segments = token.split(".");
+  if (segments.length < 2 || !segments[1]) {
+    return undefined;
+  }
+  try {
+    const normalized = segments[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const payload = JSON.parse(new TextDecoder().decode(bytes)) as { sub?: unknown };
+    return typeof payload.sub === "string" ? payload.sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function computeBackoffDelayMs(attemptCount: number) {
   const exponent = Math.max(attemptCount - 1, 0);
   return Math.min(1000 * 2 ** exponent, 30_000);
@@ -253,6 +287,14 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     return undefined;
   };
 
+  // The current auth subject (JWT `sub`) for stamping `authUid` create-managed fields into the
+  // optimistic overlay. Resolved only when a create needs it (a table with such a field), so
+  // tokenless registries never pay a token lookup.
+  const resolveAuthSubject = async (): Promise<string | undefined> => {
+    const token = await resolveAuthToken();
+    return token ? decodeJwtSubject(token) : undefined;
+  };
+
   const tableContexts = buildTableContexts(options.registry);
   const maxMutationAttempts = options.maxMutationAttempts ?? DEFAULT_MAX_MUTATION_ATTEMPTS;
   // The fingerprint (ADR-0004) stamped onto each enqueued mutation (ADR-0006). The runtime
@@ -282,7 +324,11 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     }
   };
 
-  const normalizeBatchItem = (item: MutationBatchItem<TRegistry>, order: number): NormalizedBatchItem => {
+  const normalizeBatchItem = (
+    item: MutationBatchItem<TRegistry>,
+    order: number,
+    authSubject: string | undefined,
+  ): NormalizedBatchItem => {
     const context = getTableContext(item.table as SyncTableName<TRegistry>);
     const mutationId = globalThis.crypto.randomUUID();
     const nowUs = nowMicroseconds();
@@ -290,7 +336,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     switch (item.kind) {
       case "create": {
         const strippedInput = stripReadModelOverlayFields(item.input);
-        const optimisticRecord = ensureRecord(createOptimisticRecordFromContext(context, strippedInput));
+        const optimisticRecord = ensureRecord(createOptimisticRecordFromContext(context, strippedInput, authSubject));
         const entityKey = buildEntityKeyFromRecord(context, optimisticRecord);
 
         return {
@@ -341,7 +387,16 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       return;
     }
 
-    const normalizedItems = items.map((item, index) => normalizeBatchItem(item, index));
+    // Resolve the auth subject once per batch, but only if a create actually needs it (a target table
+    // with an `authUid` create-managed field). Avoids a token lookup for every other write.
+    const needsAuthSubject = items.some(
+      (item) =>
+        item.kind === "create" &&
+        getTableContext(item.table as SyncTableName<TRegistry>).managedAuthUidCreatePropertyKeys.length > 0,
+    );
+    const authSubject = needsAuthSubject ? await resolveAuthSubject() : undefined;
+
+    const normalizedItems = items.map((item, index) => normalizeBatchItem(item, index, authSubject));
     const batchGroups = new Map<string, { context: TableContext; items: NormalizedBatchItem[] }>();
 
     for (const item of normalizedItems) {
@@ -1005,6 +1060,11 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     .map((field) => resolveManagedPropertyKey(field.column as string))
     .filter((propertyKey): propertyKey is string => propertyKey !== undefined);
 
+  const managedAuthUidCreatePropertyKeys = (entry.governance?.managedFields ?? [])
+    .filter((field) => field.strategy === "authUid" && field.applyOn.includes("create"))
+    .map((field) => resolveManagedPropertyKey(field.column as string))
+    .filter((propertyKey): propertyKey is string => propertyKey !== undefined);
+
   return {
     key,
     entry,
@@ -1027,6 +1087,7 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     serverVersionPropertyKey,
     managedNowMicrosecondsPropertyKeys,
     updateManagedNowMicrosecondsPropertyKeys,
+    managedAuthUidCreatePropertyKeys,
     recordIncludesOverlayState: "overlayTable" in (entry.clientProjection ?? {}),
     columns,
   };
@@ -1078,11 +1139,26 @@ function materializeColumnDefault(column: TableContext["columns"][number]["colum
   return { ok: false };
 }
 
-function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableContext, input: TCreate): TRecord {
+function createOptimisticRecordFromContext<TCreate, TRecord>(
+  context: TableContext,
+  input: TCreate,
+  authSubject?: string,
+): TRecord {
   const record = {
     ...(isRecord(input) ? input : {}),
   };
   const nowUs = nowMicroseconds();
+
+  // Stamp `authUid` create-managed fields (owner/author/created_by) with the current subject so the
+  // optimistic overlay row is attributed locally and satisfies the column's NOT NULL — the server
+  // independently stamps the same `auth.uid()` on apply, so the value never flips on convergence.
+  if (authSubject != null) {
+    for (const propertyKey of context.managedAuthUidCreatePropertyKeys) {
+      if (record[propertyKey] === undefined) {
+        record[propertyKey] = authSubject;
+      }
+    }
+  }
 
   if (hasProperty(context, "createdAtUs") && record["createdAtUs"] === undefined) {
     record["createdAtUs"] = nowUs;

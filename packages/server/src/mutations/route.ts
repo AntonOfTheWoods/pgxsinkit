@@ -150,7 +150,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
             .partial()
             .parse(normalizedPayload);
         } else if (mutation.kind === "create") {
-          createMutationInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
+          buildCreateValidationSchema(syncEntry).parse(normalizedPayload);
         }
         // delete has no payload to validate
       } catch (error) {
@@ -515,6 +515,28 @@ function sanitizeRestrictedFields(batch: BatchMutationRequest, registry: SyncTab
       };
     }),
   };
+}
+
+/**
+ * The zod schema used to validate a `create` payload. Managed-on-create fields (`authUid` /
+ * `nowMicroseconds`) are stamped by the server AFTER validation, so the client correctly omits them —
+ * and {@link findManagedFieldViolations} already rejects a payload that includes them. They are
+ * omitted from the insert schema so a NOT NULL managed column without a SQL DEFAULT (e.g. an `authUid`
+ * author/owner/created_by) is not falsely required. (A column carrying a DEFAULT is already optional
+ * in the drizzle insert schema; this also covers a managed column that has none.)
+ */
+export function buildCreateValidationSchema(entry: SyncTableEntry) {
+  const createSchema = createMutationInsertSchema(entry.table as AnyPgTable);
+  const managedCreateKeys = getManagedFieldsForOperation(entry, "create").map((field) => field.propertyKey);
+  if (managedCreateKeys.length === 0) {
+    return createSchema;
+  }
+  // The omit-mask keys are derived from governance at runtime, so they cannot be narrowed to the
+  // schema's literal-key mask type — cast through the parameter type.
+  const omitMask = Object.fromEntries(managedCreateKeys.map((key) => [key, true as const])) as Parameters<
+    typeof createSchema.omit
+  >[0];
+  return createSchema.omit(omitMask);
 }
 
 function getManagedFieldsForOperation(
