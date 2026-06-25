@@ -1,13 +1,17 @@
 {
   "name": "@pgxsinkit/server",
   "version": "0.0.0",
+  "keywords": [
+    "tanstack-intent"
+  ],
   "bin": {
     "pgxsinkit-generate": "src/cli/generate.ts"
   },
   "files": [
     "dist",
     "src",
-    "README.md"
+    "README.md",
+    "skills"
   ],
   "type": "module",
   "main": "./dist/index.js",

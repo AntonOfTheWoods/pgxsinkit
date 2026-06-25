@@ -1,0 +1,99 @@
+---
+name: core
+description: >-
+  Load when writing or reviewing code that uses @pgxsinkit/* (client, server, contracts, react) — the
+  offline-first sync toolkit for the Postgres -> ElectricSQL -> PGlite read path and the client -> write
+  API -> Postgres write path. Teaches the mental model the source does not make obvious: the two paths
+  are separate and asymmetric, there is exactly one write path (an in-database apply function, not
+  per-table CRUD), the Electric subquery flag is mandatory and fails closed, local PGlite schema is not
+  full DDL parity, and writable tables must declare a conflict policy plus managed fields. Load this
+  before wiring sync, defining a registry, or debugging "writes don't appear" / "no rows stream".
+metadata:
+  type: core
+  library: "@pgxsinkit/client"
+  library_version: "0.1.32"
+  source: https://pgxsinkit.github.io/llms-full.txt
+---
+
+# Using pgxsinkit correctly
+
+pgxsinkit is a **toolkit**, not a database, a framework, or the demo app. The `@pgxsinkit/*` packages
+are the product: `contracts` (the registry + shared types), `server` (the write API + Electric shape
+proxy), `client` (local PGlite store + mutation runtime + convergence), and `react` (hooks). A consumer
+installs these and wires them; they do not "run pgxsinkit".
+
+## The one idea everything else follows from: two separate, asymmetric paths
+
+- **Read path:** Postgres → ElectricSQL → a server-side shape **proxy** (ownership-filtered) → local
+  **PGlite**. Reads are served from PGlite.
+- **Write path:** client stages an optimistic local write → flushes a batch to the **write API** → one
+  **in-database apply function** (`pgxsinkit_apply_mutations`) applies it under RLS → Postgres.
+
+**Writes do not travel back to the writer through Electric.** The loop closes through Postgres: your
+write lands in Postgres, then streams back to _every_ subscriber (including you) as a normal Electric
+change, which clears the optimistic overlay. Do not look for a write to "come back" on the write
+channel, and do not try to write through Electric — Electric is read-only here.
+
+## There is exactly one write path
+
+There is no per-table CRUD API and no selectable backend. Every mutation — create, update, delete —
+goes through `POST /api/mutations` and is applied by the single in-database function. You provision that
+function once from your registry with the `pgxsinkit-generate` CLI (a drizzle-kit migration). Do not
+invent REST endpoints per table; do not write to Postgres tables directly from the client.
+
+## Non-negotiables (each fails closed or throws)
+
+1. **The Electric subquery flag is mandatory.** Run Electric with
+   `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`. Without it, sync **fails closed** — no
+   rows stream — which looks like a bug but is a missing flag.
+2. **Writable tables have two hard requirements.** `defineSyncRegistry` throws unless every `readwrite`
+   table declares **both** a server-version managed field (a `nowMicroseconds`-on-update column,
+   conventionally `updated_at_us`, that optimistic convergence keys on) **and** a `conflictPolicy`
+   (`reject-if-stale` | `last-write-wins`). There is no silent default — a silent last-write-wins is the
+   exact data loss the choice exists to surface.
+3. **Managed fields are server-assigned.** Fields stamped by `authUid` / `nowMicroseconds` are set by the
+   apply function; the write API **rejects** a client payload that includes them. Never send them.
+4. **Enum columns in a shape `where` must be cast to `text`** — `"role"::text = 'manager'`, not
+   `"role" = 'manager'`. The column stays an enum everywhere else. This is because **Electric**, not
+   Postgres, evaluates the shape filter.
+
+## Authorization runs in two engines — derive both from one predicate
+
+A row must never be readable-but-unwritable (or the reverse). The two paths enforce auth in different
+engines, so the subject is referenced two ways:
+
+- **Write path — RLS in Postgres:** policies use `auth.uid()` / `current_setting('request.jwt.claims')`;
+  the applier sets the claims before applying a batch.
+- **Read path — the shape `rowFilter`:** the proxy builds the Electric `where` and **Electric** runs it,
+  so a `customWhere` filters on the **literal** `claims.sub` (escaped with `escapeSqlLiteral`), enum
+  cast to `text`.
+
+Use `buildSupabaseOwnerOrAdminNativePolicies` / `buildSupabaseMembershipNativePolicies` for the common
+owner/membership shapes; compose your own from `pgPolicy` + the exported predicate builders for anything
+beyond them (e.g. collaborative any-member writes). Keep the read filter and the RLS policy derived from
+the same predicate so they cannot drift.
+
+## Local PGlite schema is not full DDL parity
+
+The local store generates enums, tables, the overlay, the journal, and convergence triggers — **not**
+RLS, arbitrary triggers/functions, or managed-field defaults, and it does not enforce CHECK / FK /
+UNIQUE the way Postgres does. Treat Postgres as the source of truth for integrity; do not assume a
+constraint that holds server-side also holds in PGlite.
+
+## Common mistakes
+
+- Expecting an optimistic write to echo back on the write channel — it returns through Electric.
+- Forgetting the Electric subquery flag, then debugging "no rows" as a code bug.
+- Omitting `conflictPolicy` (throws) or sending a managed field in a write payload (rejected).
+- Comparing an enum without `::text` in a shape filter.
+- Writing directly to Postgres tables / building per-table CRUD instead of using the one write path.
+- Assuming PGlite enforces every Postgres constraint.
+
+## Where to look
+
+- Concepts: the two paths, read path, write path, Electric subqueries, local-schema DDL parity, and
+  timestamps (microsecond BIGINT, decimal strings across the boundary).
+- For deployment and runtime/operational behavior (cold starts, convergence cadence, the HTTP/2
+  connection budget, the `globalThis.__pgxsinkitDebug` latency instrumentation), load the `operating`
+  skill.
+- Full prose: <https://pgxsinkit.github.io/llms-full.txt>.
