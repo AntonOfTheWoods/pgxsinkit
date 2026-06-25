@@ -36,6 +36,7 @@ export {
   createConvergenceDriver,
   createIntervalConvergenceTrigger,
 } from "./convergence";
+export { syncDebug, timeAsync } from "./debug";
 export type { LocalStoreVersionEvent };
 
 export type ClientPGlite = PGliteWithLive &

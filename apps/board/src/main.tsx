@@ -8,6 +8,14 @@ import { BoardClientProvider } from "./board/board-client-provider";
 import { router } from "./router";
 import { theme } from "./theme";
 
+// Dev-only: turn on the toolkit's opt-in sync/convergence instrumentation so the console shows the
+// per-phase timing of a write (enqueue → convergence pass → board-write → Electric echo → apply →
+// live-query re-render). Filter the console to "pgxsinkit" and enable Verbose to read it; flip off at
+// runtime with `globalThis.__pgxsinkitDebug = false`. Never on in a production build.
+if (import.meta.env.DEV) {
+  (globalThis as { __pgxsinkitDebug?: boolean }).__pgxsinkitDebug = true;
+}
+
 // Auth gate for the whole app. The router (and its routes) only mount inside `BoardClientProvider`
 // when there is a session, so every authenticated route can rely on the live sync client; the
 // unauthenticated tree still mounts the router so `/login` renders (and other routes redirect to it).

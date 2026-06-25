@@ -15,6 +15,8 @@
  * stays a manual, user-initiated primitive ("retry my failed writes now").
  */
 
+import { syncDebug, timeAsync } from "./debug";
+
 /** The mechanism primitives a convergence pass schedules. */
 export interface ConvergenceClient {
   flush: () => Promise<void>;
@@ -77,10 +79,14 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions): Conv
       if (!disposed) {
         queued = true;
       }
+      // The signal that mattered most for latency: a write asked to converge but a pass was already
+      // running, so this one coalesces and waits for the current pass to finish before it flushes.
+      syncDebug("convergence pass coalesced (one already running)", { disposed, queued });
       return;
     }
 
     if (!options.trigger.shouldConverge()) {
+      syncDebug("convergence pass skipped (shouldConverge=false: offline or backgrounded)");
       return;
     }
 
@@ -88,8 +94,8 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions): Conv
     let error: unknown = null;
     const pass = (async () => {
       try {
-        await options.client.flush();
-        await options.client.reconcile();
+        await timeAsync("convergence flush", () => options.client.flush());
+        await timeAsync("convergence reconcile", () => options.client.reconcile());
       } catch (passError) {
         error = passError;
       }
@@ -126,6 +132,7 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions): Conv
       await currentPass;
     },
     requestPass: () => {
+      syncDebug("convergence pass requested (event-driven, e.g. local write enqueued)");
       void runPass();
     },
   };

@@ -53,6 +53,7 @@ import {
   resolveServerVersionColumnName,
 } from "@pgxsinkit/contracts";
 
+import { syncDebug } from "./debug";
 import {
   assertValidMutationTransition,
   classifyFailureStatus,
@@ -1745,6 +1746,10 @@ async function flushBatch(
   }
 
   if (pending.length === 0) {
+    // If a write just enqueued and requested a pass, but this flush sees nothing, the pass raced the
+    // journal commit (or everything is already in-flight/backed-off) — the write then waits for a
+    // later pass. Worth seeing explicitly when chasing flush latency.
+    syncDebug("flushBatch: no send-eligible mutations this pass");
     return {
       processedCount: 0,
       affectedContexts: [],
@@ -1752,6 +1757,8 @@ async function flushBatch(
       conflictedMutationIds,
     };
   }
+
+  syncDebug("flushBatch sending to board-write", { count: pending.length });
 
   // Mark all as sending.
   const sentAtUs = nowMicroseconds();
@@ -1799,9 +1806,17 @@ async function flushBatch(
   const batchMutationUrl = resolveBatchMutationUrl(batchWriteUrl);
 
   try {
+    // Resolve the auth token and the network round-trip separately: in the board, `getAuthToken` calls
+    // `supabase.auth.getSession()` per send, which can itself stall (token refresh) and would otherwise
+    // be invisibly folded into "the write was slow".
+    const authStart = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const authToken = await getAuthToken?.();
+    const fetchStart = typeof performance !== "undefined" ? performance.now() : Date.now();
+    syncDebug("board-write auth token resolved", { ms: Math.round(fetchStart - authStart) });
+
     let response = await fetch(batchMutationUrl, {
       method: "POST",
-      headers: buildRequestHeaders(await getAuthToken?.()),
+      headers: buildRequestHeaders(authToken),
       body: jsonStringifyPayload({ mutations }),
     });
 
@@ -1813,10 +1828,16 @@ async function flushBatch(
       });
     }
 
+    const fetchEnd = typeof performance !== "undefined" ? performance.now() : Date.now();
+    syncDebug("board-write responded", { status: response.status, ms: Math.round(fetchEnd - fetchStart) });
+
     if (response.ok) {
       const responseJson = (await response.json()) as BatchMutationAck;
       responseOk = true;
       acksByMutationId = new Map(responseJson.acks.map((ack) => [ack.mutationId, ack]));
+      syncDebug("board-write acks", {
+        acks: responseJson.acks.map((ack) => `${ack.mutationId.slice(0, 8)}:${ack.status}`),
+      });
     } else {
       const text = await response.text();
       throw new MutationRequestError(

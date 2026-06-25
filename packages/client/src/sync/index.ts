@@ -6,6 +6,7 @@ import type { Extension, PGliteInterface } from "@electric-sql/pglite";
 
 import { type ApplyStrategy, quoteIdentifier } from "@pgxsinkit/contracts";
 
+import { syncDebug } from "../debug";
 import { computeRetryDelayMs } from "../mutation";
 import {
   applyBulkDeletesToTable,
@@ -467,6 +468,14 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       if (debug) {
         console.log("received messages", messages.length);
       }
+      // Receive-path latency probe: a batch carrying real change rows is the moment Electric delivered
+      // a write to this subscriber (the writer's own echo, or another browser's edit fanning in). The
+      // gap from here to the commit finishing is the local apply cost.
+      const changeCount = messages.reduce((n, message) => (isChangeMessage(message) ? n + 1 : n), 0);
+      if (changeCount > 0) {
+        syncDebug("sync received change batch from Electric", { changes: changeCount });
+      }
+      const commitStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
 
       messages.forEach((message) => {
         if (isChangeMessage(message)) {
@@ -500,6 +509,10 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       // stream awaits this callback, so awaiting the (coalesced) commit is the natural backpressure
       // that bounds the buffer — replacing the old fire-and-forget commit + `setTimeout(0)` race.
       await enqueueCommit();
+      if (changeCount > 0) {
+        const elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - commitStartedAt;
+        syncDebug("sync applied change batch to local store", { changes: changeCount, ms: Math.round(elapsed) });
+      }
     }, onError);
 
     streams.push({

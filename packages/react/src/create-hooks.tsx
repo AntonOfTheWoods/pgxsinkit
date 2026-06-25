@@ -1,7 +1,7 @@
 import type { LiveQuery, LiveQueryResults } from "@electric-sql/pglite/live";
 import { createContext, type DependencyList, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
-import type { ClientPGlite, SyncClient } from "@pgxsinkit/client";
+import { type ClientPGlite, type SyncClient, syncDebug } from "@pgxsinkit/client";
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { remapLiveRow, type SelectedFields } from "./remap-live-row";
@@ -87,7 +87,12 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
           liveQuery = registered;
           setState({ rows: registered.initialResults.rows, loading: false, error: null });
           listener = (results) => {
-            if (active) setState({ rows: results.rows, loading: false, error: null });
+            if (active) {
+              // The final receive-path hop: PGlite's live query re-ran (a synced/overlay change landed)
+              // and React is about to re-render with the new rows.
+              syncDebug("live query updated → re-render", { rows: results.rows.length });
+              setState({ rows: results.rows, loading: false, error: null });
+            }
           };
           registered.subscribe(listener);
           return undefined;
@@ -185,7 +190,12 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
           liveQuery = registered;
           setState({ rows: mapRows(registered.initialResults.rows), loading: false, error: null });
           listener = (results) => {
-            if (active) setState({ rows: mapRows(results.rows), loading: false, error: null });
+            if (active) {
+              // The final receive-path hop: PGlite's live query re-ran (a synced/overlay change landed)
+              // and React is about to re-render with the new rows.
+              syncDebug("live query updated → re-render", { rows: results.rows.length });
+              setState({ rows: mapRows(results.rows), loading: false, error: null });
+            }
           };
           registered.subscribe(listener);
           return undefined;
