@@ -1,5 +1,6 @@
 import { eq, isNotNull, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
+import { authUid } from "drizzle-orm/supabase";
 
 /**
  * Hand-authored board RLS (board ADR-0005). The board is collaborative — any Member may edit any
@@ -9,9 +10,12 @@ import { pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
  * Admin bypass.
  *
  * Predicates are built from the **real Drizzle columns** (passed in from each table's `extras`
- * callback) with Drizzle operators (`or`/`eq`/`isNotNull`), so column references are type-safe and
- * rename-tracked. Only the irreducibly-Postgres bits stay `sql`: `auth.uid()`, the membership helper
- * `board_member_team_ids()`, and the Admin claims check — none of which has a Drizzle operator.
+ * callback) with Drizzle operators (`or`/`eq`/`isNotNull`) and inlined literals via `.inlineParams()`
+ * (`eq(kind, "global").inlineParams()` — a bound value would emit a `$n` that CREATE POLICY cannot
+ * carry), so column references and values are type-safe and rename-tracked. Only the irreducibly-
+ * Postgres bits stay `sql`: the membership helper `board_member_team_ids()` and the Admin claims check.
+ * `auth.uid()` comes from `authUid` (drizzle-orm/supabase), which emits `(select auth.uid())` — the
+ * Supabase RLS performance idiom (evaluated once per statement, not per row).
  *
  * Subject is `auth.uid()` (the JWT `sub`); membership is `board_member_team_ids()` — a SECURITY
  * DEFINER helper (its own migration) that reads `team_member` with RLS bypassed, so a membership
@@ -38,7 +42,9 @@ export const BOARD_ADMIN_PREDICATE_SQL =
   "EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS r(role) WHERE r.role = 'admin')";
 
 const ADMIN = sql.raw(BOARD_ADMIN_PREDICATE_SQL);
-const AUTH_UID = sql`auth.uid()`;
+// `authUid` (drizzle-orm/supabase) emits `(select auth.uid())`, not bare `auth.uid()` — the Supabase
+// RLS performance idiom: the scalar subquery is evaluated once per statement (InitPlan), not per row.
+const AUTH_UID = authUid;
 
 type Command = "select" | "insert" | "update" | "delete";
 
@@ -90,7 +96,7 @@ export function buildTeamPolicies(role: PgRole, id: AnyColumn) {
  * `message` policies' `channel` sub-select resolves against now that channel RLS is enabled.
  */
 export function buildChannelPolicies(role: PgRole, kind: AnyColumn, teamId: AnyColumn) {
-  const visibleOrAdmin = or(eq(kind, sql`'global'`), memberOfTeam(teamId), ADMIN)!;
+  const visibleOrAdmin = or(eq(kind, "global").inlineParams(), memberOfTeam(teamId), ADMIN)!;
   return [policy("channel_select", "select", role, visibleOrAdmin, { using: true })];
 }
 
@@ -131,7 +137,7 @@ export function buildMessagePolicies(
   authorId: AnyColumn,
   channel: AnyPgTable & { id: AnyColumn; kind: AnyColumn; teamId: AnyColumn },
 ) {
-  const channelVisible = sql`${channelId} in (select ${channel.id} from ${channel} where ${or(eq(channel.kind, sql`'global'`), memberOfTeam(channel.teamId))})`;
+  const channelVisible = sql`${channelId} in (select ${channel.id} from ${channel} where ${or(eq(channel.kind, "global").inlineParams(), memberOfTeam(channel.teamId))})`;
   const visibleOrAdmin = or(channelVisible, ADMIN)!;
   const authorOrAdmin = or(eq(authorId, AUTH_UID), ADMIN)!;
   return [

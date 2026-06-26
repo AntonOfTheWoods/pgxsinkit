@@ -1,7 +1,7 @@
 import { and, eq, getTableName, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
 
-import { escapeSqlLiteral, quoteSqlLiteral } from "./sql-identifier";
+import { escapeSqlLiteral } from "./sql-identifier";
 
 type SupabaseOwnerOrAdminPolicyKind = "select" | "insert" | "update" | "delete";
 
@@ -80,9 +80,9 @@ function buildOwnerOrAdminPolicyName(tableName: string, command: SupabaseOwnerOr
 // Shared predicate leaves (used by both policy families). RLS is the *write* path
 // (Postgres), so columns may serialize qualified — unlike the Electric read `where`,
 // which needs bare columns. The only bits that stay raw `sql` are genuinely-Postgres
-// expressions with no Drizzle operator: the JWT-subject `current_setting(...)::type`,
-// the admin-roles `EXISTS`, and inlined literals (`eq(col, value)` would parameterize,
-// which `CREATE POLICY` DDL cannot carry).
+// expressions with no Drizzle operator: the JWT-subject `(select current_setting(...)::type)`
+// and the admin-roles `EXISTS`. Literal values use `eq(col, value).inlineParams()` so the
+// value is inlined into the DDL — a bare `$n` is something `CREATE POLICY` cannot carry.
 // ---------------------------------------------------------------------------
 
 // The governed table name (for policy identifiers) derived from a built Drizzle column, so renaming
@@ -101,10 +101,12 @@ function tableNameForColumn(column: AnyColumn, label: string): string {
 
 // The JWT subject as a Postgres expression (irreducibly raw: `current_setting` + cast). Used as the
 // right-hand side of `eq(ownerColumn, subject)` — eq splices an SQL fragment verbatim (no bound
-// param), so the DDL carries the literal expression, not a `$n` CREATE POLICY cannot bind.
+// param), so the DDL carries the literal expression, not a `$n` CREATE POLICY cannot bind. Wrapped in
+// a scalar subquery — the Supabase RLS performance idiom: the stable `current_setting` expression is
+// evaluated once per statement (InitPlan), not once per row.
 function buildSubjectSql(subjectCastType: string): SQL {
   assertTypeName(subjectCastType, "subjectCastType");
-  return sql.raw(buildSubjectSqlText(subjectCastType));
+  return sql.raw(`(select ${buildSubjectSqlText(subjectCastType)})`);
 }
 
 function buildSubjectSqlText(subjectCastType: string): string {
@@ -133,13 +135,6 @@ function buildAdminRoleExistsSqlText(adminRoleName: string): string {
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = '${escapeSqlLiteral(adminRoleName)}'
   )`;
-}
-
-// A bare SQL literal (`false`, `'manager'`) for an `eq` right-hand side. `eq(col, value)` would
-// parameterize `value` to `$n`; `eq(col, sql\`…\`)` inlines it — required for CREATE POLICY DDL.
-const FALSE_LITERAL = sql`false`;
-function textLiteral(value: string): SQL {
-  return sql.raw(quoteSqlLiteral(value));
 }
 
 function normalizePredicateOptions(options: SupabaseOwnerOrAdminPredicateOptions = {}) {
@@ -213,12 +208,12 @@ export const supabaseOwnerOrAdminDefaults = {
 // (not name strings), so the policy tracks the schema — a column or table rename is a
 // compile error, and the governed table name is *derived* from the container column
 // (no redundant `tableName` to drift). Predicate structure is built with Drizzle
-// operators (`and`/`or`/`eq`); only the irreducibly-Postgres leaves stay `sql`: the
-// `IN (subquery)` containment (Drizzle's `inArray` cannot wrap a raw subquery), the
-// `current_setting(...)::type` JWT-subject expression, and the inlined `'manager'` /
-// `false` literals (a value passed to `eq` would parameterize, which `CREATE POLICY`
-// DDL cannot carry). Columns serialize qualified (`"work_items"."workspace_id"`) —
-// fine for Postgres RLS (this is the write path, unlike Electric's bare-column rule).
+// operators (`and`/`or`/`eq`, with `.inlineParams()` on the `'manager'` / `false` literals so
+// they inline instead of becoming a `$n` CREATE POLICY cannot carry); only the irreducibly-Postgres
+// leaves stay `sql`: the `IN (subquery)` containment (Drizzle's `inArray` cannot wrap a raw subquery)
+// and the `(select current_setting(...)::type)` JWT-subject expression (wrapped in a scalar subquery —
+// the Supabase per-statement-eval RLS perf idiom). Columns serialize qualified
+// (`"work_items"."workspace_id"`) — fine for Postgres RLS (the write path, unlike Electric's bare rule).
 // ---------------------------------------------------------------------------
 
 type MembershipPolicyKind = "select" | "insert" | "update" | "delete";
@@ -295,7 +290,7 @@ function membershipMatch(cols: NormalizedMembershipColumns, subject: SQL, requir
   const subjectIsMember = eq(cols.membershipSubjectColumn, subject);
   const where =
     requireManager && cols.managerRoleColumn
-      ? and(subjectIsMember, eq(cols.managerRoleColumn, textLiteral(cols.managerRoleValue)))!
+      ? and(subjectIsMember, eq(cols.managerRoleColumn, cols.managerRoleValue).inlineParams())!
       : subjectIsMember;
 
   return sql`${cols.containerColumn} in (select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${where})`;
@@ -315,8 +310,8 @@ function membershipWriteGate(
   gate: SupabaseMembershipWriteGateColumns,
   subject: SQL,
 ): SQL {
-  const unlocked = sql`${cols.containerColumn} in (select ${gate.containerPkColumn} from ${gate.containerTable} where ${eq(gate.containerLockColumn, FALSE_LITERAL)})`;
-  const notMuted = sql`${cols.containerColumn} in (select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${and(eq(cols.membershipSubjectColumn, subject), eq(gate.membershipMutedColumn, FALSE_LITERAL))})`;
+  const unlocked = sql`${cols.containerColumn} in (select ${gate.containerPkColumn} from ${gate.containerTable} where ${eq(gate.containerLockColumn, false).inlineParams()})`;
+  const notMuted = sql`${cols.containerColumn} in (select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${and(eq(cols.membershipSubjectColumn, subject), eq(gate.membershipMutedColumn, false).inlineParams())})`;
   return and(or(unlocked, membershipMatch(cols, subject, true))!, notMuted)!;
 }
 
