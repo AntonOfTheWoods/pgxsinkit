@@ -190,13 +190,17 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
 - **Write path — RLS in Postgres:** policies use `auth.uid()` /
   `current_setting('request.jwt.claims')`; the applier sets the claims before applying a batch.
 - **Read path — the shape `rowFilter`:** the proxy builds the Electric shape `where` and
-  **Electric** runs it, not Postgres — so a `customWhere` filters on the **literal** `claims.sub`
-  (escaped with `escapeSqlLiteral`), with any enum cast to `text`.
+  **Electric** runs it, not Postgres — so a `customWhere` returns a Drizzle `SQL` fragment built from
+  the table's columns: reference each column through `c()` (a bare identifier, as Electric requires)
+  and bind `claims.sub` as a `$n` param rather than hand-escaping it, with any enum cast to `text`.
+  Return `DENY_ALL` to block all rows, or `null` to bypass filtering.
 
 For RLS, `@pgxsinkit/contracts` ships `buildSupabaseOwnerOrAdminNativePolicies` and
-`buildSupabaseMembershipNativePolicies` for the owner and membership shapes; for anything beyond
-them (e.g. collaborative any-member writes), compose your own from `pgPolicy` + the exported
-predicate builders.
+`buildSupabaseMembershipNativePolicies` for the owner and membership shapes — they take **Drizzle
+columns** and derive the table from them, so call them inside `defineSyncTable`'s `extras: (t) => …`
+callback. The read filter and the write policy build from the same Drizzle columns, so they cannot
+silently drift. For anything beyond them (e.g. collaborative any-member writes), compose your own
+from `pgPolicy` + Drizzle operators (`and`/`or`/`eq`).
 
 </Aside>
 

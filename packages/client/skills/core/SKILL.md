@@ -64,14 +64,16 @@ engines, so the subject is referenced two ways:
 
 - **Write path — RLS in Postgres:** policies use `auth.uid()` / `current_setting('request.jwt.claims')`;
   the applier sets the claims before applying a batch.
-- **Read path — the shape `rowFilter`:** the proxy builds the Electric `where` and **Electric** runs it,
-  so a `customWhere` filters on the **literal** `claims.sub` (escaped with `escapeSqlLiteral`), enum
-  cast to `text`.
+- **Read path — the shape `rowFilter`:** the proxy builds the Electric `where` and **Electric** runs it, so
+  a `customWhere` returns a Drizzle `SQL` fragment — reference columns through `c()` (bare, as Electric
+  needs) and bind `claims.sub` as a `$n` param (no hand-escaping); enum cast to `text`; `DENY_ALL` blocks
+  all rows.
 
 Use `buildSupabaseOwnerOrAdminNativePolicies` / `buildSupabaseMembershipNativePolicies` for the common
-owner/membership shapes; compose your own from `pgPolicy` + the exported predicate builders for anything
-beyond them (e.g. collaborative any-member writes). Keep the read filter and the RLS policy derived from
-the same predicate so they cannot drift.
+owner/membership shapes — they take **Drizzle columns**, so call them in `defineSyncTable`'s `extras`
+callback; compose your own from `pgPolicy` + Drizzle operators for anything beyond them (e.g. collaborative
+any-member writes). Build the read filter and the RLS policy from the same Drizzle columns so they cannot
+drift.
 
 ## Local PGlite schema is not full DDL parity
 

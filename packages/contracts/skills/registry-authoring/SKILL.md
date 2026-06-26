@@ -62,22 +62,47 @@ independently stamps these, so a client value would either be overwritten or rej
 
 ## Read-path filtering: `customWhere` runs in Electric, not Postgres
 
-A table's `shape.rowFilter` builds the Electric `where`. **Electric** evaluates it, so it filters on the
-**literal** `claims.sub` (escape with `escapeSqlLiteral`), and any **enum column must be cast to text** —
-`"role"::text = 'manager'`, not `"role" = 'manager'`. The column stays an enum everywhere else.
+A table's `shape.rowFilter.customWhere` builds the Electric shape `where`. **Electric** evaluates it (not
+Postgres), so **return a Drizzle `SQL` fragment built from the table's columns** — reference each column
+through `c(column)` and embed request-derived values directly: they become **bound `$n` params**, never
+hand-escaped literals.
 
-## RLS: derive read and write from one predicate
+```ts
+import { c, DENY_ALL } from "@pgxsinkit/contracts";
 
-Authorization runs in two engines (Postgres RLS for writes; the Electric `where` for reads). Derive both
-from the same predicate so a row can never be readable-but-unwritable (or the reverse):
+function widgetsReadFilter(claims) {
+  if (isAdmin(claims)) return null; // null = no filter (all rows visible)
+  if (!claims.sub) return DENY_ALL; // sql`false` — the deny-all sentinel (no rows visible)
+  return sql`${c(widgets.ownerId)} = ${claims.sub}`; // claims.sub is a bound $1 param
+}
+```
 
-- Common shapes: `buildSupabaseOwnerOrAdminNativePolicies` and `buildSupabaseMembershipNativePolicies`
-  (from `@pgxsinkit/contracts`).
-- Beyond them (e.g. collaborative any-member writes): compose your own from `pgPolicy` + the exported
-  predicate builders. Inline the predicate (e.g. an `EXISTS` over `current_setting('request.jwt.claims')`)
-  rather than referencing a not-yet-created SQL function — `CREATE POLICY` needs the function to exist
-  first. For "compare OLD vs NEW" rules (e.g. immutability of a column), RLS cannot help (`WITH CHECK`
-  sees only NEW, `USING` only OLD) — use a `BEFORE UPDATE` trigger.
+Two Electric where-grammar rules: columns must be **plain** (unqualified) — `c()` emits the bare name
+(`"owner_id"`), never the Drizzle-default qualified `"widgets"."owner_id"` (Electric rejects that); and an
+**enum column must be cast to text** — `${c(widgets.role)}::text = 'manager'`. Subqueries must be
+self-contained (not correlated). Returning a raw **string** is the escape hatch — escape any embedded
+value yourself with `escapeSqlLiteral` (a string is NOT escaped for you); return `DENY_ALL` (not `"1 = 0"`)
+to block all rows.
+
+## RLS: derive read and write from the same Drizzle columns
+
+Authorization runs in two engines (Postgres RLS for writes; the Electric `where` for reads). Build both
+from the **same Drizzle columns** so a row can never be readable-but-unwritable (or the reverse) through a
+column rename or a typo:
+
+- Common shapes: `buildSupabaseOwnerOrAdminNativePolicies({ role, ownerColumn })` and
+  `buildSupabaseMembershipNativePolicies({ role, containerColumn, membershipTable, … })` (from
+  `@pgxsinkit/contracts`). They take **real Drizzle columns** and derive the governed table name from
+  them, so call them inside `defineSyncTable`'s `extras: (t) => …` callback (where the columns carry their
+  table), not the `policies:` array.
+- Beyond them (e.g. collaborative any-member writes): compose your own with `pgPolicy` + Drizzle operators
+  (`and`/`or`/`eq`) over the columns. Drop to `sql` only for genuinely-Postgres leaves (`auth.uid()`, a
+  SECURITY DEFINER membership helper, a `current_setting('request.jwt.claims')` admin check) and for
+  inlined literals — pass a literal through an `sql` fragment, because a bare value handed to `eq` would
+  parameterize and `CREATE POLICY` DDL cannot carry a `$n`. Inline such a predicate rather than
+  referencing a not-yet-created SQL function — `CREATE POLICY` needs it to exist first. For "compare OLD
+  vs NEW" rules (column immutability), RLS cannot help (`WITH CHECK` sees only NEW, `USING` only OLD) —
+  use a `BEFORE UPDATE` trigger.
 
 ## Provision the apply function from the registry
 
@@ -94,9 +119,11 @@ bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
 
 - Omitting `conflictPolicy` or the server-version field on a `readwrite` table (throws).
 - Putting a managed field (`updated_at_us`, owner) in a client write payload (rejected).
-- Comparing an enum without `::text`, or filtering on a non-literal subject, in a `rowFilter`.
-- Letting the read filter and RLS policy diverge instead of deriving both from one predicate.
-- Referencing a custom SQL function in `CREATE POLICY` before it exists (inline the predicate instead).
+- In a `customWhere`: comparing an enum without `::text`, qualifying a column (use `c()` for a bare ref),
+  or hand-escaping a value into a string instead of binding it via a Drizzle `sql` fragment.
+- Letting the read filter and RLS policy diverge instead of building both from the same Drizzle columns.
+- Calling the native policy builders in the `policies:` array (they need `extras: (t) => …` to derive the
+  table from the columns), or referencing a custom SQL function in `CREATE POLICY` before it exists.
 
 For the surrounding model (two paths, one write path, fail-closed subquery flag), load the `core` skill
 from `@pgxsinkit/client`. Full prose: <https://pgxsinkit.github.io/start/getting-started/>.
