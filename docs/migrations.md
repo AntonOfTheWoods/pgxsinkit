@@ -86,7 +86,16 @@ and prod databases with sync-ready support functions.
 2. Expected behavior: the apply function succeeds with deferred checks under DEFERRABLE FK, so an
    out-of-order batch (child before parent, both in one flush) commits cleanly.
 
+## Regenerating the demo & integration migrations
+
+The `infra/drizzle/` and `infra/board-drizzle/` histories target **ephemeral** databases (the demo
+stacks + the integration/perf harness, recreated fresh each run). Regenerating them is entirely the
+agent's job and needs no database and no maintainer step — the full procedure, and the reasons there is
+nothing to apply by hand, are in [docs/runbooks/regenerate-migrations.md](runbooks/regenerate-migrations.md).
+
 ## Remaining implementation steps
 
-1. Add CI checks to fail when the sync-function migration is stale relative to registry changes.
+1. ~~Add CI checks to fail when the sync-function migration is stale relative to registry changes.~~
+   Done (ADR-0018): the apply function is fingerprinted, `sync:function:check` runs in CI, and the
+   server rejects a mismatched function at startup.
 2. Add a release runbook for rollback behavior after partial deployment failures.
