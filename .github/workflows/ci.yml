@@ -15,6 +15,10 @@ jobs:
           bun-version: 1.3.14
       - run: bun install
       - run: bun run validate:full
+      # ADR-0018: fail the build if a committed sync-function migration no longer matches the
+      # registry + applier codegen it is generated from (drift the server also rejects at startup).
+      - name: Apply-function migrations match the registry (ADR-0018 drift check)
+        run: bun run sync:function:check
 
   # The documentation proves the product interface (ADR-0008): the docs site (with its
   # TypeDoc API reference) must build, and a packed downstream fixture must install the
