@@ -31,18 +31,6 @@ function normalizeSqlText(sqlText: string): string {
   return sqlText.replace(/\s+/g, " ").trim();
 }
 
-function nativeSqlToText(value: NativeSqlExpression | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-
-  return normalizeSqlText(
-    value.queryChunks
-      .map((chunk) => ("value" in chunk && Array.isArray(chunk.value) ? chunk.value.join("") : ""))
-      .join(""),
-  );
-}
-
 // Render a composed Drizzle SQL fragment (operators + columns + nested sql) to its real DDL text.
 // The hand-rolled nativeSqlToText only joins `sql.raw` string chunks; a fragment built from columns
 // needs the dialect to qualify and serialize it.
@@ -117,65 +105,57 @@ describe("contracts supabase RLS helpers", () => {
     expect(predicate).toContain("assigned_role.role_name_value = 'team''lead'");
   });
 
-  it("builds native Drizzle policies that keep command semantics and predicate parity", () => {
+  it("builds native Drizzle owner-or-admin policies from a column, deriving the table name", () => {
     const role = pgRole("member");
-    const predicate = normalizeSqlText(
-      buildSupabaseOwnerOrAdminPredicateSqlText({
-        ownerSqlColumn: "tenant_id",
-        adminRoleName: "maintainer",
-      }),
+
+    // The builder takes the real owner column now; the governed table name (projects) is derived from
+    // it, and the predicate serializes with the qualified column + inlined admin role, no bound params.
+    const projects = pgTable(
+      "projects",
+      {
+        id: uuid("id").primaryKey(),
+        tenantId: uuid("tenant_id"),
+      },
+      (t) => buildSupabaseOwnerOrAdminNativePolicies({ role, ownerColumn: t.tenantId, adminRoleName: "maintainer" }),
     );
 
-    const policies = buildSupabaseOwnerOrAdminNativePolicies({
-      tableName: "projects",
-      role,
-      ownerSqlColumn: "tenant_id",
-      adminRoleName: "maintainer",
-    }) as NativePolicy[];
-
     const byCommand = Object.fromEntries(
-      policies.map((policy) => [
+      readTablePolicies(projects).map((policy) => [
         policy.for,
         {
           name: policy.name,
           mode: policy.as,
           role: nativeRoleToName(policy.to),
-          using: nativeSqlToText(policy.using),
-          withCheck: nativeSqlToText(policy.withCheck),
+          using: renderSql(policy.using),
+          withCheck: renderSql(policy.withCheck),
         },
       ]),
     );
 
-    expect(byCommand).toEqual({
-      select: {
-        name: "projects_select_owner_or_admin",
-        mode: "permissive",
-        role: "member",
-        using: predicate,
-        withCheck: null,
-      },
-      insert: {
-        name: "projects_insert_owner_or_admin",
-        mode: "permissive",
-        role: "member",
-        using: null,
-        withCheck: predicate,
-      },
-      update: {
-        name: "projects_update_owner_or_admin",
-        mode: "permissive",
-        role: "member",
-        using: predicate,
-        withCheck: predicate,
-      },
-      delete: {
-        name: "projects_delete_owner_or_admin",
-        mode: "permissive",
-        role: "member",
-        using: predicate,
-        withCheck: null,
-      },
+    // The owner column is qualified (write path = Postgres RLS), the admin role is inlined.
+    const ownerQualified = '"projects"."tenant_id" =';
+    const adminInlined = "assigned_role.role_name_value = 'maintainer'";
+    const assertPredicate = (text: string | null) => {
+      expect(text).toContain(ownerQualified);
+      expect(text).toContain(adminInlined);
+      expect(text).not.toMatch(/\$\d/);
+    };
+
+    expect(byCommand["select"]).toMatchObject({
+      name: "projects_select_owner_or_admin",
+      mode: "permissive",
+      role: "member",
+      withCheck: null,
     });
+    assertPredicate(byCommand["select"]?.using ?? null);
+
+    // insert checks WITH CHECK only; delete USING only; update both — the command semantics.
+    expect(byCommand["insert"]?.using).toBeNull();
+    assertPredicate(byCommand["insert"]?.withCheck ?? null);
+    assertPredicate(byCommand["update"]?.using ?? null);
+    assertPredicate(byCommand["update"]?.withCheck ?? null);
+    assertPredicate(byCommand["delete"]?.using ?? null);
+    expect(byCommand["delete"]?.withCheck).toBeNull();
   });
 
   it("gates membership INSERT/UPDATE on write-state but leaves SELECT/DELETE open", () => {

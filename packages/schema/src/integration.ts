@@ -113,11 +113,7 @@ const rlsTodosSyncEntry = defineSyncTable({
     ownerId: uuid("owner_id").default(sql`auth.uid()`),
     updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
-  policies: buildSupabaseOwnerOrAdminNativePolicies({
-    tableName: "rls_todos",
-    role: authenticatedRole,
-    ownerSqlColumn: "owner_id",
-  }),
+  extras: (t) => buildSupabaseOwnerOrAdminNativePolicies({ role: authenticatedRole, ownerColumn: t.ownerId }),
   mode: "readwrite",
   conflictPolicy: "last-write-wins",
   governance: {

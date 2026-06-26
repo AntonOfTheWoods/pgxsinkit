@@ -1,92 +1,40 @@
 import { describe, expect, it } from "bun:test";
 
-import { getTableConfig } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 
-import { buildSupabaseOwnerOrAdminPredicateSqlText } from "@pgxsinkit/contracts";
 import { authorsTable, todosTable } from "@pgxsinkit/schema";
-
-type NativeSqlChunk = {
-  value?: string[];
-};
-
-type NativeSqlExpression = {
-  queryChunks: NativeSqlChunk[];
-};
 
 type NativePolicy = {
   name: string;
   as: string;
   for: string;
   to: string | { name: string } | Array<string | { name: string }>;
-  using?: NativeSqlExpression;
-  withCheck?: NativeSqlExpression;
+  using?: SQL;
+  withCheck?: SQL;
 };
 
-type NormalizedPolicyShape = {
-  name: string;
-  mode: string;
-  command: string;
-  roles: string[];
-  using: string | null;
-  withCheck: string | null;
-};
+const dialect = new PgDialect();
 
 function normalizeSqlText(sqlText: string): string {
   return sqlText.replace(/\s+/g, " ").trim();
 }
 
-function nativeSqlToText(value: NativeSqlExpression | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-
-  const raw = value.queryChunks
-    .map((chunk) => ("value" in chunk && Array.isArray(chunk.value) ? chunk.value.join("") : ""))
-    .join("");
-
-  return normalizeSqlText(raw);
-}
-
-function nativeRolesToNames(policy: NativePolicy): string[] {
-  const roles = Array.isArray(policy.to) ? policy.to : [policy.to];
-
-  return roles
-    .flatMap((role) => {
-      if (typeof role === "string") {
-        return [role];
-      }
-
-      if (role && typeof role === "object" && "name" in role && typeof role.name === "string") {
-        return [role.name];
-      }
-
-      return [];
-    })
-    .sort((left, right) => left.localeCompare(right));
-}
-
-function normalizeNativePolicy(policy: NativePolicy): NormalizedPolicyShape {
-  return {
-    name: policy.name,
-    mode: policy.as,
-    command: policy.for,
-    roles: nativeRolesToNames(policy),
-    using: nativeSqlToText(policy.using),
-    withCheck: nativeSqlToText(policy.withCheck),
-  };
-}
-
-function sortByName<T extends { name: string }>(items: T[]): T[] {
-  return [...items].sort((left, right) => left.name.localeCompare(right.name));
+function renderSql(fragment: SQL | undefined): string | null {
+  return fragment ? normalizeSqlText(dialect.sqlToQuery(fragment).sql) : null;
 }
 
 function getNativePolicyNames(table: typeof authorsTable | typeof todosTable): string[] {
-  const config = getTableConfig(table);
-  return config.policies.map((policy) => policy.name);
+  return getTableConfig(table).policies.map((policy) => policy.name);
 }
 
-function getNormalizedNativePolicies(table: typeof authorsTable | typeof todosTable): NormalizedPolicyShape[] {
-  return sortByName(getTableConfig(table).policies.map((policy) => normalizeNativePolicy(policy as NativePolicy)));
+function getPoliciesByCommand(table: typeof authorsTable | typeof todosTable) {
+  return Object.fromEntries(
+    getTableConfig(table).policies.map((raw) => {
+      const policy = raw as NativePolicy;
+      return [policy.for, { using: renderSql(policy.using), withCheck: renderSql(policy.withCheck) }];
+    }),
+  );
 }
 
 describe("demo schema native RLS policies", () => {
@@ -112,39 +60,33 @@ describe("demo schema native RLS policies", () => {
     ]);
   });
 
-  it("native policies have correct command, mode, role, and predicates", () => {
-    const expectedPredicate = normalizeSqlText(buildSupabaseOwnerOrAdminPredicateSqlText());
-    const expectedByCommand: Record<string, { using: string | null; withCheck: string | null }> = {
-      select: {
-        using: expectedPredicate,
-        withCheck: null,
-      },
-      insert: {
-        using: null,
-        withCheck: expectedPredicate,
-      },
-      update: {
-        using: expectedPredicate,
-        withCheck: expectedPredicate,
-      },
-      delete: {
-        using: expectedPredicate,
-        withCheck: null,
-      },
-    };
+  it("native policies carry the owner-or-admin predicate (qualified column, inlined admin, no params)", () => {
+    // The owner-or-admin builder takes the real Drizzle column now, so the demo tables' policy bodies
+    // reference the qualified owner column ("authors"."owner_id"), inline the admin role, and carry no
+    // bound params (CREATE POLICY DDL can't bind any). The command shape stays: SELECT/DELETE gate
+    // USING, INSERT gates WITH CHECK, UPDATE gates both.
+    for (const [table, tableName] of [
+      [authorsTable, "authors"],
+      [todosTable, "todos"],
+    ] as const) {
+      const byCommand = getPoliciesByCommand(table);
+      const assertPredicate = (text: string | null) => {
+        expect(text).toContain(`"${tableName}"."owner_id" =`);
+        expect(text).toContain("assigned_role.role_name_value = 'admin'");
+        expect(text).not.toMatch(/\$\d/);
+      };
 
-    const authorsNative = getNormalizedNativePolicies(authorsTable);
-    const todosNative = getNormalizedNativePolicies(todosTable);
+      assertPredicate(byCommand["select"]?.using ?? null);
+      expect(byCommand["select"]?.withCheck).toBeNull();
 
-    for (const policy of [...authorsNative, ...todosNative]) {
-      expect(policy).toEqual(
-        expect.objectContaining(
-          expectedByCommand[policy.command] ?? {
-            using: null,
-            withCheck: null,
-          },
-        ),
-      );
+      expect(byCommand["insert"]?.using).toBeNull();
+      assertPredicate(byCommand["insert"]?.withCheck ?? null);
+
+      assertPredicate(byCommand["update"]?.using ?? null);
+      assertPredicate(byCommand["update"]?.withCheck ?? null);
+
+      assertPredicate(byCommand["delete"]?.using ?? null);
+      expect(byCommand["delete"]?.withCheck).toBeNull();
     }
   });
 });

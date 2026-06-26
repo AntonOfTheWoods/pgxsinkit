@@ -11,15 +11,24 @@ type SupabaseOwnerOrAdminPolicyShape = {
   withCheck: boolean;
 };
 
+// Options for the raw predicate *text* builder (`buildSupabaseOwnerOrAdminPredicateSqlText`) — the
+// documented escape hatch that returns the predicate as a SQL string (for a hand-written trigger or
+// migration). It takes a column *name* because text has no column object. The native policy builder
+// below takes a real Drizzle column instead.
 export type SupabaseOwnerOrAdminPredicateOptions = {
   ownerSqlColumn?: string;
   adminRoleName?: string;
   subjectCastType?: string;
 };
 
-export type SupabaseOwnerOrAdminNativePoliciesOptions = SupabaseOwnerOrAdminPredicateOptions & {
-  tableName: string;
+export type SupabaseOwnerOrAdminNativePoliciesOptions = {
+  /** Owner column on the governed row (e.g. `authors.ownerId`). The governed table name is derived from it. */
+  ownerColumn: AnyColumn;
   role: PgRole;
+  /** Role value (in `app_metadata.roles`) that bypasses ownership (default "admin"). */
+  adminRoleName?: string;
+  /** SQL type the JWT subject is cast to before comparison (default "uuid"). */
+  subjectCastType?: string;
 };
 
 const defaultOwnerSqlColumn = "owner_id";
@@ -67,6 +76,72 @@ function buildOwnerOrAdminPolicyName(tableName: string, command: SupabaseOwnerOr
   return `${tableName}_${command}_owner_or_admin`;
 }
 
+// ---------------------------------------------------------------------------
+// Shared predicate leaves (used by both policy families). RLS is the *write* path
+// (Postgres), so columns may serialize qualified — unlike the Electric read `where`,
+// which needs bare columns. The only bits that stay raw `sql` are genuinely-Postgres
+// expressions with no Drizzle operator: the JWT-subject `current_setting(...)::type`,
+// the admin-roles `EXISTS`, and inlined literals (`eq(col, value)` would parameterize,
+// which `CREATE POLICY` DDL cannot carry).
+// ---------------------------------------------------------------------------
+
+// The governed table name (for policy identifiers) derived from a built Drizzle column, so renaming
+// the table renames its policies. Columns built inside `defineSyncTable`'s `extras` callback carry
+// their `.table` — which is where these builders are meant to be called (the table object does not
+// yet exist when its own `policies:` array would be built).
+function tableNameForColumn(column: AnyColumn, label: string): string {
+  const table = (column as { table?: AnyPgTable }).table;
+  if (!table) {
+    throw new Error(
+      `${label} must be a built Drizzle column carrying its table — call this builder inside defineSyncTable's \`extras\` callback`,
+    );
+  }
+  return getTableName(table);
+}
+
+// The JWT subject as a Postgres expression (irreducibly raw: `current_setting` + cast). Used as the
+// right-hand side of `eq(ownerColumn, subject)` — eq splices an SQL fragment verbatim (no bound
+// param), so the DDL carries the literal expression, not a `$n` CREATE POLICY cannot bind.
+function buildSubjectSql(subjectCastType: string): SQL {
+  assertTypeName(subjectCastType, "subjectCastType");
+  return sql.raw(buildSubjectSqlText(subjectCastType));
+}
+
+function buildSubjectSqlText(subjectCastType: string): string {
+  return `coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+  )::${subjectCastType}`;
+}
+
+// The admin-bypass test: `app_metadata.roles` (from the JWT claims) contains `adminRoleName`. No
+// column reference and no recursion risk, so it is inlined as raw text (shared by the text builder and
+// the native builder).
+function buildAdminRoleExistsSqlText(adminRoleName: string): string {
+  return `EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements_text(
+      COALESCE(
+        (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ),
+        '[]'::jsonb
+      )
+    ) AS assigned_role(role_name_value)
+    WHERE assigned_role.role_name_value = '${escapeSqlLiteral(adminRoleName)}'
+  )`;
+}
+
+// A bare SQL literal (`false`, `'manager'`) for an `eq` right-hand side. `eq(col, value)` would
+// parameterize `value` to `$n`; `eq(col, sql\`…\`)` inlines it — required for CREATE POLICY DDL.
+const FALSE_LITERAL = sql`false`;
+function textLiteral(value: string): SQL {
+  return sql.raw(quoteSqlLiteral(value));
+}
+
 function normalizePredicateOptions(options: SupabaseOwnerOrAdminPredicateOptions = {}) {
   const ownerSqlColumn = options.ownerSqlColumn ?? defaultOwnerSqlColumn;
   const adminRoleName = options.adminRoleName ?? defaultAdminRoleName;
@@ -82,45 +157,32 @@ function normalizePredicateOptions(options: SupabaseOwnerOrAdminPredicateOptions
   };
 }
 
-function toPredicateOptions(options: SupabaseOwnerOrAdminPredicateOptions): SupabaseOwnerOrAdminPredicateOptions {
-  return {
-    ...(options.ownerSqlColumn !== undefined ? { ownerSqlColumn: options.ownerSqlColumn } : {}),
-    ...(options.adminRoleName !== undefined ? { adminRoleName: options.adminRoleName } : {}),
-    ...(options.subjectCastType !== undefined ? { subjectCastType: options.subjectCastType } : {}),
-  };
-}
-
+/**
+ * The owner-or-admin predicate as raw SQL **text** — the escape hatch for when you need the predicate
+ * as a string (a hand-written trigger, a manual migration). For attaching RLS to a Drizzle table,
+ * prefer `buildSupabaseOwnerOrAdminNativePolicies`, which takes the real column and is rename-tracked.
+ */
 export function buildSupabaseOwnerOrAdminPredicateSqlText(options: SupabaseOwnerOrAdminPredicateOptions = {}): string {
   const normalized = normalizePredicateOptions(options);
 
   return `
-  ${normalized.ownerSqlColumn} = coalesce(
-    nullif(current_setting('request.jwt.claim.sub', true), ''),
-    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::${normalized.subjectCastType}
-  OR EXISTS (
-    SELECT 1
-    FROM jsonb_array_elements_text(
-      COALESCE(
-        (
-          coalesce(
-            nullif(current_setting('request.jwt.claim', true), ''),
-            nullif(current_setting('request.jwt.claims', true), '')
-          )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
-    ) AS assigned_role(role_name_value)
-    WHERE assigned_role.role_name_value = '${escapeSqlLiteral(normalized.adminRoleName)}'
-  )
+  ${normalized.ownerSqlColumn} = ${buildSubjectSqlText(normalized.subjectCastType)}
+  OR ${buildAdminRoleExistsSqlText(normalized.adminRoleName)}
 `;
 }
 
+// owner-or-admin predicate built from the real Drizzle column: `eq(ownerColumn, subject)` (qualified,
+// rename-tracked) OR the raw admin-roles EXISTS (no column, no Drizzle operator). The single boolean
+// is `or(...)`.
 export function buildSupabaseOwnerOrAdminNativePolicies(options: SupabaseOwnerOrAdminNativePoliciesOptions) {
-  const predicate = sql.raw(buildSupabaseOwnerOrAdminPredicateSqlText(toPredicateOptions(options)));
+  const adminRoleName = options.adminRoleName ?? defaultAdminRoleName;
+  const subject = buildSubjectSql(options.subjectCastType ?? defaultSubjectCastType);
+  const adminExists = sql.raw(buildAdminRoleExistsSqlText(adminRoleName));
+  const predicate = or(eq(options.ownerColumn, subject), adminExists)!;
+  const tableName = tableNameForColumn(options.ownerColumn, "ownerColumn");
 
   return ownerOrAdminPolicyShapes.map((shape) =>
-    pgPolicy(buildOwnerOrAdminPolicyName(options.tableName, shape.command), {
+    pgPolicy(buildOwnerOrAdminPolicyName(tableName, shape.command), {
       as: "permissive",
       for: shape.command,
       to: options.role,
@@ -211,24 +273,6 @@ const membershipPolicyShapes: { command: MembershipPolicyKind; using: boolean; w
   { command: "delete", using: true, withCheck: false },
 ];
 
-// The JWT subject as a Postgres expression (irreducibly raw: `current_setting` + cast). Used as the
-// right-hand side of `eq(memberColumn, subject)` — eq splices an SQL fragment verbatim (no bound
-// param), so the DDL carries the literal expression, not a `$n` CREATE POLICY cannot bind.
-function buildSubjectSql(subjectCastType: string): SQL {
-  assertTypeName(subjectCastType, "subjectCastType");
-  return sql.raw(`coalesce(
-    nullif(current_setting('request.jwt.claim.sub', true), ''),
-    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::${subjectCastType}`);
-}
-
-// A bare SQL literal (`false`, `'manager'`) for an `eq` right-hand side. `eq(col, value)` would
-// parameterize `value` to `$n`; `eq(col, sql\`…\`)` inlines it — required for CREATE POLICY DDL.
-const FALSE_LITERAL = sql`false`;
-function textLiteral(value: string): SQL {
-  return sql.raw(quoteSqlLiteral(value));
-}
-
 type NormalizedMembershipColumns = SupabaseMembershipPredicateColumns & {
   managerRoleValue: string;
   subjectCastType: string;
@@ -240,20 +284,6 @@ function normalizeMembershipColumns(options: SupabaseMembershipPredicateColumns)
     managerRoleValue: options.managerRoleValue ?? defaultManagerRoleValue,
     subjectCastType: options.subjectCastType ?? defaultSubjectCastType,
   };
-}
-
-// The governed table name (for policy identifiers) is derived from the container column's table, so
-// renaming the table renames its policies too — no separate string to drift. Columns built inside
-// `defineSyncTable`'s `extras` callback carry their `.table`, which is where these builders are meant
-// to be called (the table object does not yet exist when its own `policies:` array would be built).
-function governedTableName(containerColumn: AnyColumn): string {
-  const table = (containerColumn as { table?: AnyPgTable }).table;
-  if (!table) {
-    throw new Error(
-      "containerColumn must be a built Drizzle column carrying its table — call buildSupabaseMembershipNativePolicies inside defineSyncTable's `extras` callback",
-    );
-  }
-  return getTableName(table);
 }
 
 // Containment form (not a correlated EXISTS): the governed row's container column must be IN the
@@ -293,7 +323,7 @@ function membershipWriteGate(
 export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershipNativePoliciesOptions) {
   const cols = normalizeMembershipColumns(options);
   const subject = buildSubjectSql(cols.subjectCastType);
-  const tableName = governedTableName(cols.containerColumn);
+  const tableName = tableNameForColumn(cols.containerColumn, "containerColumn");
 
   const memberPredicate = membershipMatch(cols, subject, false);
   const ownerAndMember = and(eq(cols.ownerColumn, subject), memberPredicate)!;

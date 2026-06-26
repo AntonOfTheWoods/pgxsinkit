@@ -21,10 +21,7 @@ const makeAuthorsColumns = () => ({
 const authorsSyncEntry = defineSyncTable({
   tableName: "authors",
   makeColumns: makeAuthorsColumns,
-  policies: buildSupabaseOwnerOrAdminNativePolicies({
-    tableName: "authors",
-    role: authenticatedRole,
-  }),
+  extras: (t) => buildSupabaseOwnerOrAdminNativePolicies({ role: authenticatedRole, ownerColumn: t.ownerId }),
   mode: "readwrite",
   // ADR-0015: keep the demo author table's historical implicit behaviour, now a named choice.
   conflictPolicy: "last-write-wins",
@@ -56,10 +53,7 @@ const makeTodosColumns = () => ({
 const todosSyncEntry = defineSyncTable({
   tableName: "todos",
   makeColumns: makeTodosColumns,
-  policies: buildSupabaseOwnerOrAdminNativePolicies({
-    tableName: "todos",
-    role: authenticatedRole,
-  }),
+  extras: (t) => buildSupabaseOwnerOrAdminNativePolicies({ role: authenticatedRole, ownerColumn: t.ownerId }),
   mode: "readwrite",
   // ADR-0015: exercise the safety policy in the demo — a stale todo edit is surfaced, not clobbered.
   conflictPolicy: "reject-if-stale",

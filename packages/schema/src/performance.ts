@@ -106,7 +106,9 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
     const entry = defineSyncTable({
       tableName,
       makeColumns,
-      policies: buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
+      // `t` carries an index signature (makeColumns returns a Record), so ownerId is bracket-accessed;
+      // buildSyntheticColumns always defines it, hence the non-null assertion.
+      extras: (t) => buildSupabaseOwnerOrAdminNativePolicies({ role: authenticatedRole, ownerColumn: t["ownerId"]! }),
       ...(syntheticSchema ? { schema: syntheticSchema } : {}),
       mode: "readwrite",
       conflictPolicy: "last-write-wins",
