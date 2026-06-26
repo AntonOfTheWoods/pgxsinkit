@@ -67,3 +67,16 @@ A spike fired Drizzle-generated clauses at a real Electric and isolated two hard
   (literals inlined, qualified columns — both fine for Postgres RLS, unlike Electric's bare-column
   rule), so the change is a no-op at the database and the columns are now rename-tracked alongside the
   read filters. Verified: board smoke 5/5 (RLS write tests) after regenerating the board policy migration.
+- **The generic `buildSupabaseMembershipNativePolicies` builder in `@pgxsinkit/contracts` followed.**
+  Its public API now takes Drizzle **columns and tables** (`containerColumn`, `membershipTable`,
+  `membershipSubjectColumn`, `writeGate.containerTable`, …) instead of column/table-name strings, and
+  the governed table name (for policy identifiers) is **derived from the container column's table** — so
+  the last hand-written string (`tableName`) is gone too. Predicate structure is `and`/`or`/`eq`; `sql`
+  remains only for the `IN (subquery)` containment (`inArray` can't wrap a raw subquery), the
+  `current_setting(...)::type` JWT-subject expression, and the inlined `'manager'`/`false` literals.
+  Call it inside `defineSyncTable`'s `extras` callback (where the governed columns carry their table),
+  not the `policies:` array. Verified: membership-fanout + write-state-gating integration suites green
+  against real Electric/Postgres after regenerating the integration policy migration (an `ALTER POLICY`
+  no-op — same predicate, now qualified). The `buildSupabaseOwnerOrAdminNativePolicies` sibling and its
+  raw `…PredicateSqlText` text layer remain string-based by design (the text builder is the lowest
+  layer, returning predicate *text* several tables share — not a column reference).

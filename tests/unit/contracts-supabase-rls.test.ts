@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import { pgRole } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+import { boolean, PgDialect, pgRole, pgTable, uuid, varchar, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import {
   buildSupabaseMembershipNativePolicies,
@@ -39,6 +40,29 @@ function nativeSqlToText(value: NativeSqlExpression | undefined): string | null 
     value.queryChunks
       .map((chunk) => ("value" in chunk && Array.isArray(chunk.value) ? chunk.value.join("") : ""))
       .join(""),
+  );
+}
+
+// Render a composed Drizzle SQL fragment (operators + columns + nested sql) to its real DDL text.
+// The hand-rolled nativeSqlToText only joins `sql.raw` string chunks; a fragment built from columns
+// needs the dialect to qualify and serialize it.
+const dialect = new PgDialect();
+function renderSql(fragment: unknown): string | null {
+  if (!fragment) {
+    return null;
+  }
+  return normalizeSqlText(dialect.sqlToQuery(fragment as SQL).sql);
+}
+
+// Drizzle stashes the `extras` callback's result (our pgPolicy array) on the built table under an
+// ExtraConfigBuilder symbol; invoke it with the table to recover the policies.
+function readTablePolicies(table: AnyPgTable): NativePolicy[] {
+  const symbol = Object.getOwnPropertySymbols(table).find((s) => s.description?.includes("ExtraConfigBuilder"));
+  const builder = symbol ? (table as unknown as Record<symbol, (t: AnyPgTable) => unknown>)[symbol] : undefined;
+  const extras = typeof builder === "function" ? builder(table) : undefined;
+  const list = Array.isArray(extras) ? extras : Object.values(extras ?? {});
+  return list.filter(
+    (entry): entry is NativePolicy => typeof entry === "object" && entry !== null && "for" in entry && "name" in entry,
   );
 }
 
@@ -155,38 +179,74 @@ describe("contracts supabase RLS helpers", () => {
   });
 
   it("gates membership INSERT/UPDATE on write-state but leaves SELECT/DELETE open", () => {
-    const policies = buildSupabaseMembershipNativePolicies({
-      tableName: "work_items",
-      role: pgRole("authenticated"),
-      containerSqlColumn: "workspace_id",
-      membershipTableName: "workspace_members",
-      membershipContainerSqlColumn: "workspace_id",
-      membershipSubjectSqlColumn: "member_id",
-      managerRoleSqlColumn: "role",
-      writeGate: {
-        containerTableName: "workspaces",
-        containerPkSqlColumn: "id",
-        containerLockSqlColumn: "locked",
-        membershipMutedSqlColumn: "muted",
+    // The builder takes real Drizzle columns/tables now, so we build a fixture schema and pass its
+    // columns. The governed table name (for policy identifiers) is derived from the container column,
+    // and predicates serialize with qualified columns + inlined literals (valid CREATE POLICY DDL).
+    const role = pgRole("authenticated");
+
+    const workspaces = pgTable("workspaces", {
+      id: uuid("id").primaryKey(),
+      locked: boolean("locked").notNull().default(false),
+    });
+    const workspaceMembers = pgTable("workspace_members", {
+      id: uuid("id").primaryKey(),
+      workspaceId: uuid("workspace_id").notNull(),
+      memberId: uuid("member_id").notNull(),
+      role: varchar("role", { length: 32 }).notNull(),
+      muted: boolean("muted").notNull().default(false),
+    });
+    const workItems = pgTable(
+      "work_items",
+      {
+        id: uuid("id").primaryKey(),
+        workspaceId: uuid("workspace_id").notNull(),
+        ownerId: uuid("owner_id"),
       },
-    }) as NativePolicy[];
+      (t) =>
+        buildSupabaseMembershipNativePolicies({
+          role,
+          containerColumn: t.workspaceId,
+          ownerColumn: t.ownerId,
+          membershipTable: workspaceMembers,
+          membershipContainerColumn: workspaceMembers.workspaceId,
+          membershipSubjectColumn: workspaceMembers.memberId,
+          managerRoleColumn: workspaceMembers.role,
+          writeGate: {
+            containerTable: workspaces,
+            containerPkColumn: workspaces.id,
+            containerLockColumn: workspaces.locked,
+            membershipMutedColumn: workspaceMembers.muted,
+          },
+        }),
+    );
+
+    const policies = readTablePolicies(workItems);
 
     const byCommand = Object.fromEntries(
       policies.map((policy) => [
         policy.for,
-        { using: nativeSqlToText(policy.using), withCheck: nativeSqlToText(policy.withCheck) },
+        {
+          name: policy.name,
+          using: renderSql(policy.using),
+          withCheck: renderSql(policy.withCheck),
+        },
       ]),
     );
 
-    // INSERT WITH CHECK keeps owner+member and adds the write-state gate (lock bypassable by a manager,
-    // plus a not-muted requirement).
-    expect(byCommand["insert"]?.withCheck).toContain("owner_id =");
-    expect(byCommand["insert"]?.withCheck).toContain("FROM workspaces WHERE locked = false");
-    expect(byCommand["insert"]?.withCheck).toContain("AND muted = false");
+    // Governed table name is derived from the container column's table.
+    expect(byCommand["select"]?.name).toBe("work_items_select_membership");
+
+    // Columns serialize qualified (write path = Postgres RLS, unlike Electric's bare-column rule).
+    expect(byCommand["insert"]?.withCheck).toContain('"work_items"."owner_id" =');
+    expect(byCommand["insert"]?.withCheck).toContain('from "workspaces" where "workspaces"."locked" = false');
+    expect(byCommand["insert"]?.withCheck).toContain('"workspace_members"."muted" = false');
+    // Manager literal inlined, not a bound param.
+    expect(byCommand["insert"]?.withCheck).toContain(`"workspace_members"."role" = 'manager'`);
+    expect(byCommand["insert"]?.withCheck).not.toMatch(/\$\d/);
 
     // UPDATE gates both USING and WITH CHECK.
-    expect(byCommand["update"]?.using).toContain("FROM workspaces WHERE locked = false");
-    expect(byCommand["update"]?.withCheck).toContain("AND muted = false");
+    expect(byCommand["update"]?.using).toContain('from "workspaces" where "workspaces"."locked" = false');
+    expect(byCommand["update"]?.withCheck).toContain('"workspace_members"."muted" = false');
 
     // SELECT and DELETE are untouched by write-state.
     expect(byCommand["select"]?.using).not.toContain("locked");

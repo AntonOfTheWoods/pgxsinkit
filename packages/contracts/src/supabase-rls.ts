@@ -1,7 +1,7 @@
-import { sql } from "drizzle-orm";
-import { pgPolicy, type PgRole } from "drizzle-orm/pg-core";
+import { and, eq, getTableName, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import { pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
 
-import { escapeSqlLiteral } from "./sql-identifier";
+import { escapeSqlLiteral, quoteSqlLiteral } from "./sql-identifier";
 
 type SupabaseOwnerOrAdminPolicyKind = "select" | "insert" | "update" | "delete";
 
@@ -146,25 +146,37 @@ export const supabaseOwnerOrAdminDefaults = {
 // create it (as themselves) and edit it, while a container *manager* may moderate
 // any row. Domain-agnostic: the container, membership table, and manager role are
 // all parameters.
+//
+// The container, membership, and owner references are **real Drizzle columns/tables**
+// (not name strings), so the policy tracks the schema — a column or table rename is a
+// compile error, and the governed table name is *derived* from the container column
+// (no redundant `tableName` to drift). Predicate structure is built with Drizzle
+// operators (`and`/`or`/`eq`); only the irreducibly-Postgres leaves stay `sql`: the
+// `IN (subquery)` containment (Drizzle's `inArray` cannot wrap a raw subquery), the
+// `current_setting(...)::type` JWT-subject expression, and the inlined `'manager'` /
+// `false` literals (a value passed to `eq` would parameterize, which `CREATE POLICY`
+// DDL cannot carry). Columns serialize qualified (`"work_items"."workspace_id"`) —
+// fine for Postgres RLS (this is the write path, unlike Electric's bare-column rule).
 // ---------------------------------------------------------------------------
 
 type MembershipPolicyKind = "select" | "insert" | "update" | "delete";
 
-export type SupabaseMembershipPredicateOptions = {
-  /** Column on the governed row naming its container (e.g. "workspace_id"). */
-  containerSqlColumn: string;
-  /** Membership link table (e.g. "workspace_members"). */
-  membershipTableName: string;
-  /** Container column on the membership link table. */
-  membershipContainerSqlColumn: string;
+export type SupabaseMembershipPredicateColumns = {
+  /** Column on the governed row naming its container (e.g. `workItems.workspaceId`). */
+  containerColumn: AnyColumn;
+  /** Membership link table (e.g. the `workspace_members` table). */
+  membershipTable: AnyPgTable;
+  /** Container column on the membership link table (e.g. `workspaceMembers.workspaceId`). */
+  membershipContainerColumn: AnyColumn;
   /** Subject (member) column on the membership link table, compared to the JWT sub. */
-  membershipSubjectSqlColumn: string;
-  /** Owner column on the governed row (default "owner_id"). */
-  ownerSqlColumn?: string;
+  membershipSubjectColumn: AnyColumn;
+  /** Owner column on the governed row (e.g. `workItems.ownerId`). */
+  ownerColumn: AnyColumn;
   /** Optional role column on the membership link enabling manager moderation. */
-  managerRoleSqlColumn?: string;
-  /** Role value that grants moderation (default "manager"); only used with managerRoleSqlColumn. */
+  managerRoleColumn?: AnyColumn;
+  /** Role value that grants moderation (default "manager"); only used with managerRoleColumn. */
   managerRoleValue?: string;
+  /** SQL type the JWT subject is cast to before comparison (default "uuid"). */
   subjectCastType?: string;
 };
 
@@ -172,23 +184,22 @@ export type SupabaseMembershipPredicateOptions = {
 // mutable state: a *locked* container admits writes only from a manager (e.g. a frozen discussion
 // thread), and a *muted* member may not write at all. SELECT and DELETE are unaffected — reads and
 // moderation deletes still flow. Domain-agnostic: the container/lock and membership/mute columns are
-// parameters. Requires managerRoleSqlColumn (managers bypass the lock).
-export type SupabaseMembershipWriteGateOptions = {
-  /** Container table holding the lock flag (e.g. "workspaces"). */
-  containerTableName: string;
-  /** PK column on the container table the governed row's container column references (e.g. "id"). */
-  containerPkSqlColumn: string;
-  /** Boolean column on the container table; when true, only a manager may write (e.g. "locked"). */
-  containerLockSqlColumn: string;
-  /** Boolean column on the membership table; when true, that member may not write (e.g. "muted"). */
-  membershipMutedSqlColumn: string;
+// parameters. Requires managerRoleColumn (managers bypass the lock).
+export type SupabaseMembershipWriteGateColumns = {
+  /** Container table holding the lock flag (e.g. the `workspaces` table). */
+  containerTable: AnyPgTable;
+  /** PK column on the container table the governed row's container column references (e.g. `workspaces.id`). */
+  containerPkColumn: AnyColumn;
+  /** Boolean column on the container table; when true, only a manager may write (e.g. `workspaces.locked`). */
+  containerLockColumn: AnyColumn;
+  /** Boolean column on the membership table; when true, that member may not write (e.g. `workspaceMembers.muted`). */
+  membershipMutedColumn: AnyColumn;
 };
 
-export type SupabaseMembershipNativePoliciesOptions = SupabaseMembershipPredicateOptions & {
-  tableName: string;
+export type SupabaseMembershipNativePoliciesOptions = SupabaseMembershipPredicateColumns & {
   role: PgRole;
   /** Optional write-state gate applied to INSERT and UPDATE only. */
-  writeGate?: SupabaseMembershipWriteGateOptions;
+  writeGate?: SupabaseMembershipWriteGateColumns;
 };
 
 const defaultManagerRoleValue = "manager";
@@ -200,143 +211,121 @@ const membershipPolicyShapes: { command: MembershipPolicyKind; using: boolean; w
   { command: "delete", using: true, withCheck: false },
 ];
 
-function buildSubjectSqlText(subjectCastType: string): string {
-  return `coalesce(
+// The JWT subject as a Postgres expression (irreducibly raw: `current_setting` + cast). Used as the
+// right-hand side of `eq(memberColumn, subject)` — eq splices an SQL fragment verbatim (no bound
+// param), so the DDL carries the literal expression, not a `$n` CREATE POLICY cannot bind.
+function buildSubjectSql(subjectCastType: string): SQL {
+  assertTypeName(subjectCastType, "subjectCastType");
+  return sql.raw(`coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::${subjectCastType}`;
+  )::${subjectCastType}`);
 }
 
-function normalizeMembershipOptions(options: SupabaseMembershipPredicateOptions) {
-  const ownerSqlColumn = options.ownerSqlColumn ?? defaultOwnerSqlColumn;
-  const subjectCastType = options.subjectCastType ?? defaultSubjectCastType;
-  const managerRoleValue = options.managerRoleValue ?? defaultManagerRoleValue;
+// A bare SQL literal (`false`, `'manager'`) for an `eq` right-hand side. `eq(col, value)` would
+// parameterize `value` to `$n`; `eq(col, sql\`…\`)` inlines it — required for CREATE POLICY DDL.
+const FALSE_LITERAL = sql`false`;
+function textLiteral(value: string): SQL {
+  return sql.raw(quoteSqlLiteral(value));
+}
 
-  assertIdentifier(options.containerSqlColumn, "containerSqlColumn");
-  assertIdentifier(options.membershipTableName, "membershipTableName");
-  assertIdentifier(options.membershipContainerSqlColumn, "membershipContainerSqlColumn");
-  assertIdentifier(options.membershipSubjectSqlColumn, "membershipSubjectSqlColumn");
-  assertIdentifier(ownerSqlColumn, "ownerSqlColumn");
-  assertTypeName(subjectCastType, "subjectCastType");
+type NormalizedMembershipColumns = SupabaseMembershipPredicateColumns & {
+  managerRoleValue: string;
+  subjectCastType: string;
+};
 
-  if (options.managerRoleSqlColumn !== undefined) {
-    assertIdentifier(options.managerRoleSqlColumn, "managerRoleSqlColumn");
+function normalizeMembershipColumns(options: SupabaseMembershipPredicateColumns): NormalizedMembershipColumns {
+  return {
+    ...options,
+    managerRoleValue: options.managerRoleValue ?? defaultManagerRoleValue,
+    subjectCastType: options.subjectCastType ?? defaultSubjectCastType,
+  };
+}
+
+// The governed table name (for policy identifiers) is derived from the container column's table, so
+// renaming the table renames its policies too — no separate string to drift. Columns built inside
+// `defineSyncTable`'s `extras` callback carry their `.table`, which is where these builders are meant
+// to be called (the table object does not yet exist when its own `policies:` array would be built).
+function governedTableName(containerColumn: AnyColumn): string {
+  const table = (containerColumn as { table?: AnyPgTable }).table;
+  if (!table) {
+    throw new Error(
+      "containerColumn must be a built Drizzle column carrying its table — call buildSupabaseMembershipNativePolicies inside defineSyncTable's `extras` callback",
+    );
   }
-
-  return { ...options, ownerSqlColumn, subjectCastType, managerRoleValue };
+  return getTableName(table);
 }
 
 // Containment form (not a correlated EXISTS): the governed row's container column must be IN the
 // set of containers the subject belongs to. The IN keeps the outer container reference in the
 // policy table's scope — a correlated `EXISTS (… WHERE m.container = container …)` would let the
-// membership table's same-named column shadow the outer one, collapsing the correlation.
-function buildMembershipMatchSqlText(
-  normalized: ReturnType<typeof normalizeMembershipOptions>,
-  subjectSql: string,
-  requireManager: boolean,
-): string {
-  const managerClause =
-    requireManager && normalized.managerRoleSqlColumn
-      ? ` AND ${normalized.managerRoleSqlColumn} = '${escapeSqlLiteral(normalized.managerRoleValue)}'`
-      : "";
+// membership table's same-named column shadow the outer one, collapsing the correlation. `inArray`
+// can't wrap a raw subquery, so the `IN (…)` stays `sql`; its leaves are Drizzle `eq`/`and`.
+function membershipMatch(cols: NormalizedMembershipColumns, subject: SQL, requireManager: boolean): SQL {
+  const subjectIsMember = eq(cols.membershipSubjectColumn, subject);
+  const where =
+    requireManager && cols.managerRoleColumn
+      ? and(subjectIsMember, eq(cols.managerRoleColumn, textLiteral(cols.managerRoleValue)))!
+      : subjectIsMember;
 
-  return `${normalized.containerSqlColumn} IN (
-    SELECT ${normalized.membershipContainerSqlColumn}
-    FROM ${normalized.membershipTableName}
-    WHERE ${normalized.membershipSubjectSqlColumn} = ${subjectSql}${managerClause}
-  )`;
-}
-
-/** member-of-container predicate (read fan-out). */
-export function buildSupabaseMembershipSelectPredicateSqlText(options: SupabaseMembershipPredicateOptions): string {
-  const normalized = normalizeMembershipOptions(options);
-  return buildMembershipMatchSqlText(normalized, buildSubjectSqlText(normalized.subjectCastType), false);
-}
-
-function buildOwnerPredicate(normalized: ReturnType<typeof normalizeMembershipOptions>, subjectSql: string): string {
-  return `${normalized.ownerSqlColumn} = ${subjectSql}`;
+  return sql`${cols.containerColumn} in (select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${where})`;
 }
 
 /** owner-or-manager predicate (edit / moderate). */
-function buildOwnerOrManagerPredicate(
-  normalized: ReturnType<typeof normalizeMembershipOptions>,
-  subjectSql: string,
-): string {
-  const owner = buildOwnerPredicate(normalized, subjectSql);
-
-  if (!normalized.managerRoleSqlColumn) {
-    return owner;
-  }
-
-  return `(${owner}) OR ${buildMembershipMatchSqlText(normalized, subjectSql, true)}`;
-}
-
-function normalizeWriteGate(gate: SupabaseMembershipWriteGateOptions): SupabaseMembershipWriteGateOptions {
-  assertIdentifier(gate.containerTableName, "writeGate.containerTableName");
-  assertIdentifier(gate.containerPkSqlColumn, "writeGate.containerPkSqlColumn");
-  assertIdentifier(gate.containerLockSqlColumn, "writeGate.containerLockSqlColumn");
-  assertIdentifier(gate.membershipMutedSqlColumn, "writeGate.membershipMutedSqlColumn");
-  return gate;
+function ownerOrManager(cols: NormalizedMembershipColumns, subject: SQL): SQL {
+  const owner = eq(cols.ownerColumn, subject);
+  return cols.managerRoleColumn ? or(owner, membershipMatch(cols, subject, true))! : owner;
 }
 
 // write-state gate: ((container not locked) OR caller is a manager) AND caller's membership not muted.
-// Same IN-containment discipline as buildMembershipMatchSqlText, so the container/membership tables
-// can reuse their own column names without shadowing the governed row's container column.
-function buildMembershipWriteGateSqlText(
-  normalized: ReturnType<typeof normalizeMembershipOptions>,
-  gate: SupabaseMembershipWriteGateOptions,
-  subjectSql: string,
-): string {
-  const unlocked = `${normalized.containerSqlColumn} IN (
-    SELECT ${gate.containerPkSqlColumn}
-    FROM ${gate.containerTableName}
-    WHERE ${gate.containerLockSqlColumn} = false
-  )`;
-  const manager = buildMembershipMatchSqlText(normalized, subjectSql, true);
-  const notMuted = `${normalized.containerSqlColumn} IN (
-    SELECT ${normalized.membershipContainerSqlColumn}
-    FROM ${normalized.membershipTableName}
-    WHERE ${normalized.membershipSubjectSqlColumn} = ${subjectSql} AND ${gate.membershipMutedSqlColumn} = false
-  )`;
-
-  return `((${unlocked}) OR ${manager}) AND ${notMuted}`;
+// Same IN-containment discipline as membershipMatch, so the container/membership tables can reuse
+// their own column names without shadowing the governed row's container column.
+function membershipWriteGate(
+  cols: NormalizedMembershipColumns,
+  gate: SupabaseMembershipWriteGateColumns,
+  subject: SQL,
+): SQL {
+  const unlocked = sql`${cols.containerColumn} in (select ${gate.containerPkColumn} from ${gate.containerTable} where ${eq(gate.containerLockColumn, FALSE_LITERAL)})`;
+  const notMuted = sql`${cols.containerColumn} in (select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${and(eq(cols.membershipSubjectColumn, subject), eq(gate.membershipMutedColumn, FALSE_LITERAL))})`;
+  return and(or(unlocked, membershipMatch(cols, subject, true))!, notMuted)!;
 }
 
 export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershipNativePoliciesOptions) {
-  const normalized = normalizeMembershipOptions(options);
-  const subjectSql = buildSubjectSqlText(normalized.subjectCastType);
+  const cols = normalizeMembershipColumns(options);
+  const subject = buildSubjectSql(cols.subjectCastType);
+  const tableName = governedTableName(cols.containerColumn);
 
-  const memberPredicate = buildMembershipMatchSqlText(normalized, subjectSql, false);
-  const ownerAndMember = `(${buildOwnerPredicate(normalized, subjectSql)}) AND ${memberPredicate}`;
-  const ownerOrManager = buildOwnerOrManagerPredicate(normalized, subjectSql);
+  const memberPredicate = membershipMatch(cols, subject, false);
+  const ownerAndMember = and(eq(cols.ownerColumn, subject), memberPredicate)!;
+  const ownerOrManagerPredicate = ownerOrManager(cols, subject);
 
-  let writeGateClause: string | null = null;
+  let writeGateClause: SQL | null = null;
   if (options.writeGate) {
-    if (!normalized.managerRoleSqlColumn) {
-      throw new Error("writeGate requires managerRoleSqlColumn so a manager can write into a locked container");
+    if (!cols.managerRoleColumn) {
+      throw new Error("writeGate requires managerRoleColumn so a manager can write into a locked container");
     }
-    writeGateClause = buildMembershipWriteGateSqlText(normalized, normalizeWriteGate(options.writeGate), subjectSql);
+    writeGateClause = membershipWriteGate(cols, options.writeGate, subject);
   }
 
-  const gatedForWrite = (base: string): string => (writeGateClause ? `(${base}) AND ${writeGateClause}` : base);
+  const gatedForWrite = (base: SQL): SQL => (writeGateClause ? and(base, writeGateClause)! : base);
 
-  const predicateFor = (command: MembershipPolicyKind): string => {
+  const predicateFor = (command: MembershipPolicyKind): SQL => {
     switch (command) {
       case "select":
         return memberPredicate;
       case "insert":
         return gatedForWrite(ownerAndMember);
       case "update":
-        return gatedForWrite(ownerOrManager);
+        return gatedForWrite(ownerOrManagerPredicate);
       case "delete":
-        return ownerOrManager;
+        return ownerOrManagerPredicate;
     }
   };
 
   return membershipPolicyShapes.map((shape) => {
-    const predicate = sql.raw(predicateFor(shape.command));
+    const predicate = predicateFor(shape.command);
 
-    return pgPolicy(`${options.tableName}_${shape.command}_membership`, {
+    return pgPolicy(`${tableName}_${shape.command}_membership`, {
       as: "permissive",
       for: shape.command,
       to: options.role,

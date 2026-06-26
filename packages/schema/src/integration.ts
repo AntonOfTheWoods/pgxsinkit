@@ -195,22 +195,26 @@ const workItemsSyncEntry = defineSyncTable({
     createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
     updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
-  policies: buildSupabaseMembershipNativePolicies({
-    tableName: "work_items",
-    role: authenticatedRole,
-    containerSqlColumn: "workspace_id",
-    membershipTableName: "workspace_members",
-    membershipContainerSqlColumn: "workspace_id",
-    membershipSubjectSqlColumn: "member_id",
-    managerRoleSqlColumn: "role",
-    // Scenario C: gate INSERT/UPDATE on a locked workspace (manager-only) and a muted membership.
-    writeGate: {
-      containerTableName: "workspaces",
-      containerPkSqlColumn: "id",
-      containerLockSqlColumn: "locked",
-      membershipMutedSqlColumn: "muted",
-    },
-  }),
+  // RLS from the real Drizzle columns (governed columns via the `extras` callback `t`; the
+  // membership + container tables are the sibling sync entries above). The governed table name is
+  // derived from `t.workspaceId.table`, so no string is hand-written here.
+  extras: (t) =>
+    buildSupabaseMembershipNativePolicies({
+      role: authenticatedRole,
+      containerColumn: t.workspaceId,
+      ownerColumn: t.ownerId,
+      membershipTable: workspaceMembersSyncEntry.table,
+      membershipContainerColumn: workspaceMembersSyncEntry.table.workspaceId,
+      membershipSubjectColumn: workspaceMembersSyncEntry.table.memberId,
+      managerRoleColumn: workspaceMembersSyncEntry.table.role,
+      // Scenario C: gate INSERT/UPDATE on a locked workspace (manager-only) and a muted membership.
+      writeGate: {
+        containerTable: workspacesSyncEntry.table,
+        containerPkColumn: workspacesSyncEntry.table.id,
+        containerLockColumn: workspacesSyncEntry.table.locked,
+        membershipMutedColumn: workspaceMembersSyncEntry.table.muted,
+      },
+    }),
   mode: "readwrite",
   conflictPolicy: "last-write-wins",
   governance: {
