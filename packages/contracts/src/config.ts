@@ -3,7 +3,6 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
 import type { ApplyStrategy, SyncColumnType } from "./apply-strategy";
-import { escapeSqlLiteral } from "./sql-identifier";
 
 const pgDialect = new PgDialect();
 
@@ -177,140 +176,45 @@ export function getLocalSyncPrimaryKeyColumns(source: {
 }
 
 export interface RowFilterSpec {
-  /** WHERE "column" = '<owner claim>' — ownership-based row filtering. */
-  ownership?: {
-    column: string;
-    /**
-     * Dot-path into the JWT claims used as the owner value (e.g.
-     * "app_metadata.person_id"). Defaults to "sub". A missing, empty, or
-     * non-primitive claim denies all rows, matching the missing-sub behavior.
-     */
-    claim?: string;
-  };
-  /** OR clause for shared content: adds rows owned by sharedUserId. */
-  shared?: {
-    /** Column used for owner comparison. Defaults to ownership.column. */
-    ownerColumn?: string;
-    /** If set, also requires "sharedColumn" = true. */
-    sharedColumn?: string;
-    /** Static UUID or a function that returns a UUID given runtime params. */
-    sharedUserId: string | ((params: Record<string, unknown>) => string);
-  };
   /**
-   * Escape hatch: returns a raw SQL fragment ANDed with other filters. Return
-   * `null` to bypass all filters (e.g. admin access).
+   * The row filter: returns the Electric shape `where` for this request, or `null` to bypass
+   * filtering (e.g. admin access). **Prefer returning a Drizzle `SQL` fragment** built from the
+   * table's columns: reference each column through {@link c} (a bare, rename-safe identifier) and
+   * embed request-derived values directly — they become **bound `$n` params**, never hand-escaped
+   * literals. Enum columns must be cast to text (`${c(col)}::text = 'x'`) for Electric's grammar,
+   * and subqueries must be self-contained (not correlated), since Electric needs plain column refs.
    *
-   * SECURITY: the returned string is interpolated verbatim into the Electric shape
-   * `where` clause — it is NOT escaped. Any request-derived value (e.g. from
-   * `params`) you embed must be escaped/validated inside this function, or it is a
-   * SQL-injection vector. Prefer `ownership`/`shared`, which escape their values for
-   * you; reach for `customWhere` only when those cannot express the predicate.
+   * Returning a raw **string** is the escape hatch for a predicate Drizzle can't express. SECURITY:
+   * a string is interpolated verbatim into the `where` — it is NOT escaped, so any request-derived
+   * value you embed must be escaped/validated (`escapeSqlLiteral`) inside this function, or it is a
+   * SQL-injection vector. Reach for the string form only when the Drizzle fragment cannot express it.
    */
   customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | SQL | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
   /**
-   * An opaque version tag for the parts of this filter the fingerprint cannot see — the
-   * `customWhere` body and a function-valued `shared.sharedUserId`. Their *presence* is
-   * fingerprinted, but their *logic* is invisible (you cannot hash a closure). Bump this
-   * (any new string/number) whenever you change that logic so the fingerprint shifts and the
-   * local read cache rebuilds + the shape subscription resets. Leaving it unchanged after a
-   * `customWhere` authorization change would silently serve the stale shape.
+   * An opaque version tag for the part of this filter the fingerprint cannot see — the `customWhere`
+   * body (you cannot hash a closure; only its *presence* is fingerprinted). Bump this (any new
+   * string/number) whenever you change that logic so the fingerprint shifts and the local read cache
+   * rebuilds + the shape subscription resets. Leaving it unchanged after a `customWhere`
+   * authorization change would silently serve the stale shape.
    */
   revision?: string | number;
 }
 
-function readOwnerClaim(claims: JwtClaims | null, claimPath: string): string | null {
-  let current: unknown = claims;
-
-  for (const segment of claimPath.split(".")) {
-    if (typeof current !== "object" || current === null || Array.isArray(current)) {
-      return null;
-    }
-    current = (current as Record<string, unknown>)[segment];
-  }
-
-  switch (typeof current) {
-    case "string":
-      return current.length > 0 ? current : null;
-    case "number":
-    case "bigint":
-    case "boolean":
-      // Mirrors the historical truthiness check on claims.sub.
-      return current ? String(current) : null;
-    default:
-      return null;
-  }
-}
-
 /**
- * Composes ownership, shared, and customWhere filters into a single
- * SQL WHERE clause suitable for Electric shape requests.
- *
- * Returns null if no filters apply (all rows visible).
+ * The non-parameterized inline `where` for a filter: the string a `customWhere` returns (the raw
+ * escape hatch), or `null` when there is no filter or `customWhere` returns a Drizzle `SQL` fragment
+ * (which is parameterized by {@link buildRowFilterShape}, not inlined here). Most callers want
+ * `buildRowFilterShape` — this is the inline-string view it composes from.
  */
 export function buildRowFilterWhere(
   filter: RowFilterSpec,
   claims: JwtClaims | null,
   params?: Record<string, unknown>,
 ): string | null {
-  const parts: string[] = [];
-  const { ownership, shared, customWhere } = filter;
-
-  // Ownership
-  if (ownership) {
-    const ownerValue = readOwnerClaim(claims, ownership.claim ?? "sub");
-
-    if (ownerValue === null) {
-      // No authenticated owner claim — block all rows
-      return "1 = 0";
-    }
-
-    parts.push(`"${ownership.column}" = '${escapeSqlLiteral(ownerValue)}'`);
-  }
-
-  // Shared content
-  if (shared) {
-    const ownerCol = shared.ownerColumn ?? ownership?.column;
-    if (!ownerCol) {
-      throw new Error("shared.ownerColumn or ownership.column is required for shared row filter");
-    }
-
-    const sharedUserId =
-      typeof shared.sharedUserId === "function" ? shared.sharedUserId(params ?? {}) : shared.sharedUserId;
-    const escapedSharedUserId = escapeSqlLiteral(sharedUserId);
-
-    let sharedClause: string;
-    if (shared.sharedColumn) {
-      sharedClause = `("${shared.sharedColumn}" = true AND "${ownerCol}" = '${escapedSharedUserId}')`;
-    } else {
-      sharedClause = `"${ownerCol}" = '${escapedSharedUserId}'`;
-    }
-
-    if (parts.length > 0) {
-      parts.push(`OR ${sharedClause}`);
-    } else {
-      parts.push(sharedClause);
-    }
-  }
-
-  // Custom where. A SQL fragment is handled by the proxy's parameterized path, not here — this
-  // legacy string composer ignores it (returns the ownership/shared parts, or null).
-  if (customWhere) {
-    const custom = customWhere(claims ?? {}, params);
-    if (typeof custom === "string" && custom) {
-      if (parts.length > 0) {
-        return `(${parts.join(" ")}) AND (${custom})`;
-      }
-      return custom;
-    }
-  }
-
-  if (parts.length === 0) {
-    return null;
-  }
-
-  return parts.length > 1 ? `(${parts.join(" ")})` : parts[0]!;
+  const custom = filter.customWhere?.(claims ?? {}, params);
+  return typeof custom === "string" && custom ? custom : null;
 }
 
 /**
@@ -333,26 +237,26 @@ export interface RowFilterShape {
 }
 
 /**
- * The parameterized form of {@link buildRowFilterWhere}, for the Electric shape proxy: returns the
- * `where` string plus the positional `params` (`$1`, `$2`, …) it references. A `customWhere` that
- * returns a Drizzle `SQL` fragment is serialized here, so request-derived values become **bound
- * params** — never hand-escaped literals. `ownership`/`shared` and a string `customWhere` stay inline
- * (no params), composed exactly as `buildRowFilterWhere` does; a SQL `customWhere` is ANDed on with its
- * params appended (the inline part has no `$n`, so the fragment's `$1…$n` index the returned params).
+ * The shape filter the proxy sends to Electric: the `where` plus its positional `params` (`$1`, `$2`,
+ * …). A `customWhere` returning a Drizzle `SQL` fragment is serialized here, so request-derived values
+ * become **bound params** — never hand-escaped literals; a string `customWhere` is the raw escape
+ * hatch (no params). Returns `null` when there is no filter (all rows visible).
  */
 export function buildRowFilterShape(
   filter: RowFilterSpec,
   claims: JwtClaims | null,
   params?: Record<string, unknown>,
 ): RowFilterShape | null {
-  const inlinePart = buildRowFilterWhere(filter, claims, params);
   const custom = filter.customWhere?.(claims ?? {}, params);
 
-  if (custom != null && typeof custom !== "string") {
-    const compiled = pgDialect.sqlToQuery(custom);
-    const where = inlinePart ? `(${inlinePart}) AND (${compiled.sql})` : compiled.sql;
-    return { where, params: compiled.params.map((value) => String(value)) };
+  if (custom == null) {
+    return null;
   }
 
-  return inlinePart != null ? { where: inlinePart, params: [] } : null;
+  if (typeof custom === "string") {
+    return custom ? { where: custom, params: [] } : null;
+  }
+
+  const compiled = pgDialect.sqlToQuery(custom);
+  return { where: compiled.sql, params: compiled.params.map((value) => String(value)) };
 }

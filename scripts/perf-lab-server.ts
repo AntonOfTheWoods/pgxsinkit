@@ -9,6 +9,8 @@ import { z } from "zod";
 
 import {
   batchMutationRequestSchema,
+  escapeSqlLiteral,
+  quoteIdentifier as quoteIdent,
   type BatchMutationRequest,
   type MutationAck,
   type SyncTableEntry,
@@ -734,14 +736,6 @@ function appendVaryHeader(existingValue: string | null, nextValue: string) {
 
   values.push(nextValue);
   return values.join(", ");
-}
-
-function escapeSqlLiteral(value: string) {
-  return value.replace(/'/g, "''");
-}
-
-function quoteIdent(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function enqueueProvision(task: () => Promise<void>) {

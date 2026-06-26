@@ -158,17 +158,17 @@ describe("registry diff gate (ADR-0006)", () => {
   });
 
   it("classifies a static row-filter change as risky (review #4/#5)", () => {
-    const mk = (ownerColumn: string) => {
+    const mk = (projection: string[]) => {
       const entry = defineSyncTable({
         tableName: "items",
         makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id"), teamId: uuid("team_id") }),
         clientProjection: { omitColumns: [] },
       });
       return defineSyncRegistry({
-        items: { ...entry, shape: { ...entry.shape!, rowFilter: { ownership: { column: ownerColumn } } } },
+        items: { ...entry, shape: { ...entry.shape!, rowFilter: { columns: projection } } },
       });
     };
-    const diff = compareRegistries(mk("owner_id"), mk("team_id"));
+    const diff = compareRegistries(mk(["id", "owner_id"]), mk(["id", "team_id"]));
     expect(diff.severity).toBe("risky");
     expect(diff.changes.some((change) => /row filter changed/.test(change.detail))).toBe(true);
   });

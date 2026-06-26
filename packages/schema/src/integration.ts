@@ -230,7 +230,7 @@ export const workItemsView = workItemsSyncEntry.view!;
 // *manager* additionally syncs *hidden* items in the workspaces they manage. So two members of the
 // same workspace receive different row sets purely by their per-workspace role — the generic
 // mechanism behind "a moderator sees hidden content a regular member does not". The whole predicate
-// (two correlated subqueries + a boolean branch) is forwarded verbatim as the Electric shape `where`.
+// (two self-contained subqueries + a boolean branch) is forwarded as the Electric shape `where`.
 // `role` is a pg enum, so it is cast to text (`"role"::text`) — Electric's where-grammar accepts an
 // enum only when the column is cast to text, never a bare enum literal. Returns no rows for an
 // unauthenticated subject.
@@ -239,18 +239,16 @@ function workspaceVisibilityRowFilter(claims: JwtClaims) {
     return "1 = 0";
   }
 
-  // SPIKE (Option C): the same predicate as before, but built from the actual Drizzle tables — so
-  // column names + structure are type-safe and the leaf value (`claims.sub`) is a *bound param*
-  // (`$1`/`$2`), never a hand-escaped literal. The proxy serializes this to Electric's `where` +
-  // `params[N]`. Two Electric where-grammar constraints shape this: (1) columns must be **plain**
-  // references — `"workspace_id"`, never `"work_items"."workspace_id"` — so we emit each column as a
-  // bare identifier via `c()` rather than the Drizzle column (which qualifies); the subqueries are
-  // self-contained (not correlated), so bare names resolve to each FROM unambiguously. (2) `role` is a
-  // pg enum → cast to text.
+  // Built from the actual Drizzle tables — column names + structure are type-safe and the leaf value
+  // (`claims.sub`) is a *bound param* (`$1`/`$2`), never a hand-escaped literal. The proxy serializes
+  // this to Electric's `where` + `params[N]`. Two Electric where-grammar constraints shape this:
+  // (1) columns must be **plain** references — `"workspace_id"`, never `"work_items"."workspace_id"` —
+  // so we emit each column bare via `c()` rather than the Drizzle column (which qualifies); the
+  // subqueries are self-contained (not correlated), so bare names resolve to each FROM unambiguously.
+  // (2) `role` is a pg enum → cast to text.
   const wm = workspaceMembersSyncEntry.table;
   const wi = workItemsSyncEntry.table;
   const sub = claims.sub;
-  const c = (column: { name: string }) => sql.identifier(column.name);
 
   const memberOf = sql`select ${c(wm.workspaceId)} from ${wm} where ${c(wm.memberId)} = ${sub}`;
   const managerOf = sql`select ${c(wm.workspaceId)} from ${wm} where ${c(wm.memberId)} = ${sub} and ${c(wm.role)}::text = 'manager'`;

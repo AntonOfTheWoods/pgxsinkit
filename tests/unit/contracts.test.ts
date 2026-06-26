@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
+import { sql } from "drizzle-orm";
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 
@@ -229,74 +230,22 @@ describe("sync config contracts", () => {
   });
 });
 
-describe("buildRowFilterWhere ownership claim selection", () => {
-  it("defaults to the sub claim with deny-on-missing behavior", () => {
-    const filter = { ownership: { column: "person_id" } };
+describe("buildRowFilterWhere (inline string view of customWhere)", () => {
+  // The only filter mechanism is `customWhere` now (ownership/shared built-ins were removed). The
+  // inline-string view returns a string `customWhere` verbatim (the raw escape hatch) and `null`
+  // otherwise — a Drizzle SQL fragment is parameterized by buildRowFilterShape, not inlined here.
+  it("returns a string customWhere verbatim", () => {
+    const filter = { customWhere: (claims: JwtClaims) => (claims.sub ? `"owner_id" = '${claims.sub}'` : "1 = 0") };
 
-    expect(buildRowFilterWhere(filter, { sub: "user-1" })).toBe(`"person_id" = 'user-1'`);
+    expect(buildRowFilterWhere(filter, { sub: "user-1" })).toBe(`"owner_id" = 'user-1'`);
     expect(buildRowFilterWhere(filter, null)).toBe("1 = 0");
-    expect(buildRowFilterWhere(filter, {})).toBe("1 = 0");
   });
 
-  it("reads a dot-path claim when configured", () => {
-    const filter = { ownership: { column: "person_id", claim: "app_metadata.person_id" } };
-    const claims = { sub: "auth-uid", app_metadata: { person_id: "person-9" } };
-
-    expect(buildRowFilterWhere(filter, claims)).toBe(`"person_id" = 'person-9'`);
-  });
-
-  it("denies all rows when the configured claim is missing or non-primitive", () => {
-    const filter = { ownership: { column: "person_id", claim: "app_metadata.person_id" } };
-
-    // Runtime defense: claims that violate the static JwtClaims shape must still deny.
-    const malformedClaims = { sub: "auth-uid", app_metadata: "oops" } as unknown as JwtClaims;
-
-    expect(buildRowFilterWhere(filter, { sub: "auth-uid" })).toBe("1 = 0");
-    expect(buildRowFilterWhere(filter, malformedClaims)).toBe("1 = 0");
-    expect(buildRowFilterWhere(filter, { sub: "auth-uid", app_metadata: { person_id: { nested: true } } })).toBe(
-      "1 = 0",
-    );
-    expect(buildRowFilterWhere(filter, { sub: "auth-uid", app_metadata: { person_id: "" } })).toBe("1 = 0");
-  });
-
-  it("escapes quotes in claim-selected owner values", () => {
-    const filter = { ownership: { column: "person_id", claim: "app_metadata.person_id" } };
-
-    expect(buildRowFilterWhere(filter, { app_metadata: { person_id: "per'son" } })).toBe(`"person_id" = 'per''son'`);
-  });
-
-  it("composes shared OR clauses with claim-selected ownership", () => {
-    const filter = {
-      ownership: { column: "owner_id", claim: "app_metadata.person_id" },
-      shared: { sharedColumn: "is_shared", sharedUserId: "shared-1" },
-    };
-    const claims = { app_metadata: { person_id: "person-9" } };
-
-    expect(buildRowFilterWhere(filter, claims)).toBe(
-      `("owner_id" = 'person-9' OR ("is_shared" = true AND "owner_id" = 'shared-1'))`,
-    );
-  });
-});
-
-describe("row filter injection resistance (ADR-0003)", () => {
-  it("escapes single quotes in the ownership claim value so it cannot break out", () => {
-    const filter = { ownership: { column: "owner_id" } };
-    const claims: JwtClaims = { sub: "x' OR '1'='1" };
-
-    // The quote is doubled, keeping the whole value inside the string literal.
-    expect(buildRowFilterWhere(filter, claims)).toBe(`"owner_id" = 'x'' OR ''1''=''1'`);
-  });
-
-  it("escapes single quotes in a function-derived shared user id", () => {
-    const filter = {
-      ownership: { column: "owner_id" },
-      shared: { sharedUserId: (params: Record<string, unknown>) => String(params["uid"]) },
-    };
-    const claims: JwtClaims = { sub: "owner-1" };
-
-    const where = buildRowFilterWhere(filter, claims, { uid: "y'); DROP TABLE x;--" });
-
-    // Both the owner claim and the injected param value stay quoted/escaped.
-    expect(where).toBe(`("owner_id" = 'owner-1' OR "owner_id" = 'y''); DROP TABLE x;--')`);
+  it("returns null when there is no filter, or customWhere yields a SQL fragment / null / empty", () => {
+    expect(buildRowFilterWhere({}, { sub: "user-1" })).toBeNull();
+    expect(buildRowFilterWhere({ customWhere: () => null }, { sub: "user-1" })).toBeNull();
+    expect(buildRowFilterWhere({ customWhere: () => "" }, { sub: "user-1" })).toBeNull();
+    // A Drizzle SQL fragment is the parameterized path — not an inline string.
+    expect(buildRowFilterWhere({ customWhere: () => sql`"owner_id" = ${"user-1"}` }, { sub: "user-1" })).toBeNull();
   });
 });

@@ -1,13 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import {
-  escapeSqlLiteral,
-  isReservedKeyword,
-  isSimpleIdentifier,
-  maybeQuoteIdentifier,
-  quoteIdentifier,
-  quoteSqlLiteral,
-} from "@pgxsinkit/contracts";
+import { escapeSqlLiteral, maybeQuoteIdentifier, quoteIdentifier, quoteSqlLiteral } from "@pgxsinkit/contracts";
 
 // The single SQL identifier/literal resolver every package now routes through
 // (ADR-0004). Previously five-plus copies disagreed; the mutation path even left
@@ -19,25 +12,16 @@ describe("sql identifier resolver (ADR-0004)", () => {
     expect(quoteIdentifier(`a"b`)).toBe(`"a""b"`);
   });
 
-  it("recognises bare-safe simple identifiers (lowercase only)", () => {
-    expect(isSimpleIdentifier("todos")).toBe(true);
-    expect(isSimpleIdentifier("_x1")).toBe(true);
-    // Uppercase would be folded to lowercase by Postgres, so it is not bare-safe.
-    expect(isSimpleIdentifier("Todos")).toBe(false);
-    expect(isSimpleIdentifier("with space")).toBe(false);
-  });
-
-  it("flags reserved keywords", () => {
-    expect(isReservedKeyword("group")).toBe(true);
-    expect(isReservedKeyword("order")).toBe(true);
-    expect(isReservedKeyword("todos")).toBe(false);
-  });
-
   it("leaves simple non-reserved names bare and quotes the rest", () => {
+    // Covers the bare-safe + reserved-keyword decisions (now private to maybeQuoteIdentifier):
     expect(maybeQuoteIdentifier("todos")).toBe("todos");
+    expect(maybeQuoteIdentifier("_x1")).toBe("_x1");
     // The regression: a reserved-word table name must be quoted, not emitted bare.
     expect(maybeQuoteIdentifier("group")).toBe(`"group"`);
+    expect(maybeQuoteIdentifier("order")).toBe(`"order"`);
+    // Uppercase would be folded to lowercase by Postgres, so it is quoted.
     expect(maybeQuoteIdentifier("Todos")).toBe(`"Todos"`);
+    expect(maybeQuoteIdentifier("with space")).toBe(`"with space"`);
   });
 
   it("escapes and quotes string literals", () => {

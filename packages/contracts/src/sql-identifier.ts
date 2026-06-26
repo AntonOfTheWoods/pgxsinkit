@@ -111,15 +111,10 @@ export function quoteSqlLiteral(value: string): string {
 /**
  * A bare-safe identifier: a simple lowercase identifier Postgres will neither fold
  * nor misparse. Uppercase is excluded because Postgres folds an unquoted identifier
- * to lowercase, which would change its meaning.
+ * to lowercase, which would change its meaning. Internal to {@link maybeQuoteIdentifier}.
  */
-export function isSimpleIdentifier(value: string): boolean {
+function isSimpleIdentifier(value: string): boolean {
   return /^[a-z_][a-z0-9_]*$/.test(value);
-}
-
-/** True if the (lowercase) name is a PostgreSQL fully-reserved keyword. */
-export function isReservedKeyword(value: string): boolean {
-  return RESERVED_SQL_KEYWORDS.has(value);
 }
 
 /**

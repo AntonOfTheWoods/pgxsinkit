@@ -98,7 +98,7 @@ describe("registry fingerprint (ADR-0004)", () => {
   });
 
   it("changes when a static row filter is swapped, but not when only customWhere differs", () => {
-    const withOwnership = (ownerColumn: string) => {
+    const withColumns = (projection: string[]) => {
       const entry = defineSyncTable({
         tableName: "items",
         makeColumns: () => ({
@@ -109,12 +109,14 @@ describe("registry fingerprint (ADR-0004)", () => {
         clientProjection: { omitColumns: [] },
       });
       return defineSyncRegistry({
-        items: { ...entry, shape: { ...entry.shape!, rowFilter: { ownership: { column: ownerColumn } } } },
+        items: { ...entry, shape: { ...entry.shape!, rowFilter: { columns: projection } } },
       });
     };
 
-    // A static structural filter change (owner column) IS detected (review #5).
-    expect(fingerprintRegistry(withOwnership("owner_id"))).not.toBe(fingerprintRegistry(withOwnership("team_id")));
+    // A static structural filter change (the projected columns) IS detected (review #5).
+    expect(fingerprintRegistry(withColumns(["id", "owner_id"]))).not.toBe(
+      fingerprintRegistry(withColumns(["id", "team_id"])),
+    );
 
     // A change confined to the customWhere function body is not (only its presence is recorded).
     const withCustom = (fn: () => string) => {

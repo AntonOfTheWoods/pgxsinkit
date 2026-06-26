@@ -2,7 +2,7 @@ import { Repl } from "@electric-sql/pglite-repl";
 import { startTransition, useEffect, useMemo, useState } from "react";
 
 import type { MutationBatchItem, MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
-import { getSyncRegistrySchema } from "@pgxsinkit/contracts";
+import { getSyncRegistrySchema, quoteIdentifier, quoteSqlLiteral } from "@pgxsinkit/contracts";
 import {
   buildSyntheticRegistrySchemaName,
   buildSyntheticCreatePayload,
@@ -1655,14 +1655,6 @@ function localProjectionName(bundle: SyntheticRegistryBundle, objectName: string
   }
 
   return `${quoteIdentifier(schemaName)}.${quoteIdentifier(objectName)}`;
-}
-
-function quoteIdentifier(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-function quoteSqlLiteral(value: string) {
-  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function formatCount(value: number) {
