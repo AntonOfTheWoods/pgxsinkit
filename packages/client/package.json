@@ -27,8 +27,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@electric-sql/client": "^1.5.21",
-    "@electric-sql/experimental": "^6.0.21",
+    "@electric-sql/client": "^1.5.22",
+    "@electric-sql/experimental": "^6.0.22",
     "@pgxsinkit/contracts": "workspace:*"
   },
   "peerDependencies": {
