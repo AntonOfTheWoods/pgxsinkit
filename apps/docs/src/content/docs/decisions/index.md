@@ -33,5 +33,7 @@ complete as ADRs are added.
 - [ADR-0018 — Apply-function drift detection via an embedded fingerprint](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0018-apply-function-drift-detection.md)
 - [ADR-0019 — Row filters as type-safe Drizzle fragments → parameterized Electric `where`](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0019-row-filters-as-drizzle-fragments.md)
 - [ADR-0020 — Index-friendly RLS: `= ANY(ARRAY(subquery))` for runtime-resolved id-sets](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0020-index-friendly-rls-any-array.md)
+- [ADR-0021 — Sync lifecycle: subscription-timing and retention as orthogonal axes](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0021-lazy-ephemeral-sync-lifecycle.md)
+- [ADR-0022 — Pessimistic write-units: server-authoritative writes via flush-routing](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0022-pessimistic-write-units.md)
 
 <!-- adr:list:end -->

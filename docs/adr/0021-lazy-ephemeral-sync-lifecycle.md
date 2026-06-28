@@ -1,0 +1,182 @@
+# Sync lifecycle: subscription-timing and retention as orthogonal axes
+
+Status: proposed (2026-06-28)
+
+The original framing was a second "non-electric" / "direct" data flow — reads from a live API, writes
+synchronously — motivated by data that should not sit durably on the client (proctored exams;
+sensitive/PII data under erasure and data-minimisation pressure) and by per-user **cold** data that
+basically never changes but, multiplied across many thousands of users, bloats storage.
+
+Grilling dissolved the premise. The distinction that matters is not **transport** (Electric vs a direct
+API) but **sync lifecycle** — and that lifecycle is **two orthogonal axes, not one**. Every shape today is
+*eager* (subscribed at boot) and *persistent* (durable PGlite backend). The motivating cases vary those two
+switches independently while remaining **real Electric shapes** — live while held, governed by the same
+RLS-mirrored row filter, queryable and joinable in the same PGlite with the same Drizzle API. "Direct" was
+never a different system; it is a point in a 2×2 of sync lifecycle.
+
+Two supporting facts make this cheap and shape it:
+
+- The local PGlite schema is **already a runtime-derived projection** distinct from the server (no
+  migration), built **per-table**: each writable table gets its own read-cache table, overlay, **journal**,
+  sequence, read-model + sync-state views, and reconcile trigger/function. The only cross-table singleton is
+  a tiny key/value meta table (the registry fingerprint, ADR-0006); **no mutation data is pooled**. So an
+  ephemeral table's *entire* footprint — reads **and** writes — is a self-contained cluster that can be
+  emitted as `TEMP`.
+- Storage is a **deployment/runtime knob**, not an architecture (client: persisted vs in-memory/temp;
+  server: the Electric shape-log volume). So the right default is "ship everything eager-persistent,
+  measure, tune where a real problem appears" — not a second architecture against an unmeasured worry.
+  Electric also GCs idle shapes server-side.
+
+This subsumes the proposed RLS direct-read endpoint: with reads always served by Electric, the RLS-bounded
+direct-read path whose runway [ADR-0020](0020-index-friendly-rls-any-array.md) cleared is no longer a *core*
+read path — it degrades to an optional escape hatch for a genuine streamed read-once.
+
+## Decision
+
+1. **Lifecycle is two orthogonal axes**, declared per table (per consistency group — see §4), both
+   orthogonal to read/write mode and to authorization (the RLS policy / Electric row filter is unchanged):
+   - **Subscription timing — `eager` (default) | `lazy`.** `eager` joins the boot subscription set; `lazy`
+     is excluded from boot and subscribed on first query-reference.
+   - **Retention — `persistent` (default) | `ephemeral`.** `persistent` uses the durable PGlite backend with
+     a resumable subscription-state; `ephemeral` emits the table's whole local cluster as `TEMP` (§3) — no
+     durable trace.
+
+   The **four corners are all valid and cheap**, because the two presets below already require building both
+   ends of every underlying switch:
+
+   | | persistent | ephemeral |
+   |---|---|---|
+   | **eager** | warm, durable, offline — *today's default* | small data to keep warm immediately but with no durable trace; re-hydrates each boot |
+   | **lazy** | **deferred-activation** durable table (§2) — pay nothing at boot until first use, then a normal synced table | cold per-user / exam data — pay nothing until used, leave nothing behind |
+
+2. **`lazy` is a one-time ignition, not an ongoing mode.** A `lazy` table is **dormant** until first
+   referenced; first reference **activates** it. For `lazy + persistent`, activation is *permanent*: the
+   table joins the normal eager-persistent set — recorded by a **persisted activation flag** in the local
+   meta table, so subsequent boots subscribe it eagerly and it resumes like any durable table — with no
+   per-session re-evaluation, no "half-lazy", no serve-stale-then-update. An optional TTL / explicit
+   **desync** reverts it to dormant with a clean truncate. For `lazy + ephemeral`, activation is
+   session-scoped by construction (the temp cluster dies with the session), and idle-eviction
+   (subscriber-refcount + TTL → `unsubscribe` + drop the temp cluster) reclaims it within a session.
+
+3. **`ephemeral` = the whole per-table cluster emitted as `TEMP`.** Because the local store is per-table
+   (read-cache table, overlay, journal, sequence, read-model + sync-state views, reconcile trigger/function),
+   making *all* of them `TEMP` makes **both read- and write-ephemerality fall out automatically** — there is
+   no separate "ephemeral journal" mechanism. Mechanical consequences, all forced-consistent rather than
+   optional:
+   - the read-model / sync-state **views must be `TEMP`** (Postgres forbids a permanent relation depending on
+     a temporary one);
+   - the reconcile **function** lives in `pg_temp` (session-temp) alongside the temp table it references;
+   - temp objects resolve via `pg_temp` / search_path (unqualified), so the generator emits an ephemeral,
+     unqualified variant of the cluster DDL;
+   - the Electric row-applier must target the `pg_temp`-resolved name (a build-time confirmation).
+
+4. **Grouping constraints (the consistency group is the grain).** Subscription timing is a property of a
+   **consistency group**: a `lazy` table must be a singleton group, or its whole group is lazy together,
+   because a multi-table group commits atomically at a shared LSN frontier and cannot be partly lazy.
+   Retention likewise applies to the whole cluster a group spans.
+
+5. **Readiness is surfaced, not hidden.** A `lazy` table's live-query result envelope exposes its
+   hydrating/ready state — the same loading state every shape sits in at boot, triggered per-table on first
+   use — plus `fetchedAt`/`refetch` affordances the eager form does not carry, so identical-looking query
+   code cannot silently treat a cold/un-hydrated table as warm. The lifecycle axes are registry-declared and
+   typed, so a join that will cold-block on first use is visible at authoring time.
+
+## "True ephemeral" — the threat model
+
+`ephemeral` targets a deliberately-bounded guarantee: **no durable, origin-addressable copy in OPFS /
+IndexedDB once the site is closed.** It does *not* attempt "never touches disk at the OS level" — OS swap,
+memory compression, and tab-discard snapshots can transiently page even an in-memory instance's wasm heap,
+outside any in-browser control, so that guarantee is unachievable and is not the boundary. The determined
+local adversary (a full-power browser extension, devtools, an unlocked browser) can read wasm memory
+regardless of storage choice; that is why proctored exams run **stripped-down proctor browsers** — an
+*environmental* control outside pgxsinkit's scope. Under this bar a `TEMP` cluster (session-scoped, dropped
+on close) is "true ephemeral". A separate in-memory PGlite *instance* is the strongest form (no transient
+VFS contact at all) but costs cross-instance joins, so it is reserved for the rare case that needs it; the
+`TEMP`-cluster form is the default because it keeps cross-joins.
+
+## Composition rule: ephemeral has no durable write queue
+
+A temp journal dies with the session, so an `ephemeral` table has **no durable offline write queue** — a
+mutation enqueued but not flushed before the tab closes is lost. This is *consistent* with ephemerality (and
+is exactly right for an exam: no durable trace of answers), but it means "this write must not be lost" must
+be paired with prompt or **pessimistic** flush (the authoritative path of
+[ADR-0022](0022-pessimistic-write-units.md)), so the write reaches the server before close rather than
+trusting a queue that will not survive. This is a composition note, not a gap.
+
+## Why this is contained
+
+The per-group subscribe/teardown primitive **already exists and is reentrant**: `startGroupSync(pg, {
+groupKey, specs, … })` starts one consistency group on its own `MultiShapeStream` and returns
+`{ unsubscribe, isUpToDate }`; a singleton table is already its own group. The all-or-nothing boot is purely
+`startConfiguredSync`'s eager orchestration — a pgxsinkit choice, **not** an Electric or engine limitation.
+The per-table cluster DDL and a `TEMP` variant of it are a small extension of `generateLocalSchemaSql`; the
+truncate/teardown reuses `buildDropReadCacheSql` / `buildWipeLocalStoreSql`. So this is an **orchestration +
+DDL-variant policy layer over existing primitives**, with no sync-engine work.
+
+## Considered options
+
+- **A second direct-read API endpoint (reads bypass PGlite), under RLS.** Rejected as a *core* read path: it
+  forks the query API, the auth surface, and the result model into two systems; and once `= ANY(ARRAY)` RLS
+  (ADR-0020) makes RLS-alone reads fast, the only thing it adds over a shape is "no local copy" — which
+  `ephemeral` retention provides without leaving the Electric model. Retained only as an escape hatch for a
+  true streamed read-once.
+- **Direct fetch into a PGlite temp table (a snapshot).** Rejected: a snapshot forces the query API to
+  answer "is this stale?" (a hard, ongoing freshness burden) and to hand-roll reconciliation. A
+  `lazy`/`ephemeral` *shape* is live while held, so the burden shrinks to a transient "is this hydrated yet?".
+- **A single `lifecycle` enum (`eager-persistent | lazy-ephemeral`).** Rejected (this ADR's own first draft):
+  it conflates two independent switches and hides the two genuinely-useful off-diagonal corners
+  (`eager-ephemeral`, `lazy-persistent`), which cost nothing extra once both presets are built.
+- **A separate in-memory PGlite instance as the *only* ephemeral mechanism.** Rejected as the default: it
+  breaks cross-instance joins. Kept as the strongest-isolation option for the rare case that needs zero
+  transient VFS contact; the `TEMP`-cluster form is the default because it preserves joins.
+- **Per-table storage backend within one persisted PGlite.** N/A under the `TEMP`-cluster mechanism —
+  ephemerality is achieved by temp objects in the shared instance, not by a per-table backend (which PGlite
+  does not offer).
+- **Everything eager-persistent (do nothing).** Rejected as the *only* mode: it forces a durable per-user
+  copy of cold data and cannot serve the no-durable-client-copy requirements (exam integrity,
+  data-minimisation/erasure). It remains the correct **default**; the other corners are opt-in.
+
+## Consequences
+
+- **One system.** Reads are always Electric; "direct/non-electric" retires as an architecture and reappears
+  only as lifecycle axes. RLS-everywhere (ADR-0019/0020) is unchanged and remains the single read-auth
+  authority for every corner.
+- **Storage tuning is deferred and reversible.** Ship eager-persistent, measure, then move cold shapes to
+  `ephemeral` and/or point server-side Electric shape-log storage at cheap/ephemeral volumes — a deployment
+  change, not app code.
+- **Write-ephemerality is automatic** (the per-table `TEMP` cluster), at the cost of no durable offline write
+  queue for ephemeral tables (the composition rule above).
+- **The new honesty burden is small.** The result envelope distinguishes hydrating/cold from ready; a
+  cross-lifecycle join cold-blocks on first use (correct, but visible).
+- **The lift is contained** — orchestration + a `TEMP` DDL variant over `startGroupSync` /
+  `generateLocalSchemaSql`, not an engine change. This is the cheaper of the two lanes; sequence it before
+  the write lane (ADR-0022).
+
+## To confirm at build time
+
+- That a PGlite `TEMP` cluster leaves **no OPFS / IndexedDB trace after the tab closes** (expected: temp
+  objects are session-scoped and dropped; transient in-session VFS use is irrelevant under the threat model).
+- That the `./sync` engine (`syncShapesToTables`) accepts being invoked for *additional* groups mid-session
+  and torn down individually, and that its row-applier targets the `pg_temp`-resolved name for an ephemeral
+  cluster.
+- How a lazy group's subscription-state and the **whole-registry pause/resume** interact: a global pause must
+  not wake a lazy group; a lazy-start must not fight the pause.
+
+## Implementation status
+
+Not yet implemented — design record. The enabling primitives exist: `startGroupSync` (per-group
+`unsubscribe` / `isUpToDate`), the per-table cluster generator `generateLocalSchemaSql`, and the
+`buildDropReadCacheSql` / `buildWipeLocalStoreSql` teardown. The missing pieces are: the two lifecycle axes
+in the registry; exclusion of `lazy` groups from the eager boot pass; start-on-first-reference in the
+live-query layer; the persisted activation flag + permanent promotion for `lazy + persistent`; the `TEMP`
+(`pg_temp`, unqualified, temp views) DDL variant for `ephemeral`; and subscriber-refcount + idle-TTL eviction
+for `lazy + ephemeral`.
+
+References: [ADR-0009](0009-internalize-read-path-sync.md) (read-path sync; consistency groups = decision 2 —
+the per-group `MultiShapeStream` and the group grain this builds on);
+[ADR-0019](0019-row-filters-as-drizzle-fragments.md) / [ADR-0020](0020-index-friendly-rls-any-array.md) (the
+RLS row-filter / `= ANY(ARRAY)` that stays the single read-auth authority);
+`packages/client/src/shape-sync.ts` (`startGroupSync`, `startConfiguredSync`);
+`packages/client/src/schema.ts` (`generateLocalSchemaSql` — the per-table cluster; `buildDropReadCacheSql` /
+`buildWipeLocalStoreSql`); [ADR-0022](0022-pessimistic-write-units.md) (the write-side twin; the pessimistic
+flush an ephemeral table pairs with); `CONTEXT.md` (the Parity boundary).
