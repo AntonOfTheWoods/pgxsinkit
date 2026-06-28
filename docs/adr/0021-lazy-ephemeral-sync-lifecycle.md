@@ -154,54 +154,57 @@ DDL-variant policy layer over existing primitives**, with no sync-engine work.
 
 ## Known limitations / TO FIX
 
-The read-path safety net keeps a query from silently reading an un-hydrated `lazy` relation. It has
-three stacking layers: **(A)** build-time recording of relations reached through the client's
-`views`/`tables` accessors; **(C)** structural detection of a Drizzle builder's FROM/JOIN; and the
-**tripwire**, which scans the *compiled* SQL for every lazy relation's physical name and throws
-`LazyRelationNotActivatedError` for any referenced-but-dormant one. Auto-activation is the union of
-(A) ∪ (C) ∪ the declared `use`; the tripwire is the guaranteed floor under all of it. The detection
-layers are deliberately *precise* (no false positives → no spurious subscriptions); the tripwire is
-deliberately *conservative* (it cannot miss a real reference, and over-matches rather than under-matches).
+The read-path safety net keeps a query from silently reading an un-hydrated `lazy` relation, and it is
+**one mechanism**: scan the query's *compiled* SQL for the lazy relations it reads, activate them, and
+hydrate before the query runs. A lazy relation therefore auto-activates on **any** reference — FROM,
+JOIN, subquery, WHERE — with no Proxy, no builder-AST walk, and no `use` declaration required (`use`
+remains an optional pre-activation hint).
 
-The residual gaps — each fails **loud** (throws), never silently, unless explicitly noted:
+Why one SQL scan suffices and is safe:
 
-1. **Directly-imported lazy table referenced only in a subquery/WHERE → throws (no auto-activation).**
-   (A) is blind (the relation never passes through the client accessor) and (C) is blind (it is not in
-   the top-level FROM/JOIN); the tripwire catches it from the compiled SQL and throws. *Workaround:*
-   declare it — `useLiveQuery({ use: [...] })` / `client.query({ use: [...] })` — or `ensureSynced`
-   first. *TO FIX (upstream):* deep-walk the builder's WHERE/subquery AST in (C), and/or ship the
-   compile-time `use`-scoped client (the "Q" facade) so an un-declared lazy reference is unrepresentable.
+- **Detection = activation.** The compiled SQL is ground truth — a relation the query reads must appear
+  there by name. Earlier drafts split a "precise" detector (a client-accessor Proxy + a Drizzle
+  builder-config walk) from a "conservative" SQL *tripwire* that threw on the gap between them. The scan
+  subsumes both (everything they could catch is in the compiled SQL — and the Proxy was *worse*: it
+  recorded accessed-but-unused relations), so they were removed, taking the Drizzle-internal-builder-shape
+  dependency with them.
+- **No value false positives.** Drizzle compiles to *parameterised* SQL — values are bound (`$1`, `$2`),
+  never inlined — so a literal like `where label = 'archive'` cannot masquerade as the table `archive`.
+- **Schema-correct + alias-proof by construction.** The index is built from the *same* Drizzle objects
+  that emit the SQL (`getTableConfig`/`getViewConfig`), and matches the exact **quoted** token they emit:
+  `"name"`, or `"schema"."name"` when schema-qualified. Quotes make the token self-delimiting (`"a"` can't
+  match inside `"ab"`); a schema-qualified token (`"appserver"."events"`) is **collision-proof** against
+  any bare alias/CTE/table-alias, since Drizzle always emits aliases bare.
 
-2. **Raw SQL (`useLiveRows`) referencing a lazy relation → throws.** A raw string has no structural
-   detection, so the tripwire is the only layer and cannot auto-activate. *Workaround:* `ensureSynced`
-   the relation first, or use the Drizzle/declared hooks. By design — raw SQL is the escape hatch.
+Residual edges:
 
-3. **Tripwire over-match (spurious throw).** The scan matches a lazy relation's physical name as a whole
-   identifier anywhere in the compiled SQL — including inside a string literal, a column alias, or a
-   comment. This errs toward throwing (the safe direction) but can reject a query that does not actually
-   read the relation. *Workaround:* `ensureSynced` the named relation, or avoid colliding identifiers.
-   Residual risk is low because read-model views are `_read_model`-suffixed. *TO FIX:* tokenise the SQL
-   (strip string/comment spans) before matching.
-
-4. **`client.drizzle` direct reads bypass the guard entirely — the one genuinely-silent path.** A bare
-   `await client.drizzle.select()…` (not through `client.query`/`queryRow` or the hooks) has no
-   interception point, so a lazy relation read there returns empty/stale silently. *Workaround:* use the
-   guarded equivalents (`client.query` / `useLiveQuery`) or `ensureSynced` first. Documented as the
-   unguarded escape hatch; `client.drizzle` stays available for power users who own activation.
-
-5. **(C) depends on Drizzle's internal builder shape (`config.table` / `config.joins`).** It reads
-   non-public internals, so a Drizzle major could change them. Mitigated two ways: detection **degrades
-   safely** (an unrecognised node is skipped → falls through to the tripwire, never crashes), and the
-   shape is **pinned by `lazy-guard` tests** so a break surfaces as a test failure, not silent
-   under-detection. Re-verify on every Drizzle upgrade.
-
-6. **The guard means "never read a *never-hydrated* relation", not "always read the freshest".** A lazy
-   relation that started and completed initial sync stays "active" even if its stream later flips
-   `isUpToDate:false` during a resync. Intentional — staleness is the convergence layer's concern, not
-   the lazy guard's.
-
-7. **Sync-disabled (local-only) mode skips the guard.** `isSynced` returns `true` when sync is disabled,
-   so the tripwire never fires — `lazy` has no meaning without Electric.
+1. **Schema-less relation vs. a same-named column alias.** For a relation with *no* schema (a bare
+   readonly table, or a `*_read_model` view), a column aliased `as "name"` shares the bare token. Handled
+   by an `as`-lookbehind guard (Drizzle emits `… as "name"` for `.as()`), so the realistic case is closed.
+   The narrow remainder — a *CTE* or *table-alias* named **identically** to a bare lazy relation — is not
+   excluded, but is impossible for `*_read_model` views and, for a bare readonly table, costs at most one
+   spurious **persistent** subscription (never a wrong result, since activating an unread relation cannot
+   change a query). Give such a relation a schema to make it collision-proof. *TO FIX (optional):* lex the
+   SQL to also exclude CTE/table-alias positions.
+2. **Raw SQL is unsupported, on purpose.** `useLiveRows` (a raw string) is the **unguarded** escape
+   hatch — it does not auto-activate. A raw query touching a lazy relation must `client.ensureSynced([...])`
+   first; otherwise it reads empty/stale. Use the Drizzle hooks / `client.query` for guarded reads.
+3. **`client.drizzle` direct reads bypass the guard.** A bare `await client.drizzle.select()…` (not via
+   `client.query`/`queryRow` or the hooks) has no interception point. *Workaround:* use the guarded
+   equivalents, or `ensureSynced` first. The documented power-user escape hatch.
+4. **The backstop throws only on activation failure.** After scanning + activating, a final check throws
+   `LazyRelationNotActivatedError` if a referenced lazy relation is still not active — a failed initial
+   sync, or a lazy relation with no consistency group — rather than letting the query read empty/stale.
+   In the normal path everything scanned was just activated, so it never fires.
+5. **"Never read a *never-hydrated* relation", not "always read the freshest".** A lazy relation that
+   started and finished initial sync stays "active" even if its stream later flips `isUpToDate:false`
+   during a resync. Staleness is the convergence layer's concern, not the guard's.
+6. **Sync-disabled (local-only) mode skips the guard.** `isSynced` returns `true` when sync is disabled —
+   `lazy` has no meaning without Electric.
+7. **`ephemeral` (not built) will *not* auto-pull on the scan.** When the retention axis lands, an
+   `ephemeral` relation referenced without an explicit `use` should refuse to auto-activate (its whole
+   point is to not pull cold data on a probable reference) and instead require the deliberate `use` — the
+   one place a throw, not an auto-activate, is the right default.
 
 ## To confirm at build time
 
@@ -225,11 +228,12 @@ Built:
   either axis). `packages/contracts` (`config.ts`, `registry.ts`).
 - **Exclusion of `lazy` groups from the eager boot pass** + a single-flight `ensureGroupStarted` /
   `groupKeyForTable` / `isTableStarted` on the sync result. `packages/client/src/shape-sync.ts`.
-- **Start-on-first-reference, made safe.** The read-path safety net (`packages/client/src/lazy-guard.ts`)
-  — (A) accessor recording, (C) builder config-walk, the compiled-SQL tripwire — surfaced through
-  `client.ensureSynced` / `isSynced` / `prepareQuery`, the non-live `client.query` / `queryRow` facade,
-  and the live `useLiveQuery` / `useLiveQueryRow` hooks (with `useLiveDrizzleRows` / `useLiveRows` now
-  auto-detecting + tripwiring). See **Known limitations** above for the residual blindspots.
+- **Start-on-first-reference, made safe by one compiled-SQL scan** (`packages/client/src/lazy-guard.ts`):
+  a query's parameterised SQL is scanned for the schema-aware quoted tokens of its lazy relations, which
+  are then activated + hydrated before it runs. Surfaced through `client.ensureSynced` / `isSynced` /
+  `prepareQuery`, the non-live `client.query` / `queryRow` facade, and the live `useLiveQuery` /
+  `useLiveQueryRow` + `useLiveDrizzleRows` hooks (`useLiveRows` raw SQL is the unguarded escape hatch).
+  See **Known limitations** above for why the scan is sufficient and its residual edges.
 
 Not yet built: the persisted activation flag + permanent promotion for `lazy + persistent` (today a lazy
 group activates per session, not once-permanently); the `TEMP` (`pg_temp`, unqualified, temp views) DDL

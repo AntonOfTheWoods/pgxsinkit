@@ -32,15 +32,17 @@ function lazyFacadeRegistry(): SyncTableRegistry {
 }
 
 // Controllable sync stub: 1 group per table (`<key>-shape`), `started` tracks activation so
-// isTableStarted reflects ensureGroupStarted. Reset per test.
+// isTableStarted reflects ensureGroupStarted. With `failActivation`, ensureGroupStarted records the call
+// but never marks the group started — simulating a start that didn't take (backstop path). Reset per test.
 const started = new Set<string>();
 const ensureGroupStartedCalls: string[] = [];
+let failActivation = false;
 const startConfiguredSyncMock = mock(async () => ({
   unsubscribe: () => undefined,
   tables: {},
   ensureGroupStarted: async (groupKey: string) => {
     ensureGroupStartedCalls.push(groupKey);
-    started.add(groupKey);
+    if (!failActivation) started.add(groupKey);
   },
   groupKeyForTable: (tableKey: string) => `${tableKey}-shape`,
   isTableStarted: (tableKey: string) => started.has(`${tableKey}-shape`),
@@ -134,18 +136,29 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     expect(rows).toEqual([{ id: "a1" }]);
   });
 
-  it("THROWS when a query references an undeclared, un-activated lazy relation (no silent empty result)", async () => {
+  it("AUTO-ACTIVATES an undeclared lazy relation found in the compiled SQL (no `use` needed)", async () => {
     const client = await makeClient("memory:/lazy-facade-undeclared");
-    // No `use`, and the fake builder exposes no structural config — neither (A) nor (C) can auto-detect
-    // the `archive` reference, so the SQL tripwire is the only thing standing between us and bad data.
-    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
-    await expect(client.query({ build: () => fakeBuilder(`select * from "archive"`, []) })).rejects.toBeInstanceOf(
-      LazyRelationNotActivatedError,
-    );
+    // No `use` — the SQL scan alone finds `"archive"` and activates it before the query runs.
+    const rows = await client.query({ build: () => fakeBuilder(`select * from "archive"`, [{ id: "a1" }]) });
+    expect(ensureGroupStartedCalls).toEqual(["archive-shape"]);
+    expect(client.isSynced("archive")).toBe(true);
+    expect(rows).toEqual([{ id: "a1" }]);
+  });
 
-    // It must throw BEFORE activating anything — the developer has to fix the query, not have it silently
-    // "work" by side effect.
-    expect(ensureGroupStartedCalls).toEqual([]);
+  it("the backstop THROWS when a referenced lazy relation cannot be activated (would read empty/stale)", async () => {
+    const client = await makeClient("memory:/lazy-facade-backstop");
+    failActivation = true;
+    try {
+      // archive is scanned and ensureGroupStarted is called, but the start does not take (isTableStarted
+      // stays false) — so the backstop refuses to run the query rather than read empty data.
+      // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+      await expect(client.query({ build: () => fakeBuilder(`select * from "archive"`, []) })).rejects.toBeInstanceOf(
+        LazyRelationNotActivatedError,
+      );
+      expect(ensureGroupStartedCalls).toEqual(["archive-shape"]); // it DID try to activate
+    } finally {
+      failActivation = false;
+    }
   });
 
   it("does not trip on a query that touches only eager relations", async () => {
@@ -172,21 +185,12 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     expect(none).toBeNull();
   });
 
-  it("prepareQuery (the live-hook seam) activates declared relations and tripwires raw SQL", async () => {
+  it("prepareQuery (the live-hook seam) auto-activates lazy relations scanned from the compiled SQL", async () => {
     const client = await makeClient("memory:/lazy-facade-prepare");
-
-    // The raw-SQL path: no builder, no accessor recording — only `use` activates and only the tripwire
-    // guards. A declared lazy relation activates and passes.
-    await client.prepareQuery({ sql: `select * from "archive"`, use: ["archive"] });
+    // The seam the React live hooks call: scanning the compiled SQL alone activates `archive` — no `use`.
+    await client.prepareQuery({ sql: `select * from "archive"` });
     expect(ensureGroupStartedCalls).toEqual(["archive-shape"]);
-
-    // An undeclared lazy relation in raw SQL trips (the raw-SQL blindspot → throw). Reset activation so
-    // `archive` is dormant again for this assertion.
-    started.clear();
-    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
-    await expect(client.prepareQuery({ sql: `select * from "archive"` })).rejects.toBeInstanceOf(
-      LazyRelationNotActivatedError,
-    );
+    expect(client.isSynced("archive")).toBe(true);
   });
 
   it("ensureSynced activates a lazy group and isSynced reflects it; both are idempotent", async () => {

@@ -1,191 +1,96 @@
-import { is } from "drizzle-orm";
-import { getTableConfig, getViewConfig, PgTable, PgView } from "drizzle-orm/pg-core";
+import { getTableConfig, getViewConfig } from "drizzle-orm/pg-core";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 /**
  * Lazy-relation safety (ADR-0021).
  *
- * A `lazy` relation is held out of the eager boot and only subscribed on first reference. The hazard
- * is a query reading it *before* it is hydrated — which silently returns empty/stale rows. This module
- * is the pure, React-free core that prevents that, with three layers that stack:
+ * A `lazy` relation is held out of the eager boot and only subscribed on first reference. The hazard is
+ * a query reading it *before* it is hydrated — which silently returns empty/stale rows. This pure,
+ * React-free core detects which lazy relations a query reads by scanning its **compiled** SQL, so the
+ * caller can activate them (and hydrate-then-run) before the query executes.
  *
- *  - **(A) build-time detection** ({@link createRecordingClient}) — a Proxy over the client's
- *    `views`/`tables` accessors records every relation reached *through the client* (any position:
- *    FROM, JOIN, subquery, WHERE). Blind only to relations imported as Drizzle objects directly.
- *  - **(C) structural detection** ({@link detectKeysFromBuilder}) — walks a Drizzle select builder's
- *    FROM + JOIN config. Catches directly-imported tables/views in those positions; blind to relations
- *    nested only in subqueries/WHERE.
- *  - **the tripwire** ({@link assertLazyRefsActivated}) — scans the *compiled* SQL (ground truth) for
- *    every lazy relation's physical name and throws if any referenced one is not active. This never
- *    misses a real reference; it is the guaranteed floor under both (A) and (C).
- *
- * (A) ∪ (C) drive precise *auto-activation* (no false positives → no spurious subscriptions); the
- * tripwire converts whatever they miss from a silent wrong result into a loud, actionable error.
- * Known residual gaps are enumerated in ADR-0021 → "Known limitations".
+ * Why a single SQL scan is sufficient (and why there is no Proxy / builder-AST walk): Drizzle compiles
+ * a query to parameterised SQL — values are bound (`$1`, `$2`), never inlined — and emits every relation
+ * as a **quoted** identifier (`"name"`, or `"schema"."name"` when it carries a schema). So the compiled
+ * SQL is ground truth: a relation the query reads must appear there by name, and the only things in the
+ * text are quoted identifiers, keywords and `$n` placeholders. The index is built from the *same* Drizzle
+ * objects that emit the SQL (`getTableConfig`/`getViewConfig`), so a token matches emission by
+ * construction — schema and all. See "Known limitations" in ADR-0021 for the residual edges.
  */
 
-/** Static index of a registry's lazy relations and the physical names they compile to. */
+/** Static index of a registry's lazy relations and the exact quoted tokens their reads compile to. */
 export interface LazyGuardIndex {
   /** Registry keys whose subscription timing is `lazy`. */
   readonly lazyKeys: ReadonlySet<string>;
-  /** Physical relation name (synced table name and read-model view name, lowercased) → registry key. */
-  readonly nameToKey: ReadonlyMap<string, string>;
-  /** Per lazy key, the physical names (synced table + read-model view) to scan compiled SQL for. */
-  readonly lazyNames: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Per lazy key, the exact quoted reference token(s) the compiled SQL emits when reading it: the synced
+   * table (and, for readwrite, its read-model view) as `"name"` or `"schema"."name"`. Schema-qualified
+   * when the Drizzle object carries a schema — which makes the token collision-proof against bare
+   * aliases/CTEs.
+   */
+  readonly lazyTokens: ReadonlyMap<string, readonly string[]>;
 }
 
 /** Build the {@link LazyGuardIndex} for a registry. Cheap and pure — cache it per client. */
 export function buildLazyGuardIndex(registry: SyncTableRegistry): LazyGuardIndex {
   const lazyKeys = new Set<string>();
-  const nameToKey = new Map<string, string>();
-  const lazyNames = new Map<string, readonly string[]>();
+  const lazyTokens = new Map<string, readonly string[]>();
 
   for (const [key, entry] of Object.entries(registry)) {
-    const names: string[] = [];
+    if (entry.subscription !== "lazy") continue;
+    lazyKeys.add(key);
 
-    const tableName = getTableConfig(entry.table).name.toLowerCase();
-    names.push(tableName);
-    nameToKey.set(tableName, key);
-
+    const tokens: string[] = [];
+    const table = getTableConfig(entry.table);
+    tokens.push(quotedRef(table.name, table.schema));
     if (entry.view != null) {
-      const viewName = getViewConfig(entry.view).name.toLowerCase();
-      names.push(viewName);
-      nameToKey.set(viewName, key);
+      const view = getViewConfig(entry.view);
+      tokens.push(quotedRef(view.name, view.schema));
     }
-
-    if (entry.subscription === "lazy") {
-      lazyKeys.add(key);
-      lazyNames.set(key, names);
-    }
+    lazyTokens.set(key, tokens);
   }
 
-  return { lazyKeys, nameToKey, lazyNames };
+  return { lazyKeys, lazyTokens };
+}
+
+/** The quoted identifier Drizzle emits for a relation: `"schema"."name"` when schema-qualified, else `"name"`. */
+function quotedRef(name: string, schema: string | undefined): string {
+  return schema != null && schema.length > 0 ? `"${schema}"."${name}"` : `"${name}"`;
 }
 
 /**
- * (C) Structural detection: the registry keys a Drizzle select builder references in its FROM and JOIN
- * positions, covering both base tables and read-model views. Cannot see relations that appear only in
- * subqueries or WHERE — those are the tripwire's job. Resilient to Drizzle internal-shape drift: an
- * unrecognised node is skipped, never thrown on (pinned by the lazy-guard tests).
- */
-export function detectKeysFromBuilder(builder: unknown, index: LazyGuardIndex): Set<string> {
-  const keys = new Set<string>();
-  const config = readBuilderConfig(builder);
-  if (config == null) return keys;
-
-  addRelationKey(config.table, index, keys);
-  for (const join of config.joins ?? []) {
-    addRelationKey(join?.table, index, keys);
-  }
-  return keys;
-}
-
-interface BuilderConfigShape {
-  readonly table?: unknown;
-  readonly joins?: ReadonlyArray<{ readonly table?: unknown } | null | undefined>;
-}
-
-function readBuilderConfig(builder: unknown): BuilderConfigShape | null {
-  if (builder == null || typeof builder !== "object") return null;
-  const config = (builder as { config?: unknown }).config;
-  if (config == null || typeof config !== "object") return null;
-  return config as BuilderConfigShape;
-}
-
-function addRelationKey(node: unknown, index: LazyGuardIndex, keys: Set<string>): void {
-  const name = relationName(node);
-  if (name == null) return;
-  const key = index.nameToKey.get(name);
-  if (key != null) keys.add(key);
-}
-
-/** The physical name of a FROM/JOIN node, or null for anything that is not a plain table/view. */
-function relationName(node: unknown): string | null {
-  try {
-    if (is(node, PgTable)) return getTableConfig(node).name.toLowerCase();
-    if (is(node, PgView)) return getViewConfig(node).name.toLowerCase();
-  } catch {
-    // Defensive: an unrecognised/internal node shape must never crash detection — fall through to the
-    // tripwire, which reads the compiled SQL.
-    return null;
-  }
-  return null;
-}
-
-/** Minimal shape of the client wrapped by {@link createRecordingClient}. */
-interface RecordableClient {
-  readonly views?: Record<string, unknown>;
-  readonly tables?: Record<string, unknown>;
-}
-
-/**
- * (A) Build-time detection: wrap a client so reading `c.views.x` / `c.tables.x` records the registry
- * key `x`. Returns the wrapped client to hand to the caller's `buildQuery`, plus the live `accessed`
- * set. React-agnostic — works for any build callback that reaches relations through the client.
- */
-export function createRecordingClient<TClient extends RecordableClient>(
-  client: TClient,
-): { client: TClient; accessed: Set<string> } {
-  const accessed = new Set<string>();
-
-  const recordAccessors = <T extends object>(accessorMap: T): T =>
-    new Proxy(accessorMap, {
-      get(target, prop, receiver) {
-        // Only own keys are registry relations; skip inherited props (`toString`, …) and symbols.
-        if (typeof prop === "string" && Object.hasOwn(target, prop)) accessed.add(prop);
-        return Reflect.get(target, prop, receiver);
-      },
-    });
-
-  const wrapped = new Proxy(client, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
-      if ((prop === "views" || prop === "tables") && value != null && typeof value === "object") {
-        return recordAccessors(value as Record<string, unknown>);
-      }
-      return value;
-    },
-  });
-
-  return { client: wrapped, accessed };
-}
-
-/**
- * The tripwire (ADR-0021): scan a COMPILED SQL string for the physical names of every lazy relation,
- * returning the lazy registry keys whose name appears. The compiled SQL is ground truth — a relation
- * Postgres will read must appear here — so this never misses a real reference. It errs toward
- * over-matching on a name that also appears in a string literal / column alias (the safe direction;
- * see ADR-0021 → "Known limitations").
+ * The compiled-SQL scan: the lazy registry keys whose quoted reference token appears in `sql`. Because
+ * the token is fully quoted it is self-delimiting (`"a"` cannot match inside `"ab"`), so a substring test
+ * is exact. A *bare* token sitting in alias position (`… as "name"`, which Drizzle emits for `.as("name")`)
+ * is excluded — the one realistic collision for a schema-less relation; a schema-qualified token cannot be
+ * aliased and so needs no such guard.
  */
 export function findReferencedLazyKeysInSql(sql: string, index: LazyGuardIndex): Set<string> {
   const found = new Set<string>();
-  const haystack = sql.toLowerCase();
-  for (const [key, names] of index.lazyNames) {
-    if (names.some((name) => containsIdentifier(haystack, name))) found.add(key);
+  for (const [key, tokens] of index.lazyTokens) {
+    if (tokens.some((token) => sqlReferencesToken(sql, token))) found.add(key);
   }
   return found;
 }
 
-/** True if `name` appears in `haystack` as a whole identifier token (optionally double-quoted). */
-function containsIdentifier(haystack: string, name: string): boolean {
+function sqlReferencesToken(sql: string, token: string): boolean {
   for (let from = 0; ; ) {
-    const at = haystack.indexOf(name, from);
+    const at = sql.indexOf(token, from);
     if (at === -1) return false;
-    if (!isIdentChar(haystack[at - 1]) && !isIdentChar(haystack[at + name.length])) return true;
-    from = at + name.length;
+    // Exclude an alias occurrence: `<expr> as "token"`. Only a bare token can be an alias, so this never
+    // rejects a real (schema-qualified or FROM/JOIN) reference. Window comfortably covers Drizzle's ` as `.
+    if (!/\bas\s+$/i.test(sql.slice(Math.max(0, at - 16), at))) return true;
+    from = at + token.length;
   }
 }
 
-function isIdentChar(ch: string | undefined): boolean {
-  if (ch == null) return false;
-  return (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") || ch === "_";
-}
-
 /**
- * Throw if a query references a lazy relation that is not active (ADR-0021). Converts the dangerous
- * silent failure — reading an un-hydrated lazy table and getting empty/stale rows — into a loud,
- * actionable error. Call after the auto-detected/declared lazy groups have been activated.
+ * The activation backstop (ADR-0021): throw if a query references a lazy relation that is still not
+ * active. Called *after* the referenced lazy relations have been activated, so in the normal path every
+ * scanned relation is now active and this passes. It fires only when activation could not make a
+ * referenced relation active (a start that failed, or a lazy relation with no consistency group) —
+ * converting a would-be silent empty/stale read into a loud error.
  */
 export function assertLazyRefsActivated(args: {
   sql: string;
@@ -197,20 +102,18 @@ export function assertLazyRefsActivated(args: {
   if (missing.length > 0) throw new LazyRelationNotActivatedError(missing);
 }
 
-/** Thrown by the tripwire ({@link assertLazyRefsActivated}) when a lazy relation is read while dormant. */
+/** Thrown by the backstop ({@link assertLazyRefsActivated}) when a referenced lazy relation could not be activated. */
 export class LazyRelationNotActivatedError extends Error {
-  /** The lazy registry keys that were referenced but not active. */
+  /** The lazy registry keys that were referenced but could not be activated. */
   readonly relations: readonly string[];
 
   constructor(relations: readonly string[]) {
     const quoted = relations.map((r) => `"${r}"`).join(", ");
     super(
-      `[pgxsinkit] query references lazy-synced relation(s) ${quoted} that are not active, so it would ` +
-        `read empty/stale data (ADR-0021). Activate them first: use the safe facade — ` +
-        `query({ use: [${quoted}], build }) / useLiveQuery({ use: [${quoted}], build }) — or call ` +
-        `client.ensureSynced([${quoted}]). This fires when a lazy relation is reached in a way pgxsinkit ` +
-        `cannot auto-detect (a subquery/WHERE reference, raw SQL, or a directly-imported Drizzle table). ` +
-        `See "Known limitations" in ADR-0021.`,
+      `[pgxsinkit] query references lazy-synced relation(s) ${quoted} that could not be activated (ADR-0021), ` +
+        `so it would read empty/stale data. This is usually a failed initial sync or a lazy relation with no ` +
+        `consistency group. Activate it explicitly — client.ensureSynced([${quoted}]) — or check the sync ` +
+        `status. See "Known limitations" in ADR-0021.`,
     );
     this.name = "LazyRelationNotActivatedError";
     this.relations = relations;

@@ -1,7 +1,7 @@
 import type { LiveQuery, LiveQueryResults } from "@electric-sql/pglite/live";
 import { createContext, type DependencyList, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
-import { type ClientPGlite, createRecordingClient, type SyncClient, syncDebug } from "@pgxsinkit/client";
+import { type ClientPGlite, type SyncClient, syncDebug } from "@pgxsinkit/client";
 import type { SyncTableName, SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { remapLiveRow, type SelectedFields } from "./remap-live-row";
@@ -54,6 +54,12 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
 
   // ─── Raw SQL live hooks ───────────────────────────────────────────────────
 
+  /**
+   * Reactive raw-SQL query. This is the **unguarded** escape hatch: it does not participate in the
+   * lazy-relation safety net (ADR-0021) — a raw string is not parameterised/quoted predictably, so a
+   * `lazy` relation referenced here will read empty/stale unless you `client.ensureSynced([...])` first.
+   * Prefer {@link useLiveDrizzleRows} / {@link useLiveQuery} for anything touching lazy relations.
+   */
   function useLiveRows<TRow extends Record<string, unknown> = Record<string, unknown>>(
     query: string,
     options?: {
@@ -62,28 +68,23 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
       /** Explicit PGlite instance — overrides the context client. Useful in tests or multi-db scenarios. */
       pglite?: ClientPGlite;
     },
-  ): { rows: TRow[]; loading: boolean; hydrating: boolean; error: Error | null } {
+  ): { rows: TRow[]; loading: boolean; error: Error | null } {
     const contextClient = useContext(SyncClientContext);
     const pglite = options?.pglite ?? contextClient?.pglite;
     const ready = options?.ready ?? true;
-    // Guard raw SQL with the lazy-relation tripwire (ADR-0021) when we have the full client — a raw query
-    // cannot drive auto-activation, so a lazy reference it makes must be pre-activated or it throws. When
-    // only a bare `pglite` is supplied (no client), there is no seam, so it runs unguarded.
-    const guard = options?.pglite == null ? contextClient : null;
 
     const paramsKey = JSON.stringify(options?.params ?? []);
     const stableParams = useMemo<unknown[]>(() => JSON.parse(paramsKey) as unknown[], [paramsKey]);
 
-    const [state, setState] = useState<LiveRowsState<TRow[]>>({
+    const [state, setState] = useState<{ rows: TRow[]; loading: boolean; error: Error | null }>({
       rows: [],
       loading: ready,
-      hydrating: ready,
       error: null,
     });
 
     useEffect(() => {
       if (!ready || pglite == null) {
-        setState({ rows: [], loading: ready, hydrating: false, error: null });
+        setState({ rows: [], loading: ready, error: null });
         return;
       }
 
@@ -91,35 +92,26 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
       let liveQuery: LiveQuery<TRow> | undefined;
       let listener: ((results: LiveQueryResults<TRow>) => void) | undefined;
 
-      setState((prev) => ({ rows: prev.rows, loading: true, hydrating: guard != null, error: null }));
+      setState((prev) => ({ rows: prev.rows, loading: true, error: null }));
 
-      // Tripwire first (no-op when there is no guarding client), then register the live query.
-      void (guard ? guard.prepareQuery({ sql: query }) : Promise.resolve())
-        .then(() => {
-          if (!active) return undefined;
-          setState((prev) => ({ rows: prev.rows, loading: true, hydrating: false, error: null }));
-          return pglite.live.query<TRow>(query, stableParams).then((registered: LiveQuery<TRow>) => {
-            if (!active) return registered.unsubscribe();
-            liveQuery = registered;
-            setState({ rows: registered.initialResults.rows, loading: false, hydrating: false, error: null });
-            listener = (results) => {
-              if (active) {
-                syncDebug("live query updated → re-render", { rows: results.rows.length });
-                setState({ rows: results.rows, loading: false, hydrating: false, error: null });
-              }
-            };
-            registered.subscribe(listener);
-            return undefined;
-          });
+      void pglite.live
+        .query<TRow>(query, stableParams)
+        .then((registered: LiveQuery<TRow>) => {
+          if (!active) return registered.unsubscribe();
+          liveQuery = registered;
+          setState({ rows: registered.initialResults.rows, loading: false, error: null });
+          listener = (results) => {
+            if (active) {
+              syncDebug("live query updated → re-render", { rows: results.rows.length });
+              setState({ rows: results.rows, loading: false, error: null });
+            }
+          };
+          registered.subscribe(listener);
+          return undefined;
         })
         .catch((error: unknown) => {
           if (active) {
-            setState({
-              rows: [],
-              loading: false,
-              hydrating: false,
-              error: error instanceof Error ? error : new Error(String(error)),
-            });
+            setState({ rows: [], loading: false, error: error instanceof Error ? error : new Error(String(error)) });
           }
         });
 
@@ -127,7 +119,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         active = false;
         if (liveQuery) void liveQuery.unsubscribe(listener);
       };
-    }, [pglite, guard, query, ready, stableParams]);
+    }, [pglite, query, ready, stableParams]);
 
     return state;
   }
@@ -135,19 +127,18 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
   function useLiveRow<TRow extends Record<string, unknown> = Record<string, unknown>>(
     query: string,
     options?: { params?: readonly unknown[]; ready?: boolean; pglite?: ClientPGlite },
-  ): { row: TRow | null; loading: boolean; hydrating: boolean; error: Error | null } {
-    const { rows, loading, hydrating, error } = useLiveRows<TRow>(query, options);
-    return { row: rows[0] ?? null, loading, hydrating, error };
+  ): { row: TRow | null; loading: boolean; error: Error | null } {
+    const { rows, loading, error } = useLiveRows<TRow>(query, options);
+    return { row: rows[0] ?? null, loading, error };
   }
 
   // ─── Drizzle typed live hooks ─────────────────────────────────────────────
 
   /**
-   * Shared implementation behind {@link useLiveDrizzleRows} (auto-detect) and {@link useLiveQuery}
-   * (declared-safe). Builds the query through a recording client so (A) accessor references are
-   * captured, retains the builder for (C) structural detection, then `client.prepareQuery` activates
-   * every lazy relation the query reads — the union of `use`, (A), and (C) — and runs the tripwire
-   * before the live query subscribes (ADR-0021).
+   * Shared implementation behind {@link useLiveDrizzleRows} and {@link useLiveQuery}. Builds the query,
+   * then `client.prepareQuery` scans the compiled SQL for the lazy relations it reads (∪ the optional
+   * `use`), activates + hydrates them, and only then subscribes the live query — so it is never
+   * registered against an un-hydrated lazy relation (ADR-0021).
    */
   function useGuardedDrizzleLive<TRows extends readonly unknown[]>(
     buildQuery: (client: SyncClient<TRegistry>) => DrizzleSqlBuilder<TRows>,
@@ -162,15 +153,8 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     const queryInfo = useMemo(
       () => {
         if (contextClient == null) return null;
-        // (A) record relations reached through the client during build; keep the builder for (C).
-        const recording = createRecordingClient(contextClient);
-        const query = buildQuery(recording.client);
-        return {
-          sql: query.toSQL(),
-          selectedFields: query._?.selectedFields,
-          builder: query,
-          accessed: [...recording.accessed],
-        };
+        const query = buildQuery(contextClient);
+        return { sql: query.toSQL(), selectedFields: query._?.selectedFields };
       },
       // buildQuery intentionally excluded; callers control reactivity via deps. Spread is valid and intentional.
       // oxlint-disable-next-line react-hooks/exhaustive-deps -- intentional: callers own deps, spread is by design
@@ -192,7 +176,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         return;
       }
 
-      const { sql, selectedFields, builder, accessed } = queryInfo;
+      const { sql, selectedFields } = queryInfo;
       // PGlite's live query returns rows keyed by the underlying (snake_case) column names; remap them
       // back to the Drizzle select's field keys so the rows match the builder's inferred (camelCase) type.
       const mapRows = (rows: readonly unknown[]): TRows =>
@@ -204,10 +188,10 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
 
       setState((prev) => ({ rows: prev.rows, loading: true, hydrating: true, error: null }));
 
-      // Activate the lazy relations the query reads (use ∪ (A) ∪ (C)) and run the tripwire, THEN subscribe
-      // — so a query is never registered against an un-hydrated lazy relation (ADR-0021).
+      // Scan the compiled SQL for the lazy relations the query reads (∪ `use`), activate + hydrate them,
+      // THEN subscribe — so a query is never registered against an un-hydrated lazy relation (ADR-0021).
       void contextClient
-        .prepareQuery({ sql: sql.sql, builder, accessed, ...(useList ? { use: useList } : {}) })
+        .prepareQuery({ sql: sql.sql, ...(useList ? { use: useList } : {}) })
         .then(() => {
           if (!active) return undefined;
           setState((prev) => ({ rows: prev.rows, loading: true, hydrating: false, error: null }));
@@ -249,10 +233,10 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
 
   /**
    * Reactive query using a Drizzle select builder. The builder is re-created
-   * whenever `deps` changes (same contract as `useEffect`). pgxsinkit auto-detects the relations the
-   * query reads and activates any `lazy` ones before subscribing; a lazy relation it cannot detect
-   * (e.g. referenced only in a subquery, or via raw SQL) throws rather than reading stale data — use
-   * {@link useLiveQuery} with an explicit `use` for those (ADR-0021).
+   * whenever `deps` changes (same contract as `useEffect`). pgxsinkit scans the compiled SQL and
+   * auto-activates any `lazy` relation the query reads — anywhere it appears (FROM, JOIN, subquery,
+   * WHERE) — before subscribing. `use` (see {@link useLiveQuery}) is an optional pre-activation hint,
+   * not a requirement (ADR-0021).
    *
    * ```ts
    * const { rows } = useLiveDrizzleRows(
