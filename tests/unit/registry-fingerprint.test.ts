@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import { boolean, jsonb, uuid, varchar } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { bigint, boolean, jsonb, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { canonicalizeRegistry, defineSyncRegistry, defineSyncTable, fingerprintRegistry } from "@pgxsinkit/contracts";
 
@@ -85,6 +86,33 @@ describe("registry fingerprint (ADR-0004)", () => {
     expect(fingerprintRegistry(make({ subscription: "lazy" }))).toBe(
       fingerprintRegistry(make({ subscription: "eager" })),
     );
+  });
+
+  it("does NOT change when only write-mode flips (runtime flush-routing, no DDL — ADR-0022)", () => {
+    // Write-mode (like subscription) is pure runtime orchestration over identical tables: a pessimistic
+    // unit flush-routes to a different endpoint, but provisions no different local DDL. So flipping it
+    // must NOT shift the fingerprint (no cache rebuild / subscription reset). Excluded from the canonical form.
+    const seats = (writeMode: "optimistic" | "pessimistic") =>
+      defineSyncRegistry({
+        seats: defineSyncTable({
+          tableName: "seats",
+          makeColumns: () => ({
+            id: uuid("id").primaryKey(),
+            updatedAtUs: bigint("updated_at_us", { mode: "bigint" })
+              .notNull()
+              .default(sql`0`),
+          }),
+          mode: "readwrite",
+          conflictPolicy: "last-write-wins",
+          writeMode,
+          governance: {
+            managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+          },
+        }),
+      });
+
+    expect(fingerprintRegistry(seats("pessimistic"))).toBe(fingerprintRegistry(seats("optimistic")));
+    expect(canonicalizeRegistry(seats("pessimistic"))[0]).not.toHaveProperty("writeMode");
   });
 
   it("changes when a column is added", () => {

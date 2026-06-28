@@ -27,8 +27,10 @@ import {
   isConflictPolicy,
   isRetention,
   isSubscriptionTiming,
+  isWriteMode,
   RETENTIONS,
   SUBSCRIPTION_TIMINGS,
+  WRITE_MODES,
   type ClientProjectionSpec,
   type ConflictPolicy,
   type DeferrableConstraintSpec,
@@ -44,6 +46,7 @@ import {
   type SubscriptionTiming,
   type TableGovernanceSpec as TableGovernanceSpecBase,
   type TableMode,
+  type WriteMode,
 } from "./config";
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
@@ -143,6 +146,14 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
    * {@link Retention}.
    */
   retention?: Retention;
+  /**
+   * Write-mode (ADR-0022): `optimistic` (default) | `pessimistic`. A `pessimistic` consistency group is a
+   * standing server-authoritative write-unit — its writes flush-route to the authoritative endpoint and
+   * the UI shows success only after the server confirms. Write-mode is a property of the **write-unit**;
+   * the static write-unit is the consistency group, so every table sharing a `consistencyGroup` must agree
+   * (validated). See {@link WriteMode}.
+   */
+  writeMode?: WriteMode;
 }
 
 /** Column property key names from a `makeColumns` factory function. */
@@ -277,6 +288,10 @@ export type SyncTableInput<
    * Retention (ADR-0021): `persistent` (default) | `ephemeral`. See {@link SyncTableEntry.retention}.
    */
   retention?: Retention;
+  /**
+   * Write-mode (ADR-0022): `optimistic` (default) | `pessimistic`. See {@link SyncTableEntry.writeMode}.
+   */
+  writeMode?: WriteMode;
 };
 
 export type SyncTableRegistry = Record<string, SyncTableEntry>;
@@ -496,15 +511,17 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
 }
 
 /**
- * ADR-0021 §4: subscription timing and retention are properties of a **consistency group**, not a
- * single table — a group commits atomically on one `MultiShapeStream` and so cannot be partly lazy or
- * partly ephemeral. Reject a registry whose grouped tables disagree. Tables without a
- * `consistencyGroup` are their own singleton group and are unconstrained.
+ * ADR-0021 §4 / ADR-0022 §1–2: subscription timing, retention, and write-mode are properties of a
+ * **consistency group**, not a single table — a group commits atomically on one `MultiShapeStream`
+ * (so it cannot be partly lazy or partly ephemeral) and a consistency group *is* the static
+ * write-unit (so it cannot be partly pessimistic). Reject a registry whose grouped tables disagree on
+ * any of the three. Tables without a `consistencyGroup` are their own singleton group and are
+ * unconstrained.
  */
 function validateRegistryLifecycleGroups(registry: SyncTableRegistry) {
   const groups = new Map<
     string,
-    Array<{ tableName: string; subscription: SubscriptionTiming; retention: Retention }>
+    Array<{ tableName: string; subscription: SubscriptionTiming; retention: Retention; writeMode: WriteMode }>
   >();
 
   for (const entry of getRegistryEntries(registry)) {
@@ -517,6 +534,7 @@ function validateRegistryLifecycleGroups(registry: SyncTableRegistry) {
       tableName: getTableConfig(entry.table).name,
       subscription: entry.subscription ?? "eager",
       retention: entry.retention ?? "persistent",
+      writeMode: entry.writeMode ?? "optimistic",
     });
     groups.set(entry.consistencyGroup, members);
   }
@@ -524,12 +542,15 @@ function validateRegistryLifecycleGroups(registry: SyncTableRegistry) {
   for (const [group, members] of groups) {
     const subscriptions = new Set(members.map((member) => member.subscription));
     const retentions = new Set(members.map((member) => member.retention));
+    const writeModes = new Set(members.map((member) => member.writeMode));
 
-    if (subscriptions.size > 1 || retentions.size > 1) {
+    if (subscriptions.size > 1 || retentions.size > 1 || writeModes.size > 1) {
       throw new Error(
-        `consistency group "${group}" mixes lifecycle (ADR-0021 §4): every table in a group must ` +
-          `share one subscription and one retention; got ` +
-          members.map((member) => `${member.tableName}=${member.subscription}/${member.retention}`).join(", "),
+        `consistency group "${group}" mixes lifecycle (ADR-0021 §4 / ADR-0022 §1): every table in a ` +
+          `group must share one subscription, one retention, and one write-mode; got ` +
+          members
+            .map((member) => `${member.tableName}=${member.subscription}/${member.retention}/${member.writeMode}`)
+            .join(", "),
       );
     }
   }
@@ -740,6 +761,22 @@ function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
     throw new Error(
       `table ${tableName} has an invalid retention (ADR-0021): must be one of ` +
         `${RETENTIONS.join(", ")} (got ${String(entry.retention)})`,
+    );
+  }
+
+  // ADR-0022: write-mode is optional (default optimistic), but a declared value must be valid and
+  // meaningful. `pessimistic` governs the write path, which a `readonly` table does not have, so reject
+  // it there. Group-level uniformity is checked at the registry level alongside the lifecycle axes.
+  if (entry.writeMode !== undefined && !isWriteMode(entry.writeMode)) {
+    throw new Error(
+      `table ${tableName} has an invalid writeMode (ADR-0022): must be one of ` +
+        `${WRITE_MODES.join(", ")} (got ${String(entry.writeMode)})`,
+    );
+  }
+  if (entry.writeMode === "pessimistic" && entry.mode === "readonly") {
+    throw new Error(
+      `readonly table ${tableName} cannot be pessimistic (ADR-0022): write-mode governs the write path, ` +
+        `which a readonly table does not have. Declare writeMode only on a writable table.`,
     );
   }
 

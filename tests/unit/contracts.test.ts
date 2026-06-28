@@ -344,4 +344,53 @@ describe("ADR-0021 sync lifecycle axes (subscription, retention)", () => {
       }),
     ).not.toThrow();
   });
+
+  const writableWriteModeTable = (
+    tableName: string,
+    extra: { consistencyGroup?: string; writeMode?: "optimistic" | "pessimistic" },
+  ) =>
+    defineSyncTable({
+      tableName,
+      makeColumns: makeProjectedContractsColumns,
+      mode: "readwrite",
+      conflictPolicy: "last-write-wins",
+      governance: {
+        managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+      },
+      ...extra,
+    });
+
+  it("carries writeMode on the entry; absent → omitted, invalid rejected, pessimistic-on-readonly rejected (ADR-0022)", () => {
+    expect(writableWriteModeTable("wm_seats", { writeMode: "pessimistic" }).writeMode).toBe("pessimistic");
+
+    // Absent → omitted (consumers default to optimistic).
+    expect(defineSyncTable({ tableName: "wm_plain", makeColumns: makeRefColumns }).writeMode).toBeUndefined();
+
+    // An invalid value is rejected regardless of mode.
+    expect(() =>
+      defineSyncTable({ tableName: "wm_bad", makeColumns: makeRefColumns, writeMode: "maybe" as never }),
+    ).toThrow(/invalid writeMode/);
+
+    // `pessimistic` on a readonly table is meaningless — it governs a write path the table does not have.
+    expect(() =>
+      defineSyncTable({ tableName: "wm_ro", makeColumns: makeRefColumns, writeMode: "pessimistic" }),
+    ).toThrow(/cannot be pessimistic/);
+  });
+
+  it("rejects a consistency group that mixes write-mode, accepts a uniform pessimistic one (ADR-0022 §1)", () => {
+    // A pessimistic consistency group IS a standing atomic write-unit, so a group cannot be partly pessimistic.
+    expect(() =>
+      defineSyncRegistry({
+        a: writableWriteModeTable("wm_grp_a", { consistencyGroup: "wg", writeMode: "pessimistic" }),
+        b: writableWriteModeTable("wm_grp_b", { consistencyGroup: "wg", writeMode: "optimistic" }),
+      }),
+    ).toThrow(/mixes lifecycle/);
+
+    expect(() =>
+      defineSyncRegistry({
+        a: writableWriteModeTable("wm_grp2_a", { consistencyGroup: "wg2", writeMode: "pessimistic" }),
+        b: writableWriteModeTable("wm_grp2_b", { consistencyGroup: "wg2", writeMode: "pessimistic" }),
+      }),
+    ).not.toThrow();
+  });
 });

@@ -117,10 +117,29 @@ boundary**:
 
 ## Implementation status
 
-Not yet implemented — design record. Grounded in `packages/server/src/mutations/plpgsql-apply.ts` (the
-batch is one transaction; `reject-if-stale` via pre-check + `RETURNS TABLE`),
-`packages/client/src/mutation-state.ts` (the state machine — gating is free), and
-`packages/client/src/mutation.ts` (`onConflict` / `discardConflict` — the disposition template).
+**In progress — the write-unit *model* (decision 1–2, static site) is built; the dynamic block, the
+authoritative flush-routing, and the auto-discard disposition are not yet.**
+
+Built:
+
+- **Write-mode as a contract property** (`writeMode: optimistic | pessimistic`, default optimistic) on the
+  registry entry, validated: a declared value must be a valid `WriteMode`, `pessimistic` is rejected on a
+  `readonly` table (no write path to govern), and — because a pessimistic consistency group *is* the static
+  atomic write-unit (decision 2) — a consistency group must be **uniformly one write-mode** (checked
+  alongside the ADR-0021 subscription/retention uniformity). `packages/contracts` (`config.ts`,
+  `registry.ts`). Deliberately **excluded from the registry fingerprint** (like `subscription`): static
+  write-mode is runtime flush-routing over identical local DDL, so flipping it needs no cache rebuild.
+
+Not yet built: the dynamic `transaction({ mode })` block + the per-mutation unit tag it stamps (decision 2,
+dynamic site — this *will* touch the journal DDL + fingerprint); the flush-routing of a pessimistic unit to
+the authoritative endpoint applying it in its own serialised transaction with a per-mutation result
+(decision 3, mechanism **c/c1**); and the **auto-discard-on-reject** overlay disposition + typed-rejection
+ack (decision 4).
+
+Grounded in `packages/server/src/mutations/plpgsql-apply.ts` (the batch is one transaction;
+`reject-if-stale` via pre-check + `RETURNS TABLE`), `packages/client/src/mutation-state.ts` (the state
+machine — gating is free), and `packages/client/src/mutation.ts` (`onConflict` / `discardConflict` — the
+disposition template).
 
 References: [ADR-0009](0009-internalize-read-path-sync.md) (consistency groups = the transaction boundary,
 reused as the static write-unit); [ADR-0015](0015-stale-write-conflict-policy.md) (stale-write conflict

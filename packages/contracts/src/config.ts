@@ -76,6 +76,32 @@ export function isRetention(value: unknown): value is Retention {
 }
 
 /**
+ * Write-mode (ADR-0022): **how** a write reaches the server — the write-side twin of {@link Retention}.
+ *
+ * - `optimistic` (default) — the write enters the local journal with an optimistic overlay, the UI updates
+ *   immediately, and the convergence loop flushes the journal as one all-or-nothing batch; the canonical
+ *   row returns via the sync echo. The path that has always existed.
+ * - `pessimistic` — the write is **server-authoritative**: it flush-routes to an authoritative endpoint that
+ *   applies it in its own isolated, serialised transaction and returns a per-mutation result (accepted, or
+ *   rejected-with-typed-reason) **before** the UI shows success. For invariants the client cannot evaluate
+ *   locally — a capacity/quota/uniqueness gate enforced by a server-side rule.
+ *
+ * Write-mode is a property of an atomic **write-unit**, not a single table (ADR-0022 §1): a unit is uniformly
+ * one mode. The *static* write-unit is the **consistency group** — so, like {@link SubscriptionTiming} and
+ * {@link Retention}, every table sharing a `consistencyGroup` must agree (validated). A *dynamic* override is
+ * the imperative `transaction({ mode })` block, which scopes a mode to an ad-hoc set of mutations.
+ */
+export type WriteMode = "optimistic" | "pessimistic";
+
+/** The {@link WriteMode} values. Source of truth for registry validation. */
+export const WRITE_MODES = ["optimistic", "pessimistic"] as const satisfies readonly WriteMode[];
+
+/** Type guard: is `value` a {@link WriteMode}? */
+export function isWriteMode(value: unknown): value is WriteMode {
+  return typeof value === "string" && (WRITE_MODES as readonly string[]).includes(value);
+}
+
+/**
  * Minimal verified-JWT claim shape the sync layer understands. Providers may
  * attach arbitrary extra claims; those stay reachable through index access and
  * ownership claim paths (e.g. "app_metadata.person_id"). Parse decoded JWT
@@ -205,6 +231,12 @@ export interface TableSpecInput {
    * as `TEMP` — no durable trace. See {@link Retention}.
    */
   retention?: Retention;
+  /**
+   * Write-mode (ADR-0022). Absent → `optimistic`. A `pessimistic` consistency group is a standing
+   * server-authoritative write-unit whose writes flush-route to the authoritative endpoint. See
+   * {@link WriteMode}.
+   */
+  writeMode?: WriteMode;
 }
 
 export interface SyncConfigInput<TTables extends Record<string, TableSpecInput> = Record<string, TableSpecInput>> {
