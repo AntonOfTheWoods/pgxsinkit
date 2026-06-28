@@ -1,6 +1,6 @@
 # Pessimistic write-units: server-authoritative writes via flush-routing
 
-Status: proposed (2026-06-28)
+Status: accepted (2026-06-28)
 
 The companion driver to [ADR-0021](0021-lazy-ephemeral-sync-lifecycle.md). Some writes must be
 **server-authoritative**: the client cannot optimistically grant itself the outcome, because the invariant
@@ -117,8 +117,9 @@ boundary**:
 
 ## Implementation status
 
-**In progress — the write-unit *model* (decision 1–2, static site) is built; the dynamic block, the
-authoritative flush-routing, and the auto-discard disposition are not yet.**
+**Implemented — decisions 1–4 are built end to end: the write-unit model + validation, the durable tag
+substrate, the authoritative endpoint, the client flush-routing + public `transaction({ mode })` block, and
+the auto-discard-on-reject disposition.**
 
 Built:
 
@@ -146,16 +147,32 @@ Built:
   proven in the container integration lane (`write-api.integration.test.ts`: acked / rejected-on-constraint /
   conflicted-on-stale).
 
-Not yet built: the public `transaction({ mode })` block that generates a unit and tags the mutations
-authored within it (decision 2 — the authoring half over the substrate above); the client flush-**routing**
-of a pessimistic unit to the authoritative endpoint (group by `write_unit ?? staticGroup`); and the
-**auto-discard-on-reject** overlay disposition + the `rejected` journal terminal + typed-rejection ack on the
-client (decision 4).
+- **The client flush-routing + public `transaction({ mode })` block** (decisions 2–4, client half):
+  - *Tagging.* A statically-`pessimistic` table's writes earn a per-enqueue unit at enqueue
+    (`enqueueBatch`), so every pessimistic row carries `write_mode = 'pessimistic'` + a unit id — dynamic
+    (the block) and static (the group) tag uniformly. The optimistic background batch **excludes**
+    pessimistic rows (`readPendingBatchRows`), so a tagged write is never optimistically sent.
+  - *Authoring.* `client.transaction({ mode }, run)` collects the callback's mutations into one unit and
+    enqueues them atomically (`batch(items, unit)`); a `pessimistic` block then inline-flushes the unit and
+    awaits the per-mutation result (foreground — the server's answer before the UI shows success), an
+    `optimistic` block enqueues + background-flushes.
+  - *Routing + disposition.* `runtime.flushUnit(unitId)` POSTs the unit to the authoritative endpoint and
+    applies each ack: `acked` converges via the synced echo; `conflicted` keeps the overlay (ADR-0015);
+    `rejected` is terminal and **auto-discards** the unit's optimistic overlay (`discardOverlayForSettledEntity`)
+    and surfaces the typed reason via the new `onReject` callback. Transport failure keeps the overlay for a
+    retry (no background retry — pessimism is foreground). `packages/client/src/mutation.ts`,
+    `packages/client/src/index.ts`. Proven over real PGlite + a stubbed endpoint (`pessimistic-flush.test.ts`:
+    acked / rejected-with-discard+onReject / conflicted-kept / background-batch-skips-pessimistic) and the
+    `rejected` state machine in `mutation-state.test.ts`.
+
+Deferred (small, non-blocking): multi-unit amortisation (one POST carrying several independent units, each in
+its own server txn — today one unit per POST); and background retry of a pessimistic unit whose inline flush
+hit a transport error (today it stays `failed`/overlay-kept for an explicit re-flush, matching the
+foreground-pessimism model).
 
 Grounded in `packages/server/src/mutations/plpgsql-apply.ts` (the batch is one transaction;
 `reject-if-stale` via pre-check + `RETURNS TABLE`), `packages/client/src/mutation-state.ts` (the state
-machine — gating is free), and `packages/client/src/mutation.ts` (`onConflict` / `discardConflict` — the
-disposition template).
+machine), and `packages/client/src/mutation.ts` (`onConflict` / `discardConflict` — the disposition template).
 
 References: [ADR-0009](0009-internalize-read-path-sync.md) (consistency groups = the transaction boundary,
 reused as the static write-unit); [ADR-0015](0015-stale-write-conflict-policy.md) (stale-write conflict

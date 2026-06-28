@@ -32,6 +32,7 @@ function jsonStringifyPayload(value: unknown): string {
 
 import type {
   BatchMutationAck,
+  MutationAck,
   MutationDiagnostics,
   MutationRejection,
   SyncTableCreateInput,
@@ -158,6 +159,13 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
    * resolution/diff UI and resolves each as a new write (or `discardConflict`s it). Never silent.
    */
   onConflict?: (conflicted: MutationDetail[]) => void | Promise<void>;
+  /**
+   * Invoked after an authoritative (pessimistic) flush whenever a write-unit was `rejected` (ADR-0022) —
+   * a business decline the client could not evaluate locally (capacity/quota/uniqueness). The inverse of
+   * `onConflict`: the optimistic Overlay was **auto-discarded** for every member of the unit, so the app
+   * surfaces the typed reason (e.g. "full") rather than a resolve/diff UI. Never silent.
+   */
+  onReject?: (rejected: MutationDetail[]) => void | Promise<void>;
 }
 
 interface TableContext {
@@ -241,6 +249,14 @@ export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
     entityKey: Record<string, string>,
   ) => Promise<void>;
   flush: (table?: SyncTableName<TRegistry>) => Promise<void>;
+  /**
+   * Flush one pessimistic write-unit (ADR-0022) to the authoritative endpoint and apply its per-mutation
+   * result inline: `acked` clears via the synced echo, `conflicted` keeps the overlay (surfaced), and
+   * `rejected` auto-discards the overlay for the whole unit (surfaced via `onReject`). A foreground
+   * operation — it resolves once the server has decided. Throws on transport failure (the overlay is kept
+   * for a retry). Returns the server acks. Used by the client `transaction({ mode: "pessimistic" })` block.
+   */
+  flushUnit: (unitId: string) => Promise<{ acks: MutationAck[] }>;
   reconcile: (table?: SyncTableName<TRegistry>) => Promise<void>;
   retryFailed: (table?: SyncTableName<TRegistry>) => Promise<void>;
   recoverSending: (table?: SyncTableName<TRegistry>) => Promise<void>;
@@ -602,7 +618,15 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         }
       }
 
-      await insertMutationsBulk(options.db, context, plannedMutations, registryVersion, unit);
+      // ADR-0022: an explicit unit (from a `transaction` block) tags the whole batch; otherwise a
+      // statically-`pessimistic` table earns its own per-enqueue unit, so its writes route to the
+      // authoritative endpoint too. An optimistic table with no explicit unit stays untagged.
+      const effectiveUnit: WriteUnit | undefined =
+        unit ??
+        (context.entry.writeMode === "pessimistic"
+          ? { id: globalThis.crypto.randomUUID(), mode: "pessimistic" }
+          : undefined);
+      await insertMutationsBulk(options.db, context, plannedMutations, registryVersion, effectiveUnit);
       await upsertOverlayRecordsBulk(options.db, context, [...plannedOverlays.values()]);
     }
   };
@@ -725,6 +749,256 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       const nextFlush = flushQueue.then(() => runFlush(table));
       flushQueue = nextFlush.catch(() => undefined);
       await nextFlush;
+    },
+    flushUnit: async (unitId) => {
+      const contexts = Object.values(tableContexts).filter((context): context is TableContext => context != null);
+      const unitRows = await readUnitPendingRows(options.db, contexts, unitId);
+      if (unitRows.length === 0) {
+        return { acks: [] };
+      }
+
+      // Prepare the unit's rows (entity key + envelope payload) and group them by table.
+      const prepared: PreparedBatchRow[] = [];
+      const byContext = new Map<string, PreparedBatchRow[]>();
+      for (const row of unitRows) {
+        const context = tableContexts[row.tableKey];
+        if (!context) {
+          continue;
+        }
+        const entityKey = JSON.parse(row.entityKeyJson) as Record<string, string>;
+        const rawPayload = JSON.parse(row.payloadJson) as Record<string, unknown>;
+        const preparedRow: PreparedBatchRow = {
+          ...row,
+          context,
+          entityKey,
+          envelopePayload:
+            row.mutationKind === "delete"
+              ? entityKey
+              : toSqlColumnPayload(
+                  context,
+                  stripManagedFields(
+                    context,
+                    (rawPayload["value"] ?? rawPayload["patch"] ?? rawPayload) as Record<string, unknown>,
+                    row.mutationKind as "create" | "update",
+                  ),
+                ),
+          sqlTableName: context.entry.shape?.tableName ?? context.key,
+        };
+        prepared.push(preparedRow);
+        const list = byContext.get(context.key);
+        if (list) {
+          list.push(preparedRow);
+        } else {
+          byContext.set(context.key, [preparedRow]);
+        }
+      }
+
+      // Mark every member sending (persist the resolved Base server version, like the batch path).
+      const sentAtUs = nowMicroseconds();
+      for (const rows of byContext.values()) {
+        await applyMutationStatusUpdates(
+          options.db,
+          rows[0]!.context,
+          rows.map((row) => ({
+            mutationId: row.mutationId,
+            status: "sending" as const,
+            attemptCount: row.attemptCount + 1,
+            updatedAtUs: sentAtUs,
+            sentAtUs,
+            replaceSentAtUs: true,
+            baseServerVersion: row.baseServerVersion,
+            replaceBaseServerVersion: true,
+            lastError: null,
+            nextRetryAtUs: null,
+            lastHttpStatus: null,
+            conflictReason: null,
+          })),
+        );
+      }
+
+      const mutations = prepared.map((row) => ({
+        tableName: row.sqlTableName,
+        entityKey: row.entityKey,
+        mutationId: row.mutationId,
+        mutationSeq: row.mutationSeq,
+        kind: row.mutationKind as "create" | "update" | "delete",
+        payload: row.envelopePayload,
+        clientTimestampUs: sentAtUs,
+        ...(row.baseServerVersion != null ? { baseServerVersion: row.baseServerVersion } : {}),
+      }));
+
+      const url = resolveAuthoritativeMutationUrl(options.writeUrl);
+      let acksByMutationId: Map<string, BatchMutationAck["acks"][number]>;
+
+      try {
+        const authToken = await options.getAuthToken?.();
+        let response = await fetch(url, {
+          method: "POST",
+          headers: buildRequestHeaders(authToken),
+          body: jsonStringifyPayload({ writeUnit: unitId, mutations }),
+        });
+
+        if ([401, 403].includes(response.status) && options.getAuthToken) {
+          response = await fetch(url, {
+            method: "POST",
+            headers: buildRequestHeaders(await options.getAuthToken()),
+            body: jsonStringifyPayload({ writeUnit: unitId, mutations }),
+          });
+        }
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new MutationRequestError(
+            text.length > 0 ? text : `Authoritative write responded with ${response.status}`,
+            response.status,
+            parseBatchRejections(text),
+          );
+        }
+
+        const responseJson = (await response.json()) as BatchMutationAck;
+        acksByMutationId = new Map(responseJson.acks.map((ack) => [ack.mutationId, ack]));
+      } catch (error) {
+        // A pessimistic write is foreground: it never reached the server (transport / non-2xx), so the
+        // unit did not happen. Mark it failed — KEEPING the optimistic overlay so a retry can resend — and
+        // rethrow so the caller surfaces it. There is no background retry for pessimistic units.
+        const failedAtUs = nowMicroseconds();
+        const httpStatus = error instanceof MutationRequestError ? error.status : null;
+        const errorMessage = error instanceof Error ? error.message : "Authoritative write failed";
+        for (const rows of byContext.values()) {
+          await applyMutationStatusUpdates(
+            options.db,
+            rows[0]!.context,
+            rows.map((row) => {
+              const attemptCount = row.attemptCount + 1;
+              const outcome = resolveBatchFailureOutcome(attemptCount, maxMutationAttempts, failedAtUs);
+              return {
+                mutationId: row.mutationId,
+                status: outcome.status,
+                attemptCount,
+                updatedAtUs: failedAtUs,
+                lastError: errorMessage,
+                nextRetryAtUs: outcome.nextRetryAtUs,
+                lastHttpStatus: httpStatus,
+                conflictReason: null,
+              };
+            }),
+          );
+        }
+        throw error;
+      }
+
+      // Apply each member's ack.
+      const ackedAtUs = nowMicroseconds();
+      const failedAtUs = nowMicroseconds();
+      const rejectedIds = new Set<string>();
+      const conflictedIds = new Set<string>();
+
+      for (const rows of byContext.values()) {
+        await applyMutationStatusUpdates(
+          options.db,
+          rows[0]!.context,
+          rows.map((row) => {
+            const ack = acksByMutationId.get(row.mutationId);
+
+            if (ack?.status === "rejected") {
+              // ADR-0022 §4: a business rejection. Terminal `rejected`; the overlay is auto-discarded below.
+              rejectedIds.add(row.mutationId);
+              return {
+                mutationId: row.mutationId,
+                status: "rejected" as const,
+                attemptCount: row.attemptCount + 1,
+                updatedAtUs: failedAtUs,
+                lastError: ack.rejectionReason ?? "Rejected by the authoritative endpoint",
+                nextRetryAtUs: null,
+                lastHttpStatus: ack.httpStatus ?? 409,
+                conflictReason: ack.rejectionReason ?? "Rejected by the authoritative endpoint",
+              };
+            }
+
+            if (ack?.status === "conflicted") {
+              // ADR-0015: a stale member — terminal `conflicted`, overlay KEPT (resolve as a new write).
+              conflictedIds.add(row.mutationId);
+              return {
+                mutationId: row.mutationId,
+                status: "conflicted" as const,
+                attemptCount: row.attemptCount + 1,
+                updatedAtUs: failedAtUs,
+                serverUpdatedAtUs: ack.serverUpdatedAtUs ?? null,
+                replaceServerUpdatedAtUs: true,
+                lastError: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
+                nextRetryAtUs: null,
+                lastHttpStatus: ack.httpStatus ?? 409,
+                conflictReason: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
+              };
+            }
+
+            if (!ack || ack.status !== "acked") {
+              const attemptCount = row.attemptCount + 1;
+              const outcome = resolveFailureOutcome(
+                ack?.httpStatus ?? null,
+                attemptCount,
+                maxMutationAttempts,
+                failedAtUs,
+              );
+              return {
+                mutationId: row.mutationId,
+                status: outcome.status,
+                attemptCount,
+                updatedAtUs: failedAtUs,
+                lastError: ack?.conflictReason ?? "Authoritative write not acknowledged",
+                nextRetryAtUs: outcome.nextRetryAtUs,
+                lastHttpStatus: ack?.httpStatus ?? null,
+                conflictReason: null,
+              };
+            }
+
+            return {
+              mutationId: row.mutationId,
+              status: "acked" as const,
+              attemptCount: row.attemptCount + 1,
+              updatedAtUs: ackedAtUs,
+              ackedAtUs,
+              replaceAckedAtUs: true,
+              serverUpdatedAtUs: ack.serverUpdatedAtUs ?? null,
+              replaceServerUpdatedAtUs: true,
+              lastError: null,
+              nextRetryAtUs: null,
+              lastHttpStatus: row.mutationKind === "delete" ? 204 : 200,
+              conflictReason: null,
+            };
+          }),
+        );
+      }
+
+      // ADR-0022 §4: auto-discard the optimistic overlay for every rejected entity (the whole unit was
+      // declined). The terminal `rejected` journal row is kept for diagnostics + `onReject`.
+      for (const row of prepared) {
+        if (rejectedIds.has(row.mutationId)) {
+          await discardOverlayForSettledEntity(options.db, row.context, row.entityKey, row.entityKeyJson);
+        }
+      }
+
+      const affectedContexts = [...byContext.keys()]
+        .map((key) => tableContexts[key])
+        .filter((context): context is TableContext => context != null);
+      for (const context of affectedContexts) {
+        await reconcileTable(options.db, context);
+      }
+
+      if (rejectedIds.size > 0 && options.onReject) {
+        const details = await readMutationDetailsForContexts(options.db, affectedContexts, rejectedIds);
+        if (details.length > 0) {
+          await options.onReject(details);
+        }
+      }
+      if (conflictedIds.size > 0 && options.onConflict) {
+        const details = await readMutationDetailsForContexts(options.db, affectedContexts, conflictedIds);
+        if (details.length > 0) {
+          await options.onConflict(details);
+        }
+      }
+
+      return { acks: [...acksByMutationId.values()] };
     },
     reconcile: async (table) => {
       const contexts = filterContexts(tableContexts, table);
@@ -1687,6 +1961,9 @@ async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], no
           enqueued_at_us::text AS "enqueuedAtUs"
         FROM ${context.journalTable}
         WHERE status IN ('pending', 'failed')
+          -- ADR-0022: pessimistic rows are flushed by the authoritative unit path (flushUnit), never the
+          -- optimistic batch — exclude them here so a tagged write is never optimistically sent.
+          AND COALESCE(write_mode, '') <> 'pessimistic'
           AND COALESCE(next_retry_at_us, 0) <= $1::bigint
           AND NOT EXISTS (
             SELECT 1
@@ -1713,6 +1990,53 @@ async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], no
       LIMIT ${batchSize}
     `,
     [nowUs],
+  );
+
+  return result.rows;
+}
+
+/**
+ * Read one pessimistic write-unit's send-eligible rows (ADR-0022) across every table, ordered by author
+ * sequence. Unlike {@link readPendingBatchRows} it has no per-entity ordering gate: a unit is enqueued and
+ * sent atomically, so its members go together.
+ */
+async function readUnitPendingRows(
+  db: MutationDb,
+  contexts: TableContext[],
+  unitId: string,
+): Promise<PendingBatchRow[]> {
+  if (contexts.length === 0) {
+    return [];
+  }
+
+  const unionSql = contexts
+    .map(
+      (context) => `
+        SELECT
+          '${escapeSqlString(context.key)}' AS "tableKey",
+          mutation_id AS "mutationId",
+          entity_key_json AS "entityKeyJson",
+          mutation_seq AS "mutationSeq",
+          mutation_kind AS "mutationKind",
+          status,
+          payload_json AS "payloadJson",
+          attempt_count AS "attemptCount",
+          last_http_status AS "lastHttpStatus",
+          last_error AS "lastError",
+          conflict_reason AS "conflictReason",
+          next_retry_at_us::text AS "nextRetryAtUs",
+          server_updated_at_us::text AS "serverUpdatedAtUs",
+          ${buildResolvedBaseServerVersionSql(context)} AS "baseServerVersion",
+          enqueued_at_us::text AS "enqueuedAtUs"
+        FROM ${context.journalTable}
+        WHERE write_unit = $1 AND status IN ('pending', 'failed')
+      `,
+    )
+    .join("\nUNION ALL\n");
+
+  const result = await db.query<PendingBatchRow>(
+    `SELECT * FROM (${unionSql}) AS unit ORDER BY unit."mutationSeq" ASC`,
+    [unitId],
   );
 
   return result.rows;
@@ -2112,6 +2436,11 @@ function resolveBatchMutationUrl(batchWriteUrl: string): string {
   return `${trimmed}/mutations`;
 }
 
+/** The authoritative (pessimistic) write endpoint (ADR-0022): the batch URL with `/unit` appended. */
+function resolveAuthoritativeMutationUrl(batchWriteUrl: string): string {
+  return `${resolveBatchMutationUrl(batchWriteUrl)}/unit`;
+}
+
 function stripManagedFields(
   context: TableContext,
   payload: Record<string, unknown>,
@@ -2187,6 +2516,32 @@ async function discardConflictedEntity(
     await db.exec("ROLLBACK");
     throw error;
   }
+}
+
+/**
+ * Auto-discard the optimistic overlay for an entity whose pessimistic write-unit the authoritative endpoint
+ * `rejected` (ADR-0022 §4). Unlike {@link discardConflictedEntity} this KEEPS the terminal `rejected` journal
+ * row (for diagnostics + `onReject`); it only clears the overlay, and only when no still-owed
+ * (`pending`/`sending`/`failed`) journal row depends on it — so a later un-sent write never loses its overlay.
+ */
+async function discardOverlayForSettledEntity(
+  db: MutationDb,
+  context: TableContext,
+  entityKey: Record<string, string>,
+  entityKeyJson: string,
+) {
+  const pkConditions = context.pkColumnNames.map((columnName, index) => `overlay.${columnName} = $${index + 1}`);
+  const pkValues = context.pkColumnNames.map((columnName) => entityKey[columnName]);
+  await db.query(
+    `DELETE FROM ${context.overlayTable} AS overlay
+     WHERE ${pkConditions.join(" AND ")}
+       AND NOT EXISTS (
+         SELECT 1 FROM ${context.journalTable} AS j
+         WHERE j.entity_key_json = $${pkValues.length + 1}
+           AND j.status IN ('pending', 'sending', 'failed')
+       )`,
+    [...pkValues, entityKeyJson],
+  );
 }
 
 async function reconcileTable(db: MutationDb, context: TableContext) {

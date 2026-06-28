@@ -5,6 +5,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { defineRelations } from "drizzle-orm/relations";
 
 import type {
+  MutationAck,
   MutationDiagnostics,
   RegistryRelations,
   RegistryTables,
@@ -16,6 +17,7 @@ import type {
   SyncTableName,
   SyncTableRegistry,
   SyncTableUpdateInput,
+  WriteMode,
 } from "@pgxsinkit/contracts";
 import { classifyTableApplyStrategy, deriveSyncColumnTypes, getSyncRegistrySchema } from "@pgxsinkit/contracts";
 
@@ -28,7 +30,13 @@ import {
   reconcileLocalStoreVersion,
   writeLazyGroupActivation,
 } from "./local-store";
-import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
+import {
+  createMutationRuntime,
+  type MutationBatchItem,
+  type MutationDetail,
+  type MutationKind,
+  type WriteUnit,
+} from "./mutation";
 import { buildDesyncTableSql, buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
 import { createElectricExtension, startConfiguredSync } from "./shape-sync";
 import { buildAuthShapeHeaders } from "./sync-auth";
@@ -86,6 +94,12 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    */
   onConflict?: (conflicted: MutationDetail[]) => void | Promise<void>;
   /**
+   * Invoked when a pessimistic write-unit is `rejected` (ADR-0022) — a business decline from the
+   * authoritative endpoint (capacity/quota/uniqueness). The inverse of `onConflict`: the optimistic Overlay
+   * was auto-discarded for the whole unit, so the app surfaces the typed reason rather than a resolve UI.
+   */
+  onReject?: (rejected: MutationDetail[]) => void | Promise<void>;
+  /**
    * Invoked on boot when the registry fingerprint differs from the one the local store was
    * provisioned under (ADR-0006). `rebuilt` = the read cache was dropped and rebuilt at the
    * new shape; `deferred` = un-flushed/quarantined writes are still owed, so the rebuild is
@@ -115,6 +129,34 @@ export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey
   create: (input: SyncTableCreateInput<TRegistry, TKey>) => Promise<void>;
   update: (entityKey: Record<string, string>, patch: SyncTableUpdateInput<TRegistry, TKey>) => Promise<void>;
   delete: (entityKey: Record<string, string>) => Promise<void>;
+}
+
+/**
+ * A table handle inside a {@link SyncClient.transaction} block (ADR-0022 §2). It *collects* mutations into
+ * the open write-unit rather than enqueuing each immediately; the whole set is enqueued atomically when the
+ * block's callback returns. The calls are synchronous (collection only) — no per-call await needed.
+ */
+export interface SyncTransactionTableHandle<
+  TRegistry extends SyncTableRegistry,
+  TKey extends SyncTableName<TRegistry>,
+> {
+  create: (input: SyncTableCreateInput<TRegistry, TKey>) => void;
+  update: (entityKey: Record<string, string>, patch: SyncTableUpdateInput<TRegistry, TKey>) => void;
+  delete: (entityKey: Record<string, string>) => void;
+}
+
+/** The handle passed to a {@link SyncClient.transaction} callback: collecting table handles for the unit. */
+export interface SyncTransaction<TRegistry extends SyncTableRegistry> {
+  tables: { [TKey in SyncTableName<TRegistry>]: SyncTransactionTableHandle<TRegistry, TKey> };
+}
+
+/**
+ * The result of a {@link SyncClient.transaction}. A `pessimistic` block carries the authoritative server
+ * `acks` (each `acked` / `conflicted` / `rejected`); an `optimistic` block enqueues atomically and flushes
+ * in the background, so its `acks` are empty.
+ */
+export interface SyncTransactionResult {
+  acks: MutationAck[];
 }
 
 /** Minimal shape of a Drizzle select builder: inspectable via `.toSQL()` and awaitable for its rows. */
@@ -239,6 +281,20 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * `ensureSynced` first.
    */
   prepareQuery: (input: PrepareQueryInput<TRegistry>) => Promise<void>;
+  /**
+   * Author an atomic write-**unit** (ADR-0022 §2). The callback receives collecting table handles; every
+   * mutation it issues is tagged into one unit and enqueued atomically when the callback returns.
+   *
+   * - `mode: "pessimistic"` — **server-authoritative**: the unit flush-routes to the authoritative endpoint
+   *   and this call resolves only once the server has decided. The result's `acks` carry each member's
+   *   outcome — `acked`, `conflicted` (overlay kept, ADR-0015), or `rejected` (overlay auto-discarded for
+   *   the whole unit, surfaced via `onReject`, ADR-0022 §4). Throws on transport failure (overlay kept).
+   * - `mode: "optimistic"` — an atomic batch enqueue that flushes in the background (empty `acks`).
+   */
+  transaction: (
+    options: { mode: WriteMode },
+    run: (tx: SyncTransaction<TRegistry>) => void | Promise<void>,
+  ) => Promise<SyncTransactionResult>;
 }
 
 export type { MutationBatchItem, MutationDetail, MutationDiagnostics, MutationKind };
@@ -288,6 +344,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     ...(options.maxMutationAttempts != null ? { maxMutationAttempts: options.maxMutationAttempts } : {}),
     ...(options.onQuarantine ? { onQuarantine: options.onQuarantine } : {}),
     ...(options.onConflict ? { onConflict: options.onConflict } : {}),
+    ...(options.onReject ? { onReject: options.onReject } : {}),
   });
 
   // Reclaim any in-flight mutations interrupted by a previous shutdown (ADR-0005), then
@@ -500,6 +557,45 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     await pglite.exec(buildDesyncTableSql(options.registry, key as string));
   };
 
+  const transaction: SyncClient<TRegistry>["transaction"] = async ({ mode }, run) => {
+    // The block's table handles only COLLECT mutations; the whole set is enqueued atomically as one unit.
+    const collected: MutationBatchItem<TRegistry>[] = [];
+    const txTables = Object.fromEntries(
+      Object.keys(options.registry).map((tableKey) => [
+        tableKey,
+        {
+          create: (input: unknown) => {
+            collected.push({ table: tableKey, kind: "create", input } as MutationBatchItem<TRegistry>);
+          },
+          update: (entityKey: Record<string, string>, patch: unknown) => {
+            collected.push({ table: tableKey, kind: "update", entityKey, patch } as MutationBatchItem<TRegistry>);
+          },
+          delete: (entityKey: Record<string, string>) => {
+            collected.push({ table: tableKey, kind: "delete", entityKey } as MutationBatchItem<TRegistry>);
+          },
+        },
+      ]),
+    ) as SyncTransaction<TRegistry>["tables"];
+
+    await run({ tables: txTables });
+
+    if (collected.length === 0) {
+      return { acks: [] };
+    }
+
+    const unit: WriteUnit = { id: globalThis.crypto.randomUUID(), mode };
+    await mutationRuntime.batch(collected, unit);
+
+    if (mode === "optimistic") {
+      // An atomic batch enqueue; the background convergence loop flushes it (no foreground answer).
+      void mutationRuntime.flush();
+      return { acks: [] };
+    }
+
+    // Pessimistic: flush-route this unit to the authoritative endpoint and await the per-mutation result.
+    return await mutationRuntime.flushUnit(unit.id);
+  };
+
   const prepareQuery: SyncClient<TRegistry>["prepareQuery"] = async ({ sql, use }) => {
     // Scan the compiled SQL for the lazy relations it reads (∪ the explicit `use`) and activate them.
     // The compiled SQL is ground truth and Drizzle quotes every relation, so any reference — FROM, JOIN,
@@ -606,6 +702,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     isSynced,
     desync,
     prepareQuery,
+    transaction,
   };
 
   return client;
