@@ -53,6 +53,18 @@ describe("quarantine state (ADR-0006)", () => {
   });
 });
 
+describe("rejected state (ADR-0022)", () => {
+  it("allows entering rejected from sending (a business rejection from the authoritative endpoint)", () => {
+    expect(isValidMutationTransition("sending", "rejected")).toBe(true);
+  });
+
+  it("treats rejected as terminal (overlay auto-discarded, surfaced via onReject, never retried)", () => {
+    expect(MUTATION_TRANSITIONS.rejected).toEqual([]);
+    expect(isValidMutationTransition("rejected", "pending")).toBe(false);
+    expect(isValidMutationTransition("rejected", "sending")).toBe(false);
+  });
+});
+
 describe("classifyFailureStatus (ADR-0006 decision 4)", () => {
   it("treats transport (no status) and 5xx as transient failures", () => {
     expect(classifyFailureStatus(null)).toBe("failed");

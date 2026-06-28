@@ -9,7 +9,15 @@ export const mutationKindSchema = z.enum(["create", "update", "delete"]);
  * client's `MutationStatus` (packages/client/src/mutation-state.ts). Distinct from
  * {@link mutationAckStatusSchema}, the narrower *transport* subset a server ack may carry.
  */
-export const mutationStatusSchema = z.enum(["pending", "sending", "acked", "failed", "quarantined", "conflicted"]);
+export const mutationStatusSchema = z.enum([
+  "pending",
+  "sending",
+  "acked",
+  "failed",
+  "quarantined",
+  "conflicted",
+  "rejected",
+]);
 /**
  * The *transport* statuses a server ack may carry. `acked` (applied), `failed` (transient, retry),
  * `conflicted` (ADR-0015 stale write — overlay KEPT, resolve as a new write), and `rejected` (ADR-0022 —
