@@ -50,6 +50,13 @@ export interface CanonicalTable {
    * = the default singleton group.
    */
   consistencyGroup: string | null;
+  /**
+   * Retention (ADR-0021). Part of the fingerprint because it changes the cluster DDL — an `ephemeral`
+   * table's whole cluster is emitted as `TEMP`/`pg_temp` — so flipping persistent↔ephemeral must force a
+   * cache rebuild + subscription reset. (Subscription timing is NOT included: it is pure runtime
+   * orchestration over identical tables and needs no rebuild.)
+   */
+  retention: string;
 }
 
 /**
@@ -143,6 +150,7 @@ function canonicalizeTable(key: string, entry: SyncTableEntry): CanonicalTable {
     shape,
     managedFields: canonicalizeManagedFields(entry),
     consistencyGroup: entry.consistencyGroup ?? null,
+    retention: entry.retention ?? "persistent",
   };
 }
 

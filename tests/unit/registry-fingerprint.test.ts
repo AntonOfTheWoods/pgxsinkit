@@ -60,6 +60,33 @@ describe("registry fingerprint (ADR-0004)", () => {
     expect(canonicalizeRegistry(ungrouped)[0]?.consistencyGroup).toBeNull();
   });
 
+  it("changes when retention flips (the cluster DDL changes), but NOT when only subscription does (ADR-0021)", () => {
+    const make = (extra: { subscription?: "eager" | "lazy"; retention?: "persistent" | "ephemeral" }) =>
+      defineSyncRegistry({
+        items: defineSyncTable({
+          tableName: "items",
+          makeColumns: () => ({
+            id: uuid("id").primaryKey(),
+            title: varchar("title", { length: 120 }).notNull(),
+          }),
+          clientProjection: { omitColumns: [] },
+          ...extra,
+        }),
+      });
+
+    const persistent = make({});
+    const ephemeral = make({ retention: "ephemeral" });
+    // Retention is a TEMP-vs-durable DDL change → must shift the fingerprint (force a rebuild).
+    expect(fingerprintRegistry(ephemeral)).not.toBe(fingerprintRegistry(persistent));
+    expect(canonicalizeRegistry(persistent)[0]?.retention).toBe("persistent");
+    expect(canonicalizeRegistry(ephemeral)[0]?.retention).toBe("ephemeral");
+
+    // Subscription timing is pure runtime orchestration over identical tables → fingerprint unchanged.
+    expect(fingerprintRegistry(make({ subscription: "lazy" }))).toBe(
+      fingerprintRegistry(make({ subscription: "eager" })),
+    );
+  });
+
   it("changes when a column is added", () => {
     const base = defineSyncRegistry({ items: items() });
     const widened = defineSyncRegistry({
