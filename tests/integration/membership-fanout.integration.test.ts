@@ -294,6 +294,50 @@ describe("membership fan-out (readwrite) integration", () => {
     }
   }, 30_000);
 
+  // ADR-0024 Slice 2 — the OFFLINE move-in: the member is added while their client is shut down (here:
+  // unsubscribed), then reconnects. The resume from the persisted offset must replay the move-in snapshot
+  // rows and materialise the now-visible board + tickets. The SAME local store is reused across the two
+  // sessions so the second resumes from the first's persisted offset/handle (not a fresh snapshot).
+  it("fans a member's rows in across an OFFLINE gap: added while unsubscribed, materialised on resume (ADR-0024 Slice 2)", async () => {
+    const MIN_WS = "2c4e1e3b-0000-4000-8000-0000000006ff";
+    const MIN_MEMBER = "1b3f0d2a-0000-4000-8000-0000000006ff";
+    const MIN_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000006ff";
+    const MIN_ITEM = "3d5f2f4c-0000-4000-8000-0000000006ff";
+
+    await server.drizzle.insert(workspacesTable).values({ id: MIN_WS, ownerId: MIN_MEMBER });
+    await server.drizzle
+      .insert(workItemsTable)
+      .values({ id: MIN_ITEM, workspaceId: MIN_WS, ownerId: MIN_MEMBER, body: "offline-join" });
+
+    const memberPg = await createLocalWorkItemStore();
+
+    // Session 1: sync as a non-member (sees nothing), persist the offset, then go OFFLINE (unsubscribe)
+    // while keeping the local store.
+    const first = await startMemberSync(memberPg, proxyUrl, MIN_MEMBER);
+    await first.initialSyncDone;
+    const before = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
+    expect(before.rows[0]?.count).toBe(0);
+    first.sync.unsubscribe();
+
+    // While offline: the admin adds the membership.
+    await server.drizzle
+      .insert(workspaceMembersTable)
+      .values({ id: MIN_MEMBERSHIP, workspaceId: MIN_WS, memberId: MIN_MEMBER, role: "member" });
+
+    // Session 2: resume on the SAME store. Catch-up from the persisted offset must deliver the move-in.
+    const second = await startMemberSync(memberPg, proxyUrl, MIN_MEMBER);
+    try {
+      await second.initialSyncDone;
+      await waitFor(async () => {
+        const rows = await memberPg.query<{ body: string }>("SELECT body FROM work_items WHERE id = $1;", [MIN_ITEM]);
+        expect(rows.rows[0]?.body).toBe("offline-join");
+      });
+    } finally {
+      second.sync.unsubscribe();
+      await memberPg.close();
+    }
+  }, 30_000);
+
   it("lets a member write into their workspace but rejects a non-member (RLS WITH CHECK)", async () => {
     const memberWrite = await server.request("/api/mutations", {
       method: "POST",
