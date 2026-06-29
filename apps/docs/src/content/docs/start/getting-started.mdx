@@ -255,6 +255,48 @@ These snippets compile against the published packages, so they stay in step with
 [The read path](/concepts/read-path/) and [The write path](/concepts/write-path/) for the full flow,
 and [Packages](/packages/) for the client entry points.
 
+## Project a writable table read-only per client
+
+When two clients consume the same table at different capabilities — a teacher writes a `posting_restriction`
+a learner only reads, or a learner writes a `report` a teacher only moderates — `mode` is **per-client**, not
+a property of the table. Define the table **once** in an authoritative registry at its writable capability,
+generate the server from that, and give each client a **projection** of it.
+
+`mode` is resolved at `defineSyncTable` time and drives the local write machinery (overlay + journal) and the
+overlay-merged read-model view, so you cannot hand-spread `{ ...entry, mode: "readonly" }` — the entry would
+keep a view over overlay state the readonly client never creates. Use `asReadonly`, which re-derives a true
+readonly entry: it drops the overlay/journal projection, the read-model view, and
+`conflictPolicy`/`governance`/`writeMode`, and keeps the read contract (columns, primary key, synced table,
+the shape/row filter) intact.
+
+```ts
+import { asReadonly, assertReadContractPreserved, defineSyncRegistry } from "@pgxsinkit/contracts";
+import { postingRestriction } from "./tables"; // defineSyncTable(…, { mode: "readwrite", conflictPolicy, governance })
+
+// One authoritative registry — the server's apply function + shape proxy are generated from this.
+export const authoritativeRegistry = defineSyncRegistry({ posting_restriction: postingRestriction });
+
+// Per-client projections: the teacher writes the table; the learner only reads it.
+export const teacherRegistry = defineSyncRegistry({ posting_restriction: postingRestriction });
+export const learnerRegistry = defineSyncRegistry({ posting_restriction: asReadonly(postingRestriction) });
+
+// Fail closed if a projection ever diverges the data it syncs (columns / pk / row-filter shape):
+assertReadContractPreserved(authoritativeRegistry, teacherRegistry, { label: "teacher" });
+assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "learner" });
+```
+
+<Aside type="note" title="Generate the server from the authoritative registry">
+  The apply function emits a write branch for **every** table and stamps managed fields / reject-if-stale from the
+  entry's write contract, so it must be generated from the writable entry — generate from the authoritative registry,
+  not a readonly projection. A claims-branching `customWhere` then serves every client from one shape definition (each
+  request carries its own claims). A projection may differ **only** in write capability and lifecycle
+  (`subscription`/`retention`/group), never in the read contract — that is what `assertReadContractPreserved` enforces.
+  It cannot see the `customWhere` body, so bump `rowFilter.revision` on a logic change. The full registry fingerprint
+  differs between the writable and readonly variants — expected and fine: it is client-local, guarding each client's own
+  store, and the server never sees it. See
+  [ADR-0025](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0025-per-client-mode-projection.md).
+</Aside>
+
 ## Try the demo
 
 The repository's `apps/board` (a Linear-style board + chat) drives all of the above end-to-end

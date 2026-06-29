@@ -7,8 +7,11 @@ description: >-
   server-version managed field plus a conflictPolicy (no default), authUid/nowMicroseconds fields are
   server-assigned and rejected in client payloads, enum columns in a shape where must be cast to text,
   the read filter and the RLS policy must derive from one predicate, and the in-database apply function
-  is provisioned by the pgxsinkit-generate CLI as a drizzle-kit migration. Load before authoring a
-  registry, adding a writable table, or wiring row-level security.
+  is provisioned by the pgxsinkit-generate CLI as a drizzle-kit migration. Also covers per-client mode
+  projection (ADR-0025): one authoritative registry with `asReadonly` projections when a table is
+  readwrite for one client and readonly for another, guarded by `assertReadContractPreserved`. Load before
+  authoring a registry, adding a writable table, presenting a table read-only to one client, or wiring
+  row-level security.
 metadata:
   type: core
   library: "@pgxsinkit/contracts"
@@ -183,6 +186,38 @@ bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
   --project-dir ./db --config drizzle.config.ts --name sync_artifact
 ```
 
+## Multi-client: one authoritative registry, readonly projections (ADR-0025)
+
+When the same table is `readwrite` for one client and `readonly` for another (a teacher writes a row a
+learner only reads, or the reverse), `mode` is **per-client**, not a property of the table. Define it
+**once** in an authoritative registry at its writable capability and project it per client. `mode` is baked
+at `defineSyncTable` time and drives the overlay/journal machinery + the `_read_model` view, so a
+hand-spread `{ ...entry, mode: "readonly" }` is **broken** (it keeps a view over overlay state the readonly
+client never creates). Use `asReadonly`, which re-derives a true readonly entry — drops the overlay/journal
+projection, the view, and `conflictPolicy`/`governance`/`writeMode`; keeps columns, primary key, synced
+table, and the shape/row filter.
+
+```ts
+import { asReadonly, assertReadContractPreserved } from "@pgxsinkit/contracts";
+
+const authoritativeRegistry = defineSyncRegistry({ posting_restriction: postingRestrictionEntry }); // readwrite
+const teacherRegistry = defineSyncRegistry({ posting_restriction: postingRestrictionEntry });
+const learnerRegistry = defineSyncRegistry({ posting_restriction: asReadonly(postingRestrictionEntry) });
+
+// Fail closed if a projection ever diverges the data it syncs (columns / pk / row-filter shape):
+assertReadContractPreserved(authoritativeRegistry, teacherRegistry, { label: "teacher" });
+assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "learner" });
+```
+
+- **Generate the server (apply function + proxy) from the authoritative registry** — the apply function
+  emits a branch for every table and stamps managed fields / reject-if-stale from the entry's write
+  contract, so it must see the writable entry. A claims-branching `customWhere` then serves every client.
+- A projection may differ **only** in write capability and lifecycle (`subscription`/`retention`/group),
+  never in the read contract — `assertReadContractPreserved` enforces it (it can't see the `customWhere`
+  body, so bump `rowFilter.revision` on a logic change).
+- The full registry fingerprint differs between the writable and readonly variants — expected and fine:
+  it is client-local (guards each client's own store rebuild) and the server never sees it.
+
 ## Common mistakes
 
 - Omitting `conflictPolicy` or the server-version field on a `readwrite` table (throws).
@@ -194,6 +229,8 @@ bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
   table from the columns), or referencing a custom SQL function in `CREATE POLICY` before it exists.
 - In a hand-written policy: bare `auth.uid()` instead of `authUid` (per-row vs per-statement), or a bound
   literal (`eq(col, x)`) where `CREATE POLICY` needs an inlined one (`eq(col, x).inlineParams()`).
+- Hand-spreading `{ ...entry, mode: "readonly" }` to downgrade a writable table for a read-only client
+  (keeps a `_read_model` view over overlay state that client never creates) — use `asReadonly`.
 
 For the surrounding model (two paths, one write path, fail-closed subquery flag), load the `core` skill
 from `@pgxsinkit/client`. Full prose: <https://pgxsinkit.github.io/start/getting-started/>.

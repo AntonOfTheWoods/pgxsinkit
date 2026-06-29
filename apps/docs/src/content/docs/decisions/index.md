@@ -37,5 +37,6 @@ complete as ADRs are added.
 - [ADR-0022 — Pessimistic write-units: server-authoritative writes via flush-routing](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0022-pessimistic-write-units.md)
 - [ADR-0023 — Subquery move-out: applying Electric's tagged-subquery eviction in the local store](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0023-subquery-move-out-tagged-reconciliation.md)
 - [ADR-0024 — Subquery move-in: applying Electric's live snapshot rows in the local store](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0024-subquery-move-in-snapshot-rows.md)
+- [ADR-0025 — Per-client mode projection: one authoritative registry, readonly projections per client](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0025-per-client-mode-projection.md)
 
 <!-- adr:list:end -->

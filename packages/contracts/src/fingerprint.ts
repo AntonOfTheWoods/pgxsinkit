@@ -179,6 +179,75 @@ export function fingerprintRegistry(registry: SyncTableRegistry): string {
 }
 
 /**
+ * The **read contract** of a single sync table: the subset of its canonical shape that decides what
+ * data streams down and how a row is identified and filtered — synced-table name, columns, primary key
+ * (and any local-PK override), column omission, and the shape (electric table + row filter). It is the
+ * stable identity a writable entry shares with its {@link asReadonly} projection.
+ *
+ * Deliberately EXCLUDES the two axes a per-client projection may legitimately differ on:
+ * - **write capability** — `mode`, the overlay/journal projection, `managedFields`, `conflictPolicy`,
+ *   `writeMode` (one client writes the table, another only reads it);
+ * - **lifecycle orchestration** — `consistencyGroup`, `subscription`, `retention` (a client may
+ *   eager- or lazy-load, or group differently, without changing the data it sees).
+ *
+ * What it pins is the data itself: two registries that present "the same" logical table to different
+ * clients must agree here, or those clients are silently seeing different rows/columns. As with the
+ * full registry fingerprint, the `customWhere` *body* is invisible — only its presence and the
+ * consumer-bumped {@link RowFilterSpec.revision} participate, so bump `revision` to force a divergence
+ * a logic-only change would otherwise hide.
+ */
+export interface CanonicalReadContract {
+  syncedTable: string;
+  primaryKey: string[];
+  localPrimaryKey: string[] | null;
+  columns: CanonicalColumn[];
+  omitColumns: string[];
+  shape: {
+    tableName: string;
+    shapeKey: string;
+    electricTable: string | null;
+    rowFilter: CanonicalRowFilter | null;
+  } | null;
+}
+
+/** The canonical {@link CanonicalReadContract} of a sync table entry (see the interface for what it omits). */
+export function canonicalizeReadContract(entry: SyncTableEntry): CanonicalReadContract {
+  const shape = entry.shape
+    ? {
+        tableName: entry.shape.tableName,
+        shapeKey: entry.shape.shapeKey,
+        electricTable: entry.shape.electricTable ?? null,
+        rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
+      }
+    : null;
+
+  return {
+    syncedTable: entry.clientProjection?.syncedTable ?? getTableConfig(entry.table).name,
+    primaryKey: [...entry.primaryKey.columns].sort(asString),
+    localPrimaryKey: entry.clientProjection?.localPrimaryKey
+      ? [...entry.clientProjection.localPrimaryKey.columns].sort(asString)
+      : null,
+    columns: canonicalizeColumns(entry.table),
+    omitColumns: [...(entry.clientProjection?.omitColumns ?? [])].map(String).sort(asString),
+    shape,
+  };
+}
+
+/** A stable string serialization of a table's {@link CanonicalReadContract}. */
+export function canonicalReadContractString(entry: SyncTableEntry): string {
+  return JSON.stringify(canonicalizeReadContract(entry));
+}
+
+/**
+ * A stable fingerprint (hex) of a table's {@link CanonicalReadContract}. Equal for a writable entry and
+ * its {@link asReadonly} projection; the basis of the projection-consistency invariant
+ * (`assertReadContractPreserved`).
+ */
+export function fingerprintReadContract(entry: SyncTableEntry): string {
+  return hashString(canonicalReadContractString(entry));
+}
+
+/**
  * FNV-1a over UTF-8 bytes, returned as 16 hex chars. Pure and dependency-free so it runs
  * identically in the browser and in Bun (no crypto import). A fingerprint, not a security
  * primitive — used both for the registry shape fingerprint (ADR-0004) and for the apply-function
