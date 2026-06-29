@@ -9,7 +9,7 @@
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/schema": "workspace:*",
     "@pgxsinkit/server": "workspace:*",
-    "drizzle-orm": "1.0.0-rc.2",
+    "drizzle-orm": "1.0.0-rc.4",
     "zod": "4.4.3"
   }
 }
