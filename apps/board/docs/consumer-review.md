@@ -242,17 +242,22 @@ admin `team_member.create`/`.delete` round-trips; and the **live subquery fan-ou
 a live `board-sync` long-poll on Bob's `issue` shape received the 12 Growth issues the moment
 the admin added Bob to Growth (`snapshot-end → up-to-date`), then they left on removal. Note
 the membership change is a change to the _source_ of a subquery row-filter, distinct from
-Phase 5's cross-team move (a row's own `team_id`); both fan out, but only a **live-following**
-shape receives the subquery delta — a fresh `offset=-1` snapshot on the cached handle does
-not, which is worth a docs note on how subquery shapes propagate source-table changes.
+Phase 5's cross-team move (a row's own `team_id`); both fan out. The toolkit now applies
+Electric's tagged **move-in / move-out** (ADR-0023/0024), so the local store converges in both
+directions — **live, and replayed on resume** from the persisted offset, so a revoked member's
+rows do not linger in their store while offline. The one path that does _not_ observe the delta
+is a fresh `offset=-1` snapshot on the cached handle — a probing artifact, not the running
+client's path. _(Originally filed here as "only a live-following shape receives the delta";
+superseded once the engine gained move-in/move-out handling.)_
 
 Content gaps for the docs (no source bug, but a fresh consumer would hit them): (a) a
 `create` only supplies non-managed fields — managed fields (`authUid`, `nowMicroseconds`) are
 stamped both optimistically (client) and authoritatively (server); the consumer never sends
 them; (b) `authUid` is filled in the optimistic overlay from the session `sub`, so an
 owner/author column renders attributed before convergence; (c) subquery row-filters propagate
-source-table membership changes to **live** subscribers (the board's add-member fan-out),
-which is the mechanism behind the team-scope consistency group's atomic appearance.
+source-table membership changes to **following** subscribers — live, and replayed on resume
+(the engine's move-in/move-out, ADR-0023/0024) — the mechanism behind the team-scope
+consistency group's atomic appearance.
 
 ## Phase 8 — Sync Inspector + Offline toggle + convergence dots
 
@@ -280,9 +285,10 @@ a capability **gap**, not a defect.
     long-polls and resumes from the persisted offset) so an offline mode can suspend both directions
     without tearing down the store. A future ADR.
 
-Deferred to a later increment (no toolkit gap, just scope): the PGlite **REPL tab** (the board carries
-no `@electric-sql/pglite-repl` dependency yet) and a **team-scope frontier-LSN** readout (no client API
-surfaces the consistency group's frontier today).
+Deferred to a later increment (no toolkit gap, just scope): a **team-scope frontier-LSN** readout (no
+client API surfaces the consistency group's frontier today). _(The PGlite **REPL tab** — `@electric-sql/pglite-repl`
+over the live local store, plus a schema map of the synced tables and their overlay/journal/views — has
+since been added on the Database tab.)_
 
 ## Performance pass — idle CPU + write→converge latency
 
