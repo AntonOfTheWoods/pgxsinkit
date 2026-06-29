@@ -29,11 +29,24 @@ const PLATFORM = "00000000-0000-4000-8000-0000000000a1";
 const GROWTH = "00000000-0000-4000-8000-0000000000a2";
 const DESIGN = "00000000-0000-4000-8000-0000000000a3";
 
+// Seeded channel ids (scripts/seed-board.ts). Alice is in Platform + Growth, so she syncs the global
+// channel plus those two; the Design channel is admin-only.
+const GLOBAL_CHANNEL = "00000000-0000-4000-8000-0000000000c0";
+const PLATFORM_CHANNEL = "00000000-0000-4000-8000-0000000000c1";
+const GROWTH_CHANNEL = "00000000-0000-4000-8000-0000000000c2";
+const DESIGN_CHANNEL = "00000000-0000-4000-8000-0000000000c3";
+
 const sql = postgres(DATABASE_URL, { prepare: false });
 
 interface IssueRow {
   id: string;
   status: string;
+  updated_at_us: string;
+}
+
+interface TeamRow {
+  id: string;
+  name: string;
   updated_at_us: string;
 }
 
@@ -106,21 +119,33 @@ interface MutationAck {
   httpStatus?: number;
 }
 
-async function boardWriteStatus(token: string, issue: IssueRow, next: string): Promise<MutationAck> {
+interface MutationInput {
+  tableName: string;
+  entityKey: Record<string, unknown>;
+  kind: "create" | "update" | "delete";
+  payload?: Record<string, unknown>;
+  baseServerVersion?: string | null;
+}
+
+// Apply one mutation through the board-write edge function as a given identity. The apply runs under
+// that identity's claims, so RLS governs whether the write lands — exactly as it would for the real
+// client. A WITH CHECK violation aborts the batch (non-200); an UPDATE whose USING clause excludes the
+// row matches zero rows and acks as a silent no-op (the data is simply untouched).
+async function applyMutation(token: string, mutation: MutationInput): Promise<MutationAck> {
   const response = await fetch(`${GATEWAY_URL}/functions/v1/board-write/mutations`, {
     method: "POST",
     headers: { apikey: ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       mutations: [
         {
-          tableName: "issue",
-          entityKey: { id: issue.id },
+          tableName: mutation.tableName,
+          entityKey: mutation.entityKey,
           mutationId: crypto.randomUUID(),
           mutationSeq: 1,
-          kind: "update",
-          payload: { status: next },
+          kind: mutation.kind,
+          payload: mutation.payload ?? {},
           clientTimestampUs: String(BigInt(Date.now()) * 1000n),
-          baseServerVersion: issue.updated_at_us,
+          baseServerVersion: mutation.baseServerVersion ?? null,
         },
       ],
     }),
@@ -129,6 +154,16 @@ async function boardWriteStatus(token: string, issue: IssueRow, next: string): P
     throw new Error(`board-write failed (${response.status}): ${await response.text()}`);
   }
   return ((await response.json()) as { acks: MutationAck[] }).acks[0]!;
+}
+
+function boardWriteStatus(token: string, issue: IssueRow, next: string): Promise<MutationAck> {
+  return applyMutation(token, {
+    tableName: "issue",
+    entityKey: { id: issue.id },
+    kind: "update",
+    payload: { status: next },
+    baseServerVersion: issue.updated_at_us,
+  });
 }
 
 const otherStatus = (status: string): string => (status === "done" ? "todo" : "done");
@@ -193,5 +228,99 @@ describe("board demo smoke (real edge stack: GoTrue → Kong → edge functions 
     const [after] = await sql<IssueRow[]>`select id, status, updated_at_us from issue where id = ${issue!.id}`;
     expect(after!.status).toBe(issue!.status);
     expect(after!.updated_at_us).toBe(issue!.updated_at_us);
+  });
+
+  // pgxsinkit ADR-0025 — per-client mode projection, proven at the write path. `team` is `readwrite` in
+  // the authoritative registry but Admin-only by RLS (`team_update`). The Member client never even has a
+  // `team` write handle (`boardMemberRegistry` projects `team` `asReadonly`), so this is the server-side
+  // backstop: an Admin's rename lands and fans out; a Member's forged write cannot touch the data.
+  describe("team rename (ADR-0025: Admin writes, Member is read-only)", () => {
+    it("lets an Admin rename a Team — the write applies and the Server version advances", async () => {
+      const [team] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${PLATFORM}`;
+      expect(team).toBeDefined();
+      const renamed = `${team!.name} (renamed)`;
+
+      const ack = await applyMutation(adminToken, {
+        tableName: "team",
+        entityKey: { id: PLATFORM },
+        kind: "update",
+        payload: { name: renamed },
+        baseServerVersion: team!.updated_at_us,
+      });
+      expect(ack.status).toBe("acked");
+      expect(BigInt(ack.serverUpdatedAtUs ?? "0")).toBeGreaterThan(BigInt(team!.updated_at_us));
+
+      const [after] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${PLATFORM}`;
+      expect(after!.name).toBe(renamed);
+      expect(BigInt(after!.updated_at_us)).toBeGreaterThan(BigInt(team!.updated_at_us));
+
+      // The rename fans out on the read path: a Member of Platform syncs the Team with its new name.
+      const platform = (await fetchShapeRows("team", aliceToken)).find((row) => row["id"] === PLATFORM);
+      expect(platform?.["name"]).toBe(renamed);
+    });
+
+    it("does not let a Member change a Team, even with a hand-forged write (RLS backstop)", async () => {
+      // The Member client has no `team` write handle at all (the ADR-0025 UX guarantee), so it could
+      // never issue this. We forge it anyway to prove the server is the real backstop: `team_update` is
+      // Admin-only, so the UPDATE's USING clause excludes the row, it matches zero rows, and the data is
+      // untouched. Alice *can* read Growth (she's a member), so this is the visible-but-not-writable case
+      // — distinct from the cross-team issue write above, which she cannot even see.
+      const [before] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${GROWTH}`;
+      expect(before).toBeDefined();
+
+      await applyMutation(aliceToken, {
+        tableName: "team",
+        entityKey: { id: GROWTH },
+        kind: "update",
+        payload: { name: "Member Was Here" },
+        baseServerVersion: before!.updated_at_us,
+      });
+
+      const [after] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${GROWTH}`;
+      expect(after!.name).toBe(before!.name);
+      expect(after!.updated_at_us).toBe(before!.updated_at_us);
+    });
+  });
+
+  // pgxsinkit ADR-0025 read filter + ADR-0021 lazy/ephemeral chat. The `message` shape carries a Member
+  // read window: a Member syncs only their visible channels AND the recent `CHAT_WINDOW_DAYS` of chat,
+  // while the Admin syncs every channel and the full history. The seed spreads chat across ~30 days, so
+  // older messages always fall outside the 21-day window and are visibly admin-only. (`message` is
+  // `lazy`/`ephemeral` on the client, but those are client-side subscription/retention hints — the proxy
+  // serves the shape on request all the same, which is what this reads.)
+  describe("member chat read window (ADR-0025 read filter)", () => {
+    it("windows a Member to their channels and the recent history, giving the Admin everything", async () => {
+      const aliceMsgs = await fetchShapeRows("message", aliceToken);
+      const adminMsgs = await fetchShapeRows("message", adminToken);
+
+      // Channel scope: Alice syncs her teams' channels + global; never the Design channel. The Admin
+      // syncs every channel, Design included.
+      const aliceChannels = new Set(aliceMsgs.map((row) => row["channel_id"]));
+      expect(aliceChannels.has(GLOBAL_CHANNEL)).toBe(true);
+      expect(aliceChannels.has(DESIGN_CHANNEL)).toBe(false);
+      expect(new Set(adminMsgs.map((row) => row["channel_id"])).has(DESIGN_CHANNEL)).toBe(true);
+
+      // Within the channels BOTH can see, the only differentiator is the time window — isolate them.
+      const shared = new Set([GLOBAL_CHANNEL, PLATFORM_CHANNEL, GROWTH_CHANNEL]);
+      const inShared = (rows: Record<string, unknown>[]) =>
+        rows.filter((row) => shared.has(row["channel_id"] as string));
+      const aliceShared = inShared(aliceMsgs);
+      const aliceIds = new Set(aliceShared.map((row) => row["id"]));
+      const adminOnly = inShared(adminMsgs).filter((row) => !aliceIds.has(row["id"]));
+
+      // The Admin sees strictly more in those shared channels — the older messages the window holds back.
+      expect(aliceShared.length).toBeGreaterThan(0);
+      expect(adminOnly.length).toBeGreaterThan(0);
+
+      // And it's a clean TIME cutoff, not a random difference: every message held back from the Member is
+      // strictly older than every message the Member did receive.
+      const createdAt = (row: Record<string, unknown>) => BigInt(row["created_at_us"] as string);
+      const newestHeldBack = adminOnly.reduce((max, row) => (createdAt(row) > max ? createdAt(row) : max), 0n);
+      const oldestDelivered = aliceShared.reduce(
+        (min, row) => (createdAt(row) < min ? createdAt(row) : min),
+        createdAt(aliceShared[0]!),
+      );
+      expect(newestHeldBack).toBeLessThan(oldestDelivered);
+    });
   });
 });

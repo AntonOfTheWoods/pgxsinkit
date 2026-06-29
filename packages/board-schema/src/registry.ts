@@ -1,6 +1,13 @@
 import { sql, type SQL } from "drizzle-orm";
 
-import { c, defineSyncRegistry, DENY_ALL, type JwtClaims } from "@pgxsinkit/contracts";
+import {
+  asReadonly,
+  assertReadContractPreserved,
+  c,
+  defineSyncRegistry,
+  DENY_ALL,
+  type JwtClaims,
+} from "@pgxsinkit/contracts";
 
 import {
   channelSyncEntry,
@@ -60,11 +67,28 @@ function issueReadFilter(claims: JwtClaims) {
   return sql`${c(issue.teamId)} in (${memberTeams(claims.sub)})`;
 }
 
+// The Member chat read window (pgxsinkit ADR-0025 read-path filter): a Member syncs only the recent
+// window — chat from the last `CHAT_WINDOW_DAYS` — while the Admin syncs the full history. The seed
+// spreads chat across ~30 days, so older messages always fall outside this window and are visibly
+// admin-only (sign in as a member: the channel shows recent chat; as the admin: the full backlog). The
+// cutoff is **day-quantized** — midnight (UTC), `CHAT_WINDOW_DAYS` back, in microseconds — so the Electric
+// shape `where`/param is stable within a day (clients share one shape cache; the window slides once daily)
+// instead of minting a new shape on every subscribe. Evaluated in the proxy per request. `message` is
+// `ephemeral`, so no cross-session stale-shape cache needs a `rowFilter.revision` bump when this changes.
+const MS_PER_DAY = 86_400_000;
+const CHAT_WINDOW_DAYS = 21;
+function memberChatWindowCutoffMicros(): bigint {
+  const startOfTodayMs = Math.floor(Date.now() / MS_PER_DAY) * MS_PER_DAY;
+  return BigInt(startOfTodayMs - CHAT_WINDOW_DAYS * MS_PER_DAY) * 1000n;
+}
+
 function messageReadFilter(claims: JwtClaims) {
-  if (isAdmin(claims)) return null;
+  if (isAdmin(claims)) return null; // Admin syncs every channel and the full chat history.
   if (!claims.sub) return DENY_ALL;
   const visibleChannels = sql`select ${c(channel.id)} from ${channel} where ${c(channel.kind)}::text = 'global' or ${c(channel.teamId)} in (${memberTeams(claims.sub)})`;
-  return sql`${c(message.channelId)} in (${visibleChannels})`;
+  // A Member syncs their visible channels AND only the recent window (`CHAT_WINDOW_DAYS`); chat older
+  // than that streams to the Admin but not to members — the read-path twin of the demo's role split.
+  return sql`${c(message.channelId)} in (${visibleChannels}) and ${c(message.createdAtUs)} >= ${memberChatWindowCutoffMicros()}`;
 }
 
 /**
@@ -100,3 +124,30 @@ export const boardSyncRegistry = defineSyncRegistry({
     shape: { ...messageSyncEntry.shape!, rowFilter: { customWhere: messageReadFilter } },
   },
 });
+
+/**
+ * Per-role client projections (pgxsinkit ADR-0025). `boardSyncRegistry` above is the **authoritative**
+ * registry — the `board-sync` proxy, the `board-write` apply function, and `pgxsinkit-generate` all
+ * consume it, and `team` / `team_member` are `readwrite` there (their write contract + RLS live on the
+ * tables). A client consumes a *projection* of it, chosen by role at bootstrap (board-client.ts):
+ *
+ * - **Admin** writes Teams (rename) and memberships (add/remove) — it uses the authoritative registry.
+ * - **Member** only reads both — `asReadonly` strips the local write machinery (no overlay/journal, no
+ *   `client.tables.team{,_member}` write handle, no `_read_model` view) while preserving the read
+ *   contract, so a member can never optimistically apply a write that RLS would only quarantine.
+ *
+ * The read filters above already branch on `isAdmin`, so the one authoritative registry serves both
+ * roles' shapes; only the client's *write capability* differs, which is exactly what the projection
+ * expresses.
+ */
+export const boardAdminRegistry = boardSyncRegistry;
+
+export const boardMemberRegistry = defineSyncRegistry({
+  ...boardSyncRegistry,
+  team: asReadonly(boardSyncRegistry.team),
+  team_member: asReadonly(boardSyncRegistry.team_member),
+});
+
+// Fail closed if a projection ever diverges the data it syncs (columns / pk / row-filter shape) — a
+// member and an admin must see the same rows through the same tables, differing only in write rights.
+assertReadContractPreserved(boardSyncRegistry, boardMemberRegistry, { label: "board member" });

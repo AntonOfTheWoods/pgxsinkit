@@ -85,12 +85,20 @@ export function buildProfilePolicies(role: PgRole) {
 }
 
 /**
- * team: a Member reads the Teams they belong to; an Admin reads all. Readonly — no write policies,
- * so neither the write path nor a direct connection can mutate teams. Mirrors `teamReadFilter`.
+ * team: a Member reads the Teams they belong to; an Admin reads all. Admin-only writes — only an Admin
+ * may create/rename/remove a Team; a Member has no write policy, so neither the write path nor a direct
+ * connection lets them mutate teams. The read filter (members-or-admin) and the write policies
+ * (admin-only) derive from the same predicates as `teamReadFilter`/the `team_member` policies, so a
+ * row can never be visible-but-wrongly-writable. Mirrors `teamReadFilter`.
  */
 export function buildTeamPolicies(role: PgRole, id: AnyColumn) {
   const memberOrAdmin = or(memberOfTeam(id), ADMIN)!;
-  return [policy("team_select", "select", role, memberOrAdmin, { using: true })];
+  return [
+    policy("team_select", "select", role, memberOrAdmin, { using: true }),
+    policy("team_insert", "insert", role, ADMIN, { withCheck: true }),
+    policy("team_update", "update", role, ADMIN, { using: true, withCheck: true }),
+    policy("team_delete", "delete", role, ADMIN, { using: true }),
+  ];
 }
 
 /**

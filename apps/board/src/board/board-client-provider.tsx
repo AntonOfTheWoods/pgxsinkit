@@ -30,7 +30,15 @@ export function useBoardOffline(): OfflineControl | null {
  * it keyed by `userId` so each identity gets its own local store. Children render once the client is
  * ready; rows then arrive reactively (`useLiveRows`) as the initial sync streams in.
  */
-export function BoardClientProvider({ userId, children }: { userId: string; children: ReactNode }) {
+export function BoardClientProvider({
+  userId,
+  isAdmin,
+  children,
+}: {
+  userId: string;
+  isAdmin: boolean;
+  children: ReactNode;
+}) {
   const [client, setClient] = useState<BoardSyncClient | null>(null);
   const [offline, setOffline] = useState<OfflineControl | null>(null);
   const [status, setStatus] = useState<SyncRuntimeStatus | null>(null);
@@ -46,7 +54,7 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
 
     void (async () => {
       try {
-        const { client: next, offline: nextOffline } = await createBoardSyncClient(userId, (value) => {
+        const { client: next, offline: nextOffline } = await createBoardSyncClient(userId, isAdmin, (value) => {
           if (active) setStatus(value);
         });
         await next.ready;
@@ -87,7 +95,7 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
         delete dev.__boardProfiler;
       }
     };
-  }, [userId]);
+  }, [userId, isAdmin]);
 
   if (error) {
     return (

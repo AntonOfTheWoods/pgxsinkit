@@ -20,7 +20,7 @@ if (import.meta.env.DEV) {
 // when there is a session, so every authenticated route can rely on the live sync client; the
 // unauthenticated tree still mounts the router so `/login` renders (and other routes redirect to it).
 function AppRoot() {
-  const { session, loading } = useAuth();
+  const { session, loading, isAdmin } = useAuth();
   if (loading) {
     return (
       <Center h="100vh">
@@ -32,7 +32,7 @@ function AppRoot() {
     return <RouterProvider router={router} />;
   }
   return (
-    <BoardClientProvider key={session.user.id} userId={session.user.id}>
+    <BoardClientProvider key={session.user.id} userId={session.user.id} isAdmin={isAdmin}>
       <RouterProvider router={router} />
     </BoardClientProvider>
   );

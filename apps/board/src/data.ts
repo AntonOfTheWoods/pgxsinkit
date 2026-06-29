@@ -7,7 +7,7 @@ import {
   issueView,
   messageView,
   profileTable,
-  teamMemberView,
+  teamMemberTable,
   teamTable,
 } from "@pgxsinkit/board-schema";
 
@@ -83,13 +83,19 @@ export type MembershipRow = { id: string; teamId: string; userId: string };
  * (a Member syncs the memberships of their own Teams; an Admin syncs all), so callers just group the
  * rows by `teamId` to build per-Team assignee lists — no extra filtering needed. The membership `id`
  * is the `team_member` PK, used by the Admin members page to remove a membership by key (Phase 7).
+ *
+ * Read from the **base synced table**, not the `_read_model` view: `team_member` is `readwrite` only in
+ * the Admin (authoritative) registry; the Member registry consumes it via `asReadonly` and so has no
+ * overlay-merged view (pgxsinkit ADR-0025). The base table exists in both, so this one hook serves both
+ * roles. Trade-off: an Admin's optimistic add/remove appears here once the Electric echo lands (a
+ * round-trip), not instantly — acceptable, and the optimistic surface is already shown by issues.
  */
 export function useTeamMemberships(): MembershipRow[] {
   const { rows } = useLiveDrizzleRows(
     (client) =>
       client.drizzle
-        .select({ id: teamMemberView.id, teamId: teamMemberView.teamId, userId: teamMemberView.userId })
-        .from(teamMemberView),
+        .select({ id: teamMemberTable.id, teamId: teamMemberTable.teamId, userId: teamMemberTable.userId })
+        .from(teamMemberTable),
     [],
   );
   return rows;

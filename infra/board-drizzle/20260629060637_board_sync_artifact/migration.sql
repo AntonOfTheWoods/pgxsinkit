@@ -150,15 +150,14 @@ ELSIF v_table = 'team' THEN
         INTO v_cols, v_vals
         FROM (VALUES
             ('id', 'uuid'),
-            ('name', 'varchar(120)'),
-            ('created_at_us', 'bigint')
+            ('name', 'varchar(120)')
         ) AS col_types(col_name, col_type)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
           'INSERT INTO "team" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
-          concat_ws(', ', nullif(v_cols, ''), NULL),
-          concat_ws(', ', nullif(v_vals, ''), NULL)
+          concat_ws(', ', nullif(v_cols, ''), '"created_at_us", "updated_at_us"'),
+          concat_ws(', ', nullif(v_vals, ''), 'CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT), CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)')
         );
         EXECUTE dml_sql USING (
           SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
@@ -173,17 +172,33 @@ ELSIF v_table = 'team' THEN
         ) AS col_types(col_name, col_type)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
+        EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''team'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m uuid) LEFT JOIN "team" AS t ON t."id" = (x.k->>''id'')::uuid WHERE t."id" IS NULL OR (x.b IS NOT NULL AND t."updated_at_us" > x.b)'
+          INTO v_group_conflicts
+          USING (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+            FROM jsonb_array_elements(v_rows) AS elem
+          );
+        v_conflicts := v_conflicts || v_group_conflicts;
+
         dml_sql := format(
-          'UPDATE "team" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
-          concat_ws(', ', nullif(v_set, ''), NULL)
+          'UPDATE "team" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m uuid) WHERE t."id" = (x.k->>''id'')::uuid AND (x.b IS NULL OR t."updated_at_us" <= x.b)',
+          concat_ws(', ', nullif(v_set, ''), '"updated_at_us" = GREATEST(CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT), "updated_at_us" + 1)')
         );
         EXECUTE dml_sql USING (
-          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb))), '[]'::jsonb)
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'delete' THEN
-          EXECUTE 'DELETE FROM "team" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
-          SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
+          EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''team'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x("id" uuid, b bigint, m uuid) JOIN "team" AS t ON t."id" = x."id" WHERE x.b IS NOT NULL AND t."updated_at_us" > x.b'
+          INTO v_group_conflicts
+          USING (
+            SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+            FROM jsonb_array_elements(v_rows) AS elem
+          );
+        v_conflicts := v_conflicts || v_group_conflicts;
+
+        EXECUTE 'DELETE FROM "team" AS t USING jsonb_to_recordset($1) AS x("id" uuid, b bigint, m uuid) WHERE t."id" = x."id" AND (x.b IS NULL OR t."updated_at_us" <= x.b)' USING (
+          SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSE
@@ -469,4 +484,4 @@ ELSIF v_table = 'message' THEN
 END;
 $$;
 
-COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb) IS 'pgxsinkit:fp1:9cd5bca3d5f944aa';
+COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb) IS 'pgxsinkit:fp1:876086f23bdc947f';

@@ -1,8 +1,9 @@
-import { Avatar, Badge, Button, Card, Group, Select, Stack, Text, Title } from "@mantine/core";
+import { Avatar, Badge, Button, Card, Group, Select, Stack, Text, TextInput, Title } from "@mantine/core";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
 import { useMembershipActions, type MembershipActions } from "../admin/use-membership-actions";
+import { type TeamActions, useTeamActions } from "../admin/use-team-actions";
 import { useAuth } from "../auth/auth";
 import { type MembershipRow, type ProfileRow, useProfileMap, useTeamMemberships, useTeams } from "../data";
 
@@ -26,6 +27,7 @@ function TeamMembersCard({
   profiles,
   candidates,
   actions,
+  teamActions,
 }: {
   teamId: string;
   teamName: string;
@@ -33,9 +35,37 @@ function TeamMembersCard({
   profiles: Map<string, ProfileRow>;
   candidates: ProfileRow[];
   actions: MembershipActions;
+  teamActions: TeamActions;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Admin-only Team rename (pgxsinkit ADR-0025). An optimistic `team.update`; the new name converges to
+  // every member's board via the Electric echo. A Member's client has no `team` write handle at all.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(teamName);
+  const [renaming, setRenaming] = useState(false);
+  const trimmed = draft.trim();
+  const canSave = trimmed.length > 0 && trimmed !== teamName && !renaming;
+
+  const startRename = () => {
+    setDraft(teamName);
+    setEditing(true);
+  };
+  const cancelRename = () => {
+    setEditing(false);
+    setDraft(teamName);
+  };
+  const saveRename = async () => {
+    if (!canSave) return;
+    setRenaming(true);
+    try {
+      await teamActions.rename(teamId, trimmed);
+      setEditing(false);
+    } finally {
+      setRenaming(false);
+    }
+  };
 
   const memberRows = useMemo(
     () =>
@@ -62,8 +92,36 @@ function TeamMembersCard({
 
   return (
     <Card withBorder radius="md" padding="md">
-      <Group justify="space-between" mb="sm">
-        <Title order={4}>{teamName}</Title>
+      <Group justify="space-between" mb="sm" wrap="nowrap">
+        {editing ? (
+          <Group gap="xs" wrap="nowrap" flex={1}>
+            <TextInput
+              flex={1}
+              size="xs"
+              aria-label={`Rename ${teamName}`}
+              value={draft}
+              disabled={renaming}
+              onChange={(event) => setDraft(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void saveRename();
+                if (event.key === "Escape") cancelRename();
+              }}
+            />
+            <Button size="compact-xs" onClick={() => void saveRename()} loading={renaming} disabled={!canSave}>
+              Save
+            </Button>
+            <Button size="compact-xs" variant="subtle" color="gray" onClick={cancelRename} disabled={renaming}>
+              Cancel
+            </Button>
+          </Group>
+        ) : (
+          <Group gap="xs" wrap="nowrap">
+            <Title order={4}>{teamName}</Title>
+            <Button size="compact-xs" variant="subtle" onClick={startRename}>
+              Rename
+            </Button>
+          </Group>
+        )}
         <Badge variant="light">{memberRows.length} members</Badge>
       </Group>
       <Stack gap="xs">
@@ -122,6 +180,7 @@ export function MembersRoute() {
   const memberships = useTeamMemberships();
   const profiles = useProfileMap();
   const actions = useMembershipActions();
+  const teamActions = useTeamActions();
 
   const membersByTeam = useMemo(() => {
     const map = new Map<string, MembershipRow[]>();
@@ -167,6 +226,7 @@ export function MembersRoute() {
           profiles={profiles}
           candidates={candidatesByTeam.get(team.id) ?? []}
           actions={actions}
+          teamActions={teamActions}
         />
       ))}
     </Stack>

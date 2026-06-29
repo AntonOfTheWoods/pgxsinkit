@@ -38,17 +38,29 @@ const profileSyncEntry = defineSyncTable({
   mode: "readonly",
 });
 
-// team — readonly, seeded. SELECT-only RLS: members read their Teams, Admin reads all, no writes.
+// team — readwrite, Admin-only writes (pgxsinkit ADR-0025 showcase). Members read their Teams (Admin
+// reads all) but cannot mutate — only an Admin may rename a Team, and the rename fans out to every
+// member's board live. The member client consumes this entry via `asReadonly` (registry.ts), so it
+// provisions no overlay/journal and exposes no write handle. updatedAtUs is the Server version
+// optimistic convergence keys on.
 const teamSyncEntry = defineSyncTable({
   tableName: "team",
   makeColumns: () => ({
     id: uuid("id").primaryKey(),
     name: varchar("name", { length: 120 }).notNull(),
     createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
+    updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
   extras: (t) => buildTeamPolicies(authenticatedRole, t.id),
-  mode: "readonly",
+  mode: "readwrite",
+  conflictPolicy: "reject-if-stale",
   consistencyGroup: TEAM_SCOPE,
+  governance: {
+    managedFields: [
+      { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
+      { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+    ],
+  },
 });
 
 // team_member — readwrite, Admin-only writes. Adding/removing a member is the live fan-out showcase.
@@ -93,7 +105,15 @@ const channelSyncEntry = defineSyncTable({
   consistencyGroup: TEAM_SCOPE,
 });
 
-// message — readwrite, last-write-wins (append-mostly; each insert has its own PK so inserts never collide).
+// message — readwrite, last-write-wins (append-mostly; each insert has its own PK so inserts never
+// collide). Chat is the ADR-0021 lifecycle showcase: `lazy` — its shape is held out of the boot set and
+// subscribes on first reference (opening a Channel), so the board's other shapes own the HTTP/2
+// connection budget at startup; `ephemeral` — its whole local cluster (read cache, overlay, journal,
+// views) is emitted as `TEMP`, so chat leaves no durable trace and is re-fetched fresh each session.
+// `message` is its own singleton consistency group (no `consistencyGroup`), so these axes apply to it
+// alone. Trade-off (ADR-0021/0022): ephemeral has no durable offline write queue — a message posted
+// while online flushes immediately; one staged offline does not survive a session end. Acceptable for
+// chat, and the durable offline-write story is already shown by issues.
 const messageSyncEntry = defineSyncTable({
   tableName: "message",
   makeColumns: () => ({
@@ -111,6 +131,8 @@ const messageSyncEntry = defineSyncTable({
   extras: (t) => buildMessagePolicies(authenticatedRole, t.channelId, t.authorId, channelSyncEntry.table),
   mode: "readwrite",
   conflictPolicy: "last-write-wins",
+  subscription: "lazy",
+  retention: "ephemeral",
   governance: {
     managedFields: [
       { column: "authorId", applyOn: ["create"], strategy: "authUid" },

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "bun:test";
 
-import { boardSyncRegistry } from "@pgxsinkit/board-schema";
+import { boardAdminRegistry, boardMemberRegistry, boardSyncRegistry } from "@pgxsinkit/board-schema";
+import { buildRowFilterShape, fingerprintReadContract } from "@pgxsinkit/contracts";
 
-// Importing the registry runs `defineSyncRegistry` → `validateSyncTableEntry` for every table, so a
-// missing Server version or conflictPolicy on a writable table would throw at import. These assertions
-// pin the board's contract (ADR-0003 conflict policies, ADR-0004 consistency group, ADR-0002 modes).
+// Importing the registry runs `defineSyncRegistry` → `validateSyncTableEntry` for every table (and
+// `assertReadContractPreserved` for the member projection), so a missing Server version or conflictPolicy
+// on a writable table — or a projection that diverged the read contract — would throw at import. These
+// assertions pin the board's contract (ADR-0003 conflict policies, ADR-0004 consistency group, ADR-0002
+// modes, ADR-0021 lazy/ephemeral, and pgxsinkit ADR-0025 per-client mode projection).
 
 describe("board sync registry", () => {
   it("declares the six board tables", () => {
@@ -22,6 +25,16 @@ describe("board sync registry", () => {
     expect(boardSyncRegistry.issue.conflictPolicy).toBe("reject-if-stale");
     expect(boardSyncRegistry.message.conflictPolicy).toBe("last-write-wins");
     expect(boardSyncRegistry.team_member.conflictPolicy).toBe("last-write-wins");
+    expect(boardSyncRegistry.team.conflictPolicy).toBe("reject-if-stale");
+  });
+
+  it("makes chat lazy + ephemeral, leaving the other tables eager + persistent (ADR-0021)", () => {
+    expect(boardSyncRegistry.message.subscription).toBe("lazy");
+    expect(boardSyncRegistry.message.retention).toBe("ephemeral");
+    for (const key of ["profile", "team", "team_member", "channel", "issue"] as const) {
+      expect(boardSyncRegistry[key].subscription).toBeUndefined();
+      expect(boardSyncRegistry[key].retention).toBeUndefined();
+    }
   });
 
   it("groups the team-scope tables, leaving profile and message singletons (ADR-0004)", () => {
@@ -33,12 +46,12 @@ describe("board sync registry", () => {
     expect(boardSyncRegistry.profile.consistencyGroup).toBeUndefined();
   });
 
-  it("marks readwrite vs readonly modes (ADR-0002)", () => {
+  it("marks readwrite vs readonly modes in the authoritative registry (ADR-0002)", () => {
     expect(boardSyncRegistry.issue.mode).toBe("readwrite");
     expect(boardSyncRegistry.message.mode).toBe("readwrite");
     expect(boardSyncRegistry.team_member.mode).toBe("readwrite");
+    expect(boardSyncRegistry.team.mode).toBe("readwrite");
     expect(boardSyncRegistry.profile.mode).toBe("readonly");
-    expect(boardSyncRegistry.team.mode).toBe("readonly");
     expect(boardSyncRegistry.channel.mode).toBe("readonly");
   });
 
@@ -47,5 +60,58 @@ describe("board sync registry", () => {
       const entry = boardSyncRegistry[key as keyof typeof boardSyncRegistry];
       expect(entry.shape?.rowFilter?.customWhere).toBeTypeOf("function");
     }
+  });
+
+  describe("per-client mode projection (pgxsinkit ADR-0025)", () => {
+    it("uses the authoritative registry for the Admin client", () => {
+      expect(boardAdminRegistry).toBe(boardSyncRegistry);
+    });
+
+    it("projects team + team_member read-only for the Member client, leaving the rest writable", () => {
+      // The Admin writes Teams (rename) and memberships; the Member only reads them.
+      expect(boardMemberRegistry.team.mode).toBe("readonly");
+      expect(boardMemberRegistry.team_member.mode).toBe("readonly");
+      // Tables the Member also writes are untouched by the projection.
+      expect(boardMemberRegistry.issue.mode).toBe("readwrite");
+      expect(boardMemberRegistry.message.mode).toBe("readwrite");
+    });
+
+    it("strips the local write machinery from the Member's projected tables", () => {
+      // No overlay-merged read-model view and no overlay/journal projection — a readonly client reads
+      // the synced base table and has no write handle.
+      expect(boardMemberRegistry.team.view).toBeUndefined();
+      expect(boardMemberRegistry.team_member.view).toBeUndefined();
+      expect(boardMemberRegistry.team.clientProjection?.overlayTable).toBeUndefined();
+      expect(boardMemberRegistry.team_member.clientProjection?.journalTable).toBeUndefined();
+      // The Admin (authoritative) registry keeps them.
+      expect(boardSyncRegistry.team.view).toBeDefined();
+      expect(boardSyncRegistry.team_member.view).toBeDefined();
+    });
+
+    it("preserves the read contract across the projection (the invariant the import asserts)", () => {
+      for (const key of ["team", "team_member"] as const) {
+        expect(fingerprintReadContract(boardMemberRegistry[key])).toBe(fingerprintReadContract(boardSyncRegistry[key]));
+      }
+    });
+  });
+
+  describe("member chat read window (ADR-0025 read filter + ADR-0021 lifecycle)", () => {
+    const messageFilter = boardSyncRegistry.message.shape!.rowFilter!;
+
+    it("syncs the full chat history to an Admin (no read filter)", () => {
+      expect(buildRowFilterShape(messageFilter, { sub: "u1", app_metadata: { roles: ["admin"] } })).toBeNull();
+    });
+
+    it("windows a Member to the recent cutoff (channel scope AND a created_at_us lower bound)", () => {
+      const shape = buildRowFilterShape(messageFilter, { sub: "u1" });
+      expect(shape).not.toBeNull();
+      expect(shape!.where).toContain("channel_id");
+      expect(shape!.where).toContain("created_at_us");
+      expect(shape!.where).toContain(">=");
+      // The channel subquery binds the subject ($1); the window binds the day-quantized cutoff ($2) —
+      // a bound param, never an inlined literal.
+      expect(shape!.params.length).toBe(2);
+      expect(Number(shape!.params[1])).toBeGreaterThan(0);
+    });
   });
 });

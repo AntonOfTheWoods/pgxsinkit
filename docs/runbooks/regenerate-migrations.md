@@ -22,12 +22,14 @@ create a fresh Postgres and apply the whole committed history on each start/run.
   - **`infra/drizzle/`** — the reference write-api and the integration/perf harness (`packages/schema`).
   - **`infra/board-drizzle/`** — the board demo (`packages/board-schema`).
 - Each history mixes **generated** migrations (re-emit them on change) with **hand-written** custom
-  migrations (no generator — leave them in place across a regen):
+  migrations (no generator). `infra/drizzle` has no customs. The board's customs are NOT freely
+  interleavable with a regenerated schema — they carry an apply-order dependency, so a board collapse
+  rebuilds the whole set in order (see [Board: dependency-ordered full regeneration](#board-dependency-ordered-full-regeneration)):
 
-  | set                   | generated (re-emit on change)                                                                     | hand-written (preserved as-is)                                          |
-  | --------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-  | `infra/drizzle`       | schema (`db:generate`), governance (`db:generate:governance`), sync-fn (`sync:function:generate`) | —                                                                       |
-  | `infra/board-drizzle` | schema (`db:board:generate`), sync-fn (`db:board:sync-fn`)                                        | `*_board_cross_team_trigger`, `*_board_grants`, `*_board_member_helper` |
+  | set                   | generated (re-emit on change)                                                                     | hand-written (custom SQL — no generator)                                                                                     |
+  | --------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+  | `infra/drizzle`       | schema (`db:generate`), governance (`db:generate:governance`), sync-fn (`sync:function:generate`) | —                                                                                                                            |
+  | `infra/board-drizzle` | schema (`db:board:generate`), sync-fn (`db:board:sync-fn`)                                        | `*_board_prereqs` (membership + cross-team-trigger functions), `*_board_grants_trigger` (table grants + the `issue` trigger) |
 
   `db:generate` / `db:board:generate` diff the Drizzle schema against the latest `snapshot.json` on disk
   — they **never read a database**. The sync-fn generators (ADR-0018) stamp the apply function with a
@@ -46,7 +48,8 @@ Run from the repo root. Every step here is **filesystem-only** — nothing reads
    - board schema change: `bun run db:board:generate`
    - board registry / apply-function change: `bun run db:board:sync-fn`
 
-   The hand-written board customs have no generator — do not delete or regenerate them.
+   For the board, mind the **apply ordering** — its hand-written customs are not freely interleavable
+   with a regenerated schema. See [Board: dependency-ordered full regeneration](#board-dependency-ordered-full-regeneration).
 
 3. **Format, validate, drift-check:**
    ```bash
@@ -56,9 +59,61 @@ Run from the repo root. Every step here is **filesystem-only** — nothing reads
    ```
 4. **Commit** the regenerated migration folders in the same changeset as the source edit.
 
-To collapse pre-launch churn (e.g. redundant `*_sync_artifact` folders), delete the stale **generated**
-folders, run the matching generator once, then steps 3–4. The apply-function migration is a standalone
-`DROP … ; CREATE OR REPLACE`, so a single fresh one ordered after the schema migrations is sufficient.
+To collapse pre-launch churn in `infra/drizzle` (e.g. redundant `*_sync_artifact` folders), delete the
+stale **generated** folders, run the matching generator once, then steps 3–4. The apply-function
+migration is a standalone `DROP … ; CREATE OR REPLACE`, so a single fresh one ordered after the schema
+migrations is sufficient.
+
+## Board: dependency-ordered full regeneration
+
+The board (`infra/board-drizzle`) has a hard **apply order** its sources can't auto-satisfy in one
+generated migration, so its hand-written customs are **not** freely interleavable with a regenerated
+schema — collapsing it means rebuilding the whole set in dependency order, not preserving customs in
+place. The order, and why:
+
+1. **`*_board_prereqs`** (custom) — `board_member_team_ids()` (the recursion-free membership helper) and
+   `board_block_cross_team_move()` (the trigger function). These must exist **before** the schema
+   migration, because that migration's RLS policies reference the helper (`CREATE POLICY … board_member_team_ids()`
+   fails if the function is absent). The helper is a **SQL** function that reads `team_member` (created
+   later), so this migration runs `SET LOCAL check_function_bodies = off;` first — the body is validated
+   at first call (runtime), by which point the table exists. The trigger function is PL/pgSQL (body never
+   validated at CREATE), so it needs no special treatment but rides along here.
+2. **schema** (generated, `db:board:generate`) — enums, the 6 tables, all RLS policies (current
+   helper-based form), and `ENABLE ROW LEVEL SECURITY`.
+3. **`*_board_grants_trigger`** (custom) — `GRANT`s to `authenticated` and `CREATE TRIGGER
+issue_block_cross_team_move` (both need the tables, so they follow the schema).
+4. **`*_board_sync_artifact`** (generated, `db:board:sync-fn`) — the `pgxsinkit_apply_mutations` apply
+   function. Standalone `DROP … ; CREATE OR REPLACE`, ordered last.
+
+Procedure (filesystem-only; timestamps increase with each call so the folders sort in this order):
+
+```bash
+rm -rf infra/board-drizzle/2026*/                                  # drop the whole board history
+bunx drizzle-kit generate --custom --name=board_prereqs --config=infra/board-drizzle.config.ts
+#   → fill its migration.sql with the two functions (SET LOCAL check_function_bodies=off; helper; trigger fn)
+bun run db:board:generate                                          # the schema migration
+bunx drizzle-kit generate --custom --name=board_grants_trigger --config=infra/board-drizzle.config.ts
+#   → fill its migration.sql with the GRANTs + CREATE TRIGGER
+bun run db:board:sync-fn                                           # the apply function
+```
+
+Then run the standard step 3 (`format:write`, `validate`, `sync:function:check`).
+
+**Optional apply-validation (the agent's own; never the maintainer's).** Because the ordering has real
+failure modes, it is worth confirming the fresh set applies before committing — against a **throwaway**
+Postgres, never the running board stack (whose volumes `infra:up`/the smoke lane own):
+
+```bash
+PORT=55432; PROJ="board-mig-val-$$"
+PGXSINKIT_INTEGRATION_POSTGRES_PORT=$PORT podman compose -f infra/compose/docker-compose.yml -p "$PROJ" up -d postgres
+# wait for pg_isready, then apply as the harness superuser (its `postgres` role has a different password):
+BOARD_DATABASE_URL="postgresql://supabase_admin:your-super-secret-and-long-postgres-password@127.0.0.1:$PORT/postgres?sslmode=disable" \
+  bun run db:board:migrate
+PGXSINKIT_INTEGRATION_POSTGRES_PORT=$PORT podman compose -f infra/compose/docker-compose.yml -p "$PROJ" down -v
+```
+
+The `supabase/postgres` harness image supplies the `authenticated` role and `auth.uid()`, so the board's
+RLS + SECURITY DEFINER helper apply exactly as on the board stack.
 
 ## Nothing for the maintainer — ever
 

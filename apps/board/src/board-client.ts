@@ -1,4 +1,4 @@
-import { boardSyncRegistry } from "@pgxsinkit/board-schema";
+import { boardMemberRegistry, boardSyncRegistry } from "@pgxsinkit/board-schema";
 import { createSyncClient } from "@pgxsinkit/client";
 import type { SyncRuntimeStatus } from "@pgxsinkit/contracts";
 import { createSyncClientHooks } from "@pgxsinkit/react";
@@ -28,14 +28,25 @@ export const { SyncClientProvider, useSyncClient, useLiveRows, useLiveDrizzleRow
  */
 export async function createBoardSyncClient(
   userId: string,
+  isAdmin: boolean,
   onStatusChange?: (status: SyncRuntimeStatus) => void,
 ): Promise<{
   client: Awaited<ReturnType<typeof createSyncClient<typeof boardSyncRegistry>>>;
   offline: OfflineControl;
 }> {
   const offline = createOfflineControl();
+  // Per-role mode projection (pgxsinkit ADR-0025). An Admin client uses the authoritative registry —
+  // `team` (rename) and `team_member` (add/remove) are readwrite, so it gets their local write
+  // machinery + write handles. A Member uses `boardMemberRegistry`, where both are `asReadonly`: same
+  // rows stream in, but no overlay/journal and no `client.tables.team{,_member}` write handle, so a
+  // Member can never optimistically apply a write that RLS would only quarantine. The hooks + client
+  // type stay the authoritative shape; the member registry preserves its read contract (asserted in
+  // board-schema), so this cast only narrows runtime write capability — it never widens what is read.
+  const registry: typeof boardSyncRegistry = isAdmin
+    ? boardSyncRegistry
+    : (boardMemberRegistry as typeof boardSyncRegistry);
   const client = await createSyncClient({
-    registry: boardSyncRegistry,
+    registry,
     electricUrl: boardConfig.electricUrl,
     writeUrl: boardConfig.writeUrl,
     getAuthToken: async () => {
