@@ -100,6 +100,9 @@ const CHANNELS: readonly ChannelFixture[] = [
 const STATUSES = ["backlog", "todo", "in_progress", "done"] as const;
 const PRIORITIES = ["none", "urgent", "high", "medium", "low"] as const;
 
+// Each team draws a DISJOINT slice of this pool without replacement (see the seed loop), so every seeded
+// issue gets a distinct title — no two tickets anywhere share one (which otherwise reads as a duplicate-row
+// bug in the demo). The pool must therefore have at least as many entries as the total issue count.
 const ISSUE_TITLES = [
   "Flush queue stalls under burst writes",
   "Reconnect storm after offline window",
@@ -121,6 +124,22 @@ const ISSUE_TITLES = [
   "Offline toggle does not pause the proxy",
   "Issue counter off by one after delete",
   "Search ignores description matches",
+  "Reorder animation drops frames on large boards",
+  "Team filter persists after sign-out",
+  "Retry backoff resets when the tab regains focus",
+  "Done column count excludes archived issues",
+  "Priority badge misaligns in compact density",
+  "Unread channel badge lingers after read",
+  "Assignee tooltip clips at the board edge",
+  "Board scroll jumps when a row syncs in",
+  "Description markdown renders as raw text",
+  "Live cursor flickers during a rebase",
+  "Quarantine banner does not auto-dismiss",
+  "First board open misses the warm cache",
+  "Status dropdown closes before the click lands",
+  "Cross-team move keeps the stale assignee",
+  "Hard refresh discards a queued offline edit",
+  "Notification count drifts after reconnect",
 ] as const;
 
 const CHAT_LINES = [
@@ -267,9 +286,21 @@ async function main(): Promise<void> {
   const nowUs = BigInt(Date.now()) * 1000n;
   const minUs = nowUs - 30n * 24n * 60n * 60n * 1_000_000n;
 
+  // Each team consumes the next disjoint slice of the title pool, drawn without replacement (`isUnique`),
+  // so every issue across the whole board gets a globally-distinct title.
+  const totalIssues = TEAMS.reduce((sum, team) => sum + team.issueCount, 0);
+  if (ISSUE_TITLES.length < totalIssues) {
+    throw new Error(
+      `ISSUE_TITLES needs at least ${totalIssues} entries for unique per-issue titles, has ${ISSUE_TITLES.length}`,
+    );
+  }
+
   let issueTotal = 0;
+  let titleOffset = 0;
   for (const [index, team] of TEAMS.entries()) {
     const memberIds = membersByTeam.get(team.key)!.map((key) => idByKey.get(key)!);
+    const titleSlice = ISSUE_TITLES.slice(titleOffset, titleOffset + team.issueCount);
+    titleOffset += team.issueCount;
     await seed(db, { issue: issueTable }, { seed: 100 + index }).refine((f) => ({
       issue: {
         count: team.issueCount,
@@ -277,7 +308,7 @@ async function main(): Promise<void> {
           teamId: f.default({ defaultValue: team.id }),
           assigneeId: f.valuesFromArray({ values: memberIds }),
           createdBy: f.valuesFromArray({ values: memberIds }),
-          title: f.valuesFromArray({ values: [...ISSUE_TITLES] }),
+          title: f.valuesFromArray({ values: [...titleSlice], isUnique: true }),
           description: f.loremIpsum({ sentencesCount: 2 }),
           status: f.valuesFromArray({ values: [...STATUSES] }),
           priority: f.valuesFromArray({ values: [...PRIORITIES] }),
