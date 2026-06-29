@@ -203,15 +203,15 @@ interface TableContext {
   managedNowMicrosecondsPropertyKeys: string[];
   updateManagedNowMicrosecondsPropertyKeys: string[];
   /**
-   * Property keys of the table's `authUid` managed fields that apply on create (governance). The
-   * server stamps these from `auth.uid()` (the JWT `sub`), so they are stripped from the create input
-   * type and never sent in the flushed payload. But the optimistic overlay still needs a value — an
-   * `authUid` column is typically `NOT NULL` (an owner/author/created_by), so an unstamped overlay
-   * INSERT violates the constraint. The runtime fills these client-side from the decoded auth subject
-   * (the same `sub` the server will stamp), so the local row renders attributed immediately and never
-   * flips on convergence.
+   * The table's `authClaim` managed fields that apply on create (governance), each with the JSON
+   * claimPath it stamps from. The server stamps these from the verified request claims, so they are
+   * stripped from the create input type and never sent in the flushed payload. But the optimistic
+   * overlay still needs a value — such a column is typically `NOT NULL` (an owner/author/created_by) —
+   * so the runtime fills it client-side from the decoded JWT claim at the same path (the same value the
+   * server will stamp), so the local row renders attributed immediately and never flips on convergence.
+   * (`auth.uid()` is just `claimPath: ["sub"]`, so this one path covers it.)
    */
-  managedAuthUidCreatePropertyKeys: string[];
+  managedAuthClaimCreateFields: Array<{ propertyKey: string; claimPath: string[] }>;
   recordIncludesOverlayState: boolean;
   columns: Array<{
     propertyKey: string;
@@ -273,13 +273,13 @@ export function nowMicroseconds(): string {
 }
 
 /**
- * Best-effort decode of a JWT's `sub` claim, for stamping `authUid` managed fields into the optimistic
- * overlay (the value the server will independently stamp from `auth.uid()`). This is **not** a
- * verification — the token is trusted only for a local, optimistic projection that the server re-stamps
- * authoritatively on apply; a forged `sub` could never make the server attribute the row differently.
- * Returns `undefined` for a malformed token or a missing/non-string `sub`.
+ * Best-effort decode of a JWT's claims payload, for stamping `authClaim` managed fields into the
+ * optimistic overlay (the value the server will independently stamp from the same claim path). This is
+ * **not** a verification — the token is trusted only for a local, optimistic projection that the server
+ * re-stamps authoritatively on apply; a forged claim could never make the server attribute the row
+ * differently. Returns `undefined` for a malformed token.
  */
-export function decodeJwtSubject(token: string): string | undefined {
+export function decodeJwtClaims(token: string): Record<string, unknown> | undefined {
   const segments = token.split(".");
   if (segments.length < 2 || !segments[1]) {
     return undefined;
@@ -289,11 +289,30 @@ export function decodeJwtSubject(token: string): string | undefined {
     const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
     const binary = atob(padded);
     const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    const payload = JSON.parse(new TextDecoder().decode(bytes)) as { sub?: unknown };
-    return typeof payload.sub === "string" ? payload.sub : undefined;
+    const payload = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    return typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Read a claim at a JSON path out of a decoded claims object, returning it as a string (the form the
+ * optimistic overlay column expects, mirroring the server's `jsonb #>>` text extraction). Returns
+ * `undefined` if the path is absent or the leaf is not a string/number.
+ */
+export function readJwtClaimPath(claims: Record<string, unknown>, claimPath: string[]): string | undefined {
+  let cursor: unknown = claims;
+  for (const segment of claimPath) {
+    if (typeof cursor !== "object" || cursor === null) {
+      return undefined;
+    }
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  if (typeof cursor === "string") {
+    return cursor;
+  }
+  return typeof cursor === "number" ? String(cursor) : undefined;
 }
 
 export function computeBackoffDelayMs(attemptCount: number) {
@@ -327,12 +346,12 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     return undefined;
   };
 
-  // The current auth subject (JWT `sub`) for stamping `authUid` create-managed fields into the
-  // optimistic overlay. Resolved only when a create needs it (a table with such a field), so
-  // tokenless registries never pay a token lookup.
-  const resolveAuthSubject = async (): Promise<string | undefined> => {
+  // The decoded JWT claims for stamping `authClaim` create-managed fields into the optimistic overlay
+  // (the same value the server stamps from the same claim path). Resolved only when a create needs it
+  // (a table with such a field), so tokenless registries never pay a token lookup.
+  const resolveAuthClaims = async (): Promise<Record<string, unknown> | undefined> => {
     const token = await resolveAuthToken();
-    return token ? decodeJwtSubject(token) : undefined;
+    return token ? decodeJwtClaims(token) : undefined;
   };
 
   const tableContexts = buildTableContexts(options.registry);
@@ -368,7 +387,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   const normalizeBatchItem = (
     item: MutationBatchItem<TRegistry>,
     order: number,
-    authSubject: string | undefined,
+    claims: Record<string, unknown> | undefined,
   ): NormalizedBatchItem => {
     const context = getTableContext(item.table as SyncTableName<TRegistry>);
     const mutationId = globalThis.crypto.randomUUID();
@@ -377,7 +396,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     switch (item.kind) {
       case "create": {
         const strippedInput = stripReadModelOverlayFields(item.input);
-        const optimisticRecord = ensureRecord(createOptimisticRecordFromContext(context, strippedInput, authSubject));
+        const optimisticRecord = ensureRecord(createOptimisticRecordFromContext(context, strippedInput, claims));
         const entityKey = buildEntityKeyFromRecord(context, optimisticRecord);
 
         return {
@@ -435,16 +454,16 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     // foreground-route them to the authoritative endpoint (ADR-0022). Empty for a purely optimistic batch.
     const pessimisticUnitIds = new Set<string>();
 
-    // Resolve the auth subject once per batch, but only if a create actually needs it (a target table
-    // with an `authUid` create-managed field). Avoids a token lookup for every other write.
-    const needsAuthSubject = items.some(
+    // Resolve the decoded claims once per batch, but only if a create actually needs them (a target
+    // table with an `authClaim` create-managed field). Avoids a token lookup for every other write.
+    const needsAuthClaims = items.some(
       (item) =>
         item.kind === "create" &&
-        getTableContext(item.table as SyncTableName<TRegistry>).managedAuthUidCreatePropertyKeys.length > 0,
+        getTableContext(item.table as SyncTableName<TRegistry>).managedAuthClaimCreateFields.length > 0,
     );
-    const authSubject = needsAuthSubject ? await resolveAuthSubject() : undefined;
+    const claims = needsAuthClaims ? await resolveAuthClaims() : undefined;
 
-    const normalizedItems = items.map((item, index) => normalizeBatchItem(item, index, authSubject));
+    const normalizedItems = items.map((item, index) => normalizeBatchItem(item, index, claims));
     const batchGroups = new Map<string, { context: TableContext; items: NormalizedBatchItem[] }>();
 
     for (const item of normalizedItems) {
@@ -1378,10 +1397,12 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     .map((field) => resolveManagedPropertyKey(field.column as string))
     .filter((propertyKey): propertyKey is string => propertyKey !== undefined);
 
-  const managedAuthUidCreatePropertyKeys = (entry.governance?.managedFields ?? [])
-    .filter((field) => field.strategy === "authUid" && field.applyOn.includes("create"))
-    .map((field) => resolveManagedPropertyKey(field.column as string))
-    .filter((propertyKey): propertyKey is string => propertyKey !== undefined);
+  const managedAuthClaimCreateFields = (entry.governance?.managedFields ?? [])
+    .filter((field) => field.strategy === "authClaim" && field.applyOn.includes("create"))
+    .flatMap((field) => {
+      const propertyKey = resolveManagedPropertyKey(field.column as string);
+      return propertyKey && field.claimPath ? [{ propertyKey, claimPath: field.claimPath }] : [];
+    });
 
   return {
     key,
@@ -1405,7 +1426,7 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     serverVersionPropertyKey,
     managedNowMicrosecondsPropertyKeys,
     updateManagedNowMicrosecondsPropertyKeys,
-    managedAuthUidCreatePropertyKeys,
+    managedAuthClaimCreateFields,
     recordIncludesOverlayState: "overlayTable" in (entry.clientProjection ?? {}),
     columns,
   };
@@ -1460,20 +1481,24 @@ function materializeColumnDefault(column: TableContext["columns"][number]["colum
 function createOptimisticRecordFromContext<TCreate, TRecord>(
   context: TableContext,
   input: TCreate,
-  authSubject?: string,
+  claims?: Record<string, unknown>,
 ): TRecord {
   const record = {
     ...(isRecord(input) ? input : {}),
   };
   const nowUs = nowMicroseconds();
 
-  // Stamp `authUid` create-managed fields (owner/author/created_by) with the current subject so the
-  // optimistic overlay row is attributed locally and satisfies the column's NOT NULL — the server
-  // independently stamps the same `auth.uid()` on apply, so the value never flips on convergence.
-  if (authSubject != null) {
-    for (const propertyKey of context.managedAuthUidCreatePropertyKeys) {
+  // Stamp `authClaim` create-managed fields (owner/author/created_by) from the decoded claim at the
+  // field's path, so the optimistic overlay row is attributed locally and satisfies the column's NOT
+  // NULL — the server independently stamps the same claim on apply, so the value never flips on
+  // convergence. (`auth.uid()` is just `claimPath: ["sub"]`.)
+  if (claims != null) {
+    for (const { propertyKey, claimPath } of context.managedAuthClaimCreateFields) {
       if (record[propertyKey] === undefined) {
-        record[propertyKey] = authSubject;
+        const value = readJwtClaimPath(claims, claimPath);
+        if (value !== undefined) {
+          record[propertyKey] = value;
+        }
       }
     }
   }

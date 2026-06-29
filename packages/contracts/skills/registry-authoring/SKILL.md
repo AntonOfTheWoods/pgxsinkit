@@ -4,8 +4,8 @@ description: >-
   Load when defining or changing a pgxsinkit sync registry with @pgxsinkit/contracts —
   defineSyncRegistry / defineSyncTable, table sync modes, managed fields, conflict policy, read-path row
   filters, and RLS. Teaches the rules that throw or fail closed if missed: every readwrite table needs a
-  server-version managed field plus a conflictPolicy (no default), authUid/nowMicroseconds fields are
-  server-assigned and rejected in client payloads, enum columns in a shape where must be cast to text,
+  server-version managed field plus a conflictPolicy (no default), authClaim/nowMicroseconds managed
+  fields are server-assigned and rejected in client payloads, enum columns in a shape where must be cast to text,
   the read filter and the RLS policy must derive from one predicate, and the in-database apply function
   is provisioned by the pgxsinkit-generate CLI as a drizzle-kit migration. Also covers per-client mode
   projection (ADR-0025): one authoritative registry with `asReadonly` projections when a table is
@@ -49,7 +49,8 @@ widgets: defineSyncTable({
   governance: {
     managedFields: [
       { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
-      { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+      // Stamp the owner from the verified `sub` claim. (`auth.uid()` is just claimPath: ["sub"].)
+      { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
     ],
   },
 }),
@@ -57,11 +58,21 @@ widgets: defineSyncTable({
 
 ## Managed fields are server-assigned — never send them
 
-A field with a `nowMicroseconds` or `authUid` strategy is stamped by the apply function. The write API
-**rejects** a client write payload that _includes_ a managed field, and the create-validation schema
-**omits** managed-on-create fields. So: do not put `updated_at_us` or the owner column in a client
-`create`/`update` payload; let the server assign them. (Both rules exist because the apply function
-independently stamps these, so a client value would either be overwritten or rejected.)
+A managed field is stamped by the apply function under the verified request claims. Two strategies:
+
+- **`nowMicroseconds`** — `clock_timestamp()` microseconds (the audit columns; the `updated_at_us`-on-update
+  field is the strictly-monotonic server version).
+- **`authClaim`** — a value read from a verified JWT claim at a JSON `claimPath`. This is the **single**
+  claim-stamping strategy: `["sub"]` is the auth subject (the old `auth.uid()` owner idiom), and
+  `["app_metadata", "person_id"]` (etc.) is any app-minted identity — one mechanism, not a `sub`-only
+  special case. `cast` is optional and **defaults to the target column's own SQL type** (a `uuid` column
+  needs none); the path segments must be plain identifiers (they are emitted into the apply-function DDL).
+
+The write API **rejects** a client write payload that _includes_ a managed field, and the create-validation
+schema **omits** managed-on-create fields. So: do not put `updated_at_us` or a claim-stamped owner column in
+a client `create`/`update` payload; let the server assign them. (The apply function independently stamps
+these, so a client value would either be overwritten or rejected. The optimistic overlay still fills an
+`authClaim` create field locally from the decoded claim, so the row renders attributed immediately.)
 
 ## Read-path filtering: `customWhere` runs in Electric, not Postgres
 

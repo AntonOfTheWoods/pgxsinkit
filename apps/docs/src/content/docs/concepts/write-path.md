@@ -45,9 +45,12 @@ batch with 401.
 
 ## Managed fields
 
-Governance "managed fields" (e.g. `ownerId` via `authUid`, `createdAtUs`/`updatedAtUs` via
-`nowMicroseconds`) are written **by the database**, not the client. The server strips any
-client-supplied values for these fields before applying.
+Governance "managed fields" (e.g. `ownerId` via `authClaim` at claimPath `["sub"]`,
+`createdAtUs`/`updatedAtUs` via `nowMicroseconds`) are written **by the database**, not the client. The
+server strips any client-supplied values for these fields before applying. (`authClaim` is the single
+claim-stamping strategy: a value read from the verified JWT claims at a JSON path — `["sub"]` is the
+auth subject, `["app_metadata","person_id"]` an app-minted identity; the old `auth.uid()` owner is just
+`["sub"]`.)
 
 This shapes what you pass to a `create`. `SyncTableCreateInput` **omits** every managed-on-create
 field, so you supply only the non-managed columns — for a chat message that is just
@@ -58,8 +61,8 @@ valid create with the field absent.
 
 The optimistic overlay does not wait for the server, though. When you call `.create(...)`, the
 runtime fills the overlay row's managed fields locally so the UI renders a complete, attributed row
-this frame: `nowMicroseconds` fields take the client clock, and an `authUid` field takes the current
-session's subject (decoded from the auth token — the same `sub` the server stamps via `auth.uid()`).
+this frame: `nowMicroseconds` fields take the client clock, and an `authClaim` field takes the decoded
+claim at its path (for `["sub"]`, the current session's subject — the same value the server stamps).
 Because both sides resolve to the same identity, the value never flips when the server's row echoes
 back. The flushed payload still omits these fields (it is built from your original input, not the
 overlay), so the server remains authoritative.

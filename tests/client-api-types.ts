@@ -24,7 +24,7 @@ const projectedRegistry = defineSyncRegistry({
       omitColumns: ["ownerId"],
     },
     governance: {
-      managedFields: [{ column: "ownerId", applyOn: ["create"], strategy: "authUid" }],
+      managedFields: [{ column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] }],
     },
   }),
 });

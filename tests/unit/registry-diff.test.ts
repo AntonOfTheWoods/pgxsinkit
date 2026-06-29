@@ -143,16 +143,22 @@ describe("registry diff gate (ADR-0006)", () => {
   });
 
   it("classifies a managed-fields change as risky (review #4)", () => {
-    const mk = (strategy: string) =>
+    const mk = (strategy: "authClaim" | "nowMicroseconds") =>
       defineSyncRegistry({
         items: defineSyncTable({
           tableName: "items",
           makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id") }),
           clientProjection: { omitColumns: [] },
-          governance: { managedFields: [{ column: "ownerId", applyOn: ["create"], strategy: strategy as never }] },
+          governance: {
+            managedFields: [
+              strategy === "authClaim"
+                ? { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] }
+                : { column: "ownerId", applyOn: ["create"], strategy: "nowMicroseconds" },
+            ],
+          },
         }),
       });
-    const diff = compareRegistries(mk("authUid"), mk("nowMicroseconds"));
+    const diff = compareRegistries(mk("authClaim"), mk("nowMicroseconds"));
     expect(diff.severity).toBe("risky");
     expect(diff.changes.some((change) => /managed fields changed/.test(change.detail))).toBe(true);
   });

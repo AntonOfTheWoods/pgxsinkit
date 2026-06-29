@@ -736,7 +736,7 @@ function isRlsAuthContextRequired(registry: SyncTableRegistry): boolean {
   return Object.values(registry).some(
     (entry) =>
       getTableConfig(entry.table as AnyPgTable).policies.length > 0 ||
-      (entry.governance?.managedFields ?? []).some((field) => field.strategy === "authUid"),
+      (entry.governance?.managedFields ?? []).some((field) => field.strategy === "authClaim"),
   );
 }
 

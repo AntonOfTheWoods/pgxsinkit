@@ -37,7 +37,7 @@ const writableRestriction = () =>
     conflictPolicy: "reject-if-stale",
     governance: {
       managedFields: [
-        { column: "issuedBy", applyOn: ["create"], strategy: "authUid" },
+        { column: "issuedBy", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
         { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
       ],
     },

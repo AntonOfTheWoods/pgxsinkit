@@ -780,6 +780,41 @@ function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
     );
   }
 
+  // The single claim-stamping strategy (ADR-0026): an `authClaim` managed field reads a value from the
+  // verified request claims at a JSON path, emitted into the apply-function DDL — so the path segments
+  // must be plain identifiers and any cast a plain type name (never a value-injection surface). A
+  // non-authClaim field carrying claimPath/cast is an authoring slip; reject it rather than ignore it.
+  for (const field of entry.governance?.managedFields ?? []) {
+    if (field.strategy === "authClaim") {
+      if (!Array.isArray(field.claimPath) || field.claimPath.length === 0) {
+        throw new Error(
+          `managed field ${tableName}.${String(field.column)} (strategy "authClaim") must declare a non-empty ` +
+            `claimPath (e.g. ["sub"] or ["app_metadata","person_id"]) — ADR-0026`,
+        );
+      }
+      for (const segment of field.claimPath) {
+        if (typeof segment !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(segment)) {
+          throw new Error(
+            `managed field ${tableName}.${String(field.column)} has an invalid claimPath segment ` +
+              `${JSON.stringify(segment)}: each segment must match [A-Za-z_][A-Za-z0-9_]* (it is emitted into ` +
+              `the apply-function DDL)`,
+          );
+        }
+      }
+      if (field.cast !== undefined && !/^[A-Za-z_][A-Za-z0-9_ ]*$/.test(field.cast)) {
+        throw new Error(
+          `managed field ${tableName}.${String(field.column)} has an invalid cast ${JSON.stringify(field.cast)}: ` +
+            `must be a plain SQL type name (e.g. "uuid", "text")`,
+        );
+      }
+    } else if (field.claimPath !== undefined || field.cast !== undefined) {
+      throw new Error(
+        `managed field ${tableName}.${String(field.column)} declares claimPath/cast but its strategy is ` +
+          `"${field.strategy}" — those apply only to "authClaim"`,
+      );
+    }
+  }
+
   const columns = Object.entries(getColumns(entry.table)).map(([propertyKey, column]) => ({
     propertyKey,
     columnName: column.name,

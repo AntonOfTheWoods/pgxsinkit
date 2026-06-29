@@ -37,7 +37,7 @@ function itemsRegistry(opts: { extraColumn?: boolean } = {}) {
       clientProjection: { omitColumns: ["ownerId"] },
       governance: {
         managedFields: [
-          { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+          { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
           { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
           { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
         ],

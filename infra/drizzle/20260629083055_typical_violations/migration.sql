@@ -29,12 +29,14 @@ ALTER TABLE "todos" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 CREATE TABLE "fk_children" (
 	"id" uuid PRIMARY KEY,
 	"name" varchar(120) NOT NULL,
-	"parent_id" uuid NOT NULL
+	"parent_id" uuid NOT NULL,
+	"updated_at_us" bigint DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT) NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "fk_parents" (
 	"id" uuid PRIMARY KEY,
-	"name" varchar(120) NOT NULL
+	"name" varchar(120) NOT NULL,
+	"updated_at_us" bigint DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT) NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "projects" (
@@ -48,7 +50,8 @@ CREATE TABLE "projects" (
 CREATE TABLE "rls_todos" (
 	"id" uuid PRIMARY KEY,
 	"title" varchar(120) NOT NULL,
-	"owner_id" uuid DEFAULT auth.uid()
+	"owner_id" uuid DEFAULT auth.uid(),
+	"updated_at_us" bigint DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT) NOT NULL
 );
 --> statement-breakpoint
 ALTER TABLE "rls_todos" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
@@ -106,12 +109,10 @@ ALTER TABLE "todos" ADD CONSTRAINT "todos_author_id_authors_id_fkey" FOREIGN KEY
 ALTER TABLE "fk_children" ADD CONSTRAINT "fk_children_parent_fk" FOREIGN KEY ("parent_id") REFERENCES "fk_parents"("id");--> statement-breakpoint
 ALTER TABLE "work_items" ADD CONSTRAINT "work_items_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id");--> statement-breakpoint
 ALTER TABLE "workspace_members" ADD CONSTRAINT "workspace_members_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id");--> statement-breakpoint
-CREATE POLICY "authors_select_owner_or_admin" ON "authors" AS PERMISSIVE FOR SELECT TO "authenticated" USING (
-  owner_id = coalesce(
+CREATE POLICY "authors_select_owner_or_admin" ON "authors" AS PERMISSIVE FOR SELECT TO "authenticated" USING ((("authors"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -125,14 +126,11 @@ CREATE POLICY "authors_select_owner_or_admin" ON "authors" AS PERMISSIVE FOR SEL
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "authors_insert_owner_or_admin" ON "authors" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "authors_insert_owner_or_admin" ON "authors" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK ((("authors"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -146,14 +144,11 @@ CREATE POLICY "authors_insert_owner_or_admin" ON "authors" AS PERMISSIVE FOR INS
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "authors_update_owner_or_admin" ON "authors" AS PERMISSIVE FOR UPDATE TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "authors_update_owner_or_admin" ON "authors" AS PERMISSIVE FOR UPDATE TO "authenticated" USING ((("authors"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -167,13 +162,10 @@ CREATE POLICY "authors_update_owner_or_admin" ON "authors" AS PERMISSIVE FOR UPD
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-) WITH CHECK (
-  owner_id = coalesce(
+  )))) WITH CHECK ((("authors"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -187,14 +179,11 @@ CREATE POLICY "authors_update_owner_or_admin" ON "authors" AS PERMISSIVE FOR UPD
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "authors_delete_owner_or_admin" ON "authors" AS PERMISSIVE FOR DELETE TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "authors_delete_owner_or_admin" ON "authors" AS PERMISSIVE FOR DELETE TO "authenticated" USING ((("authors"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -208,14 +197,11 @@ CREATE POLICY "authors_delete_owner_or_admin" ON "authors" AS PERMISSIVE FOR DEL
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "todos_select_owner_or_admin" ON "todos" AS PERMISSIVE FOR SELECT TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "todos_select_owner_or_admin" ON "todos" AS PERMISSIVE FOR SELECT TO "authenticated" USING ((("todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -229,14 +215,11 @@ CREATE POLICY "todos_select_owner_or_admin" ON "todos" AS PERMISSIVE FOR SELECT 
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "todos_insert_owner_or_admin" ON "todos" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "todos_insert_owner_or_admin" ON "todos" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK ((("todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -250,14 +233,11 @@ CREATE POLICY "todos_insert_owner_or_admin" ON "todos" AS PERMISSIVE FOR INSERT 
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "todos_update_owner_or_admin" ON "todos" AS PERMISSIVE FOR UPDATE TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "todos_update_owner_or_admin" ON "todos" AS PERMISSIVE FOR UPDATE TO "authenticated" USING ((("todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -271,13 +251,10 @@ CREATE POLICY "todos_update_owner_or_admin" ON "todos" AS PERMISSIVE FOR UPDATE 
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-) WITH CHECK (
-  owner_id = coalesce(
+  )))) WITH CHECK ((("todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -291,14 +268,11 @@ CREATE POLICY "todos_update_owner_or_admin" ON "todos" AS PERMISSIVE FOR UPDATE 
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "todos_delete_owner_or_admin" ON "todos" AS PERMISSIVE FOR DELETE TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "todos_delete_owner_or_admin" ON "todos" AS PERMISSIVE FOR DELETE TO "authenticated" USING ((("todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -312,14 +286,11 @@ CREATE POLICY "todos_delete_owner_or_admin" ON "todos" AS PERMISSIVE FOR DELETE 
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "rls_todos_select_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR SELECT TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "rls_todos_select_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR SELECT TO "authenticated" USING ((("rls_todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -333,14 +304,11 @@ CREATE POLICY "rls_todos_select_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "rls_todos_insert_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "rls_todos_insert_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK ((("rls_todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -354,14 +322,11 @@ CREATE POLICY "rls_todos_insert_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "rls_todos_update_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR UPDATE TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "rls_todos_update_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR UPDATE TO "authenticated" USING ((("rls_todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -375,13 +340,10 @@ CREATE POLICY "rls_todos_update_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-) WITH CHECK (
-  owner_id = coalesce(
+  )))) WITH CHECK ((("rls_todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -395,14 +357,11 @@ CREATE POLICY "rls_todos_update_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "rls_todos_delete_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR DELETE TO "authenticated" USING (
-  owner_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "rls_todos_delete_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR DELETE TO "authenticated" USING ((("rls_todos"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  OR EXISTS (
+  )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -416,110 +375,53 @@ CREATE POLICY "rls_todos_delete_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
       )
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
-  )
-);--> statement-breakpoint
-CREATE POLICY "work_items_select_membership" ON "work_items" AS PERMISSIVE FOR SELECT TO "authenticated" USING (workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  ))));--> statement-breakpoint
+CREATE POLICY "work_items_select_membership" ON "work_items" AS PERMISSIVE FOR SELECT TO "authenticated" USING ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where "workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  ));--> statement-breakpoint
-CREATE POLICY "work_items_insert_membership" ON "work_items" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK (((owner_id = coalesce(
+  )::uuid))));--> statement-breakpoint
+CREATE POLICY "work_items_insert_membership" ON "work_items" AS PERMISSIVE FOR INSERT TO "authenticated" WITH CHECK ((((("work_items"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid) AND workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) and ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where "workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
-  )) AND ((workspace_id IN (
-    SELECT id
-    FROM workspaces
-    WHERE locked = false
-  )) OR workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)))))) and ((((("work_items"."workspace_id" = any(array(select "workspaces"."id" from "workspaces" where "workspaces"."locked" = false))) or ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND role = 'manager'
-  )) AND workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) and ("workspace_members"."role" = 'manager'))))))) and ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND muted = false
-  ));--> statement-breakpoint
-CREATE POLICY "work_items_update_membership" ON "work_items" AS PERMISSIVE FOR UPDATE TO "authenticated" USING (((owner_id = coalesce(
+  )::uuid)) and ("workspace_members"."muted" = false)))))))));--> statement-breakpoint
+CREATE POLICY "work_items_update_membership" ON "work_items" AS PERMISSIVE FOR UPDATE TO "authenticated" USING ((((("work_items"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid) OR workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) or ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND role = 'manager'
-  )) AND ((workspace_id IN (
-    SELECT id
-    FROM workspaces
-    WHERE locked = false
-  )) OR workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) and ("workspace_members"."role" = 'manager'))))))) and ((((("work_items"."workspace_id" = any(array(select "workspaces"."id" from "workspaces" where "workspaces"."locked" = false))) or ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND role = 'manager'
-  )) AND workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) and ("workspace_members"."role" = 'manager'))))))) and ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND muted = false
-  )) WITH CHECK (((owner_id = coalesce(
+  )::uuid)) and ("workspace_members"."muted" = false))))))))) WITH CHECK ((((("work_items"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid) OR workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) or ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND role = 'manager'
-  )) AND ((workspace_id IN (
-    SELECT id
-    FROM workspaces
-    WHERE locked = false
-  )) OR workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) and ("workspace_members"."role" = 'manager'))))))) and ((((("work_items"."workspace_id" = any(array(select "workspaces"."id" from "workspaces" where "workspaces"."locked" = false))) or ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND role = 'manager'
-  )) AND workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) and ("workspace_members"."role" = 'manager'))))))) and ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND muted = false
-  ));--> statement-breakpoint
-CREATE POLICY "work_items_delete_membership" ON "work_items" AS PERMISSIVE FOR DELETE TO "authenticated" USING ((owner_id = coalesce(
+  )::uuid)) and ("workspace_members"."muted" = false)))))))));--> statement-breakpoint
+CREATE POLICY "work_items_delete_membership" ON "work_items" AS PERMISSIVE FOR DELETE TO "authenticated" USING ((("work_items"."owner_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid) OR workspace_id IN (
-    SELECT workspace_id
-    FROM workspace_members
-    WHERE member_id = coalesce(
+  )::uuid)) or ("work_items"."workspace_id" = any(array(select "workspace_members"."workspace_id" from "workspace_members" where (("workspace_members"."member_id" = (select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid AND role = 'manager'
-  ));
+  )::uuid)) and ("workspace_members"."role" = 'manager')))))));

@@ -37,8 +37,8 @@ and divergent at worst:
   reaches Postgres — see [The write path](/concepts/write-path/).
 - **Triggers, functions, and materialized views** (other than the client's own reconcile trigger and
   read-model view).
-- **Managed-field values** (e.g. owner via `authUid`, `created_at_us`/`updated_at_us` via
-  `nowMicroseconds`). These are deliberately assigned by the database, not defaulted locally.
+- **Managed-field values** (e.g. owner via `authClaim` at claimPath `["sub"]`, `created_at_us`/`updated_at_us`
+  via `nowMicroseconds`). These are deliberately assigned by the database, not defaulted locally.
 
 ## Not yet local — gaps we intend to narrow
 

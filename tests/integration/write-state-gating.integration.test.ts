@@ -40,7 +40,7 @@ function createWorkItem(sub: string, id: string, mutationId: string) {
           mutationId,
           mutationSeq: 1,
           kind: "create",
-          // owner_id is stamped from the JWT sub (authUid managed field); workspace_id targets W1.
+          // owner_id is stamped from the JWT sub (authClaim managed field, claimPath ["sub"]); workspace_id targets W1.
           payload: { id, workspace_id: WORKSPACE_1, body: "a write" },
           clientTimestampUs: String(Date.now() * 1000),
         },

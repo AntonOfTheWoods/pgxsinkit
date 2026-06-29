@@ -6,7 +6,7 @@ import { defineSyncTable, type SyncTableEntry } from "@pgxsinkit/contracts";
 
 import { buildCreateValidationSchema } from "../../packages/server/src/mutations/route";
 
-// A writable table with an `authUid` managed-on-create field that is NOT NULL and carries no column
+// A writable table with an `authClaim` managed-on-create field that is NOT NULL and carries no column
 // default (the board's `message.author_id`). Regression: board Phase 7 — the create-validation schema
 // must NOT require a server-stamped managed field, or every create on such a table 400s even though
 // the client correctly omits it (and including it is a managed-field violation). Before the fix the
@@ -26,7 +26,7 @@ const authOwned = defineSyncTable({
   conflictPolicy: "last-write-wins",
   governance: {
     managedFields: [
-      { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+      { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
       { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
       { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
     ],
@@ -34,7 +34,7 @@ const authOwned = defineSyncTable({
 });
 
 describe("create payload validation (managed-on-create fields)", () => {
-  it("accepts a create payload that omits the authUid + managed-timestamp fields", () => {
+  it("accepts a create payload that omits the authClaim + managed-timestamp fields", () => {
     const schema = buildCreateValidationSchema(authOwned as unknown as SyncTableEntry);
     expect(() =>
       schema.parse({ id: "01963227-d4c7-72db-b858-f89f6af8fc01", body: "optimistic message" }),

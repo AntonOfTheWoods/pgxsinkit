@@ -52,7 +52,7 @@ function collectTableGrants(entry: SyncTableEntry): TableGrant[] {
     }
   }
 
-  if (grantsByRole.size === 0 && hasAuthUidManagedFields(entry)) {
+  if (grantsByRole.size === 0 && hasClaimManagedFields(entry)) {
     grantsByRole.set("authenticated", new Set(grantPrivilegeOrder));
   }
 
@@ -102,8 +102,8 @@ function resolvePolicyRoleNames(role: unknown): string[] {
   throw new Error(`Unsupported policy role: ${describeUnknownValue(role)}`);
 }
 
-function hasAuthUidManagedFields(entry: SyncTableEntry): boolean {
-  return (entry.governance?.managedFields ?? []).some((field) => field.strategy === "authUid");
+function hasClaimManagedFields(entry: SyncTableEntry): boolean {
+  return (entry.governance?.managedFields ?? []).some((field) => field.strategy === "authClaim");
 }
 
 function buildGrantSql(qualifiedTableName: string, grant: TableGrant): string {

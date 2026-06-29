@@ -129,8 +129,8 @@ describe("sync config contracts", () => {
       clientProjection: { omitColumns: ["ownerId", "modifiedBy"] },
       governance: {
         managedFields: [
-          { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
-          { column: "modifiedBy", applyOn: ["create", "update"], strategy: "authUid" },
+          { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
+          { column: "modifiedBy", applyOn: ["create", "update"], strategy: "authClaim", claimPath: ["sub"] },
           { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
         ],
       },
@@ -202,6 +202,66 @@ describe("sync config contracts", () => {
     // A readonly table needs no policy (it has no write path).
     expect(() =>
       defineSyncTable({ tableName: "conflict_policy_readonly", makeColumns: makeConflictColumns, mode: "readonly" }),
+    ).not.toThrow();
+  });
+
+  it("validates the authClaim managed-field strategy (ADR-0026)", () => {
+    const makeColumns = () => ({
+      id: uuid("id").primaryKey(),
+      createdBy: uuid("created_by"),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    });
+    // The dynamic managed field rides alongside a valid nowMicroseconds server version, so the writable
+    // hard-requires pass and validation reaches the authClaim checks.
+    const withManaged = (managed: Record<string, unknown>) =>
+      defineSyncTable({
+        tableName: "claim_items",
+        makeColumns,
+        mode: "readwrite",
+        conflictPolicy: "last-write-wins",
+        governance: {
+          managedFields: [
+            managed as never,
+            { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+          ],
+        },
+      });
+
+    // authClaim without a claimPath is rejected.
+    expect(() => withManaged({ column: "createdBy", applyOn: ["create"], strategy: "authClaim" })).toThrow(
+      /must declare a non-empty claimPath/,
+    );
+    // A claimPath segment that is not a plain identifier is rejected (it is emitted into the apply-fn DDL).
+    expect(() =>
+      withManaged({
+        column: "createdBy",
+        applyOn: ["create"],
+        strategy: "authClaim",
+        claimPath: ["app_metadata", "person-id"],
+      }),
+    ).toThrow(/invalid claimPath segment/);
+    // An unsafe cast is rejected.
+    expect(() =>
+      withManaged({
+        column: "createdBy",
+        applyOn: ["create"],
+        strategy: "authClaim",
+        claimPath: ["sub"],
+        cast: "uuid); drop",
+      }),
+    ).toThrow(/invalid cast/);
+    // claimPath on a non-authClaim strategy is an authoring slip — rejected, not silently ignored.
+    expect(() =>
+      withManaged({ column: "createdBy", applyOn: ["create"], strategy: "nowMicroseconds", claimPath: ["sub"] }),
+    ).toThrow(/apply only to "authClaim"/);
+    // A valid nested claim path (the emergent app_metadata.person_id case) is accepted.
+    expect(() =>
+      withManaged({
+        column: "createdBy",
+        applyOn: ["create"],
+        strategy: "authClaim",
+        claimPath: ["app_metadata", "person_id"],
+      }),
     ).not.toThrow();
   });
 

@@ -28,15 +28,32 @@ function toSqlTextOrNull(value: string): string {
   return value.length > 0 ? `'${toSqlLiteral(value)}'` : "NULL";
 }
 
-function buildManagedFieldExpression(strategy: "authUid" | "nowMicroseconds"): string {
-  if (strategy === "authUid") {
-    return "auth.uid()";
+interface ResolvedManagedField {
+  propertyKey: string;
+  columnName: string;
+  strategy: "nowMicroseconds" | "authClaim";
+  claimPath?: string[];
+  cast?: string;
+  columnSqlType: string;
+}
+
+// The single claim-stamping strategy (ADR-0026): `authClaim` reads the verified request claim at its JSON
+// path — `auth.uid()` is just `{ claimPath: ["sub"], cast: "uuid" }`, so there is one mechanism. The path
+// segments are validated plain identifiers at registry build, so the `'{a,b}'` text-array literal is
+// injection-safe; `current_setting('request.jwt.claims', …)` is set by this function before the apply DML
+// (it is what RLS reads), NULLIF guards an unset GUC (an absent claim stamps NULL, never errors), and the
+// cast defaults to the target column's own SQL type so a `uuid` column needs no explicit cast.
+function buildManagedFieldExpression(field: ResolvedManagedField): string {
+  if (field.strategy === "authClaim") {
+    const path = (field.claimPath ?? []).join(",");
+    const castType = field.cast ?? field.columnSqlType;
+    return `(NULLIF(current_setting('request.jwt.claims', true), '')::jsonb #>> '{${path}}')::${castType}`;
   }
 
   return "CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)";
 }
 
-function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create" | "update") {
+function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create" | "update"): ResolvedManagedField[] {
   const columns = getColumns(entry.table as AnyPgTable);
   const columnNameMap = new Map(Object.entries(columns).map(([propertyKey, column]) => [propertyKey, column.name]));
 
@@ -50,11 +67,18 @@ function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create"
       return [];
     }
 
+    const column =
+      (columns as Record<string, { getSQLType: () => string } | undefined>)[field.column] ??
+      Object.values(columns).find((candidate) => candidate.name === field.column);
+
     return [
       {
         propertyKey: field.column,
         columnName,
         strategy: field.strategy,
+        ...(field.claimPath ? { claimPath: field.claimPath } : {}),
+        ...(field.cast ? { cast: field.cast } : {}),
+        columnSqlType: column?.getSQLType() ?? "text",
       },
     ];
   });
@@ -93,9 +117,7 @@ function buildTableBranch(entry: SyncTableEntry): string {
     .join(",\n            ");
 
   const createManagedColumnsSql = createManagedFields.map((field) => quoteIdent(field.columnName)).join(", ");
-  const createManagedValuesSql = createManagedFields
-    .map((field) => buildManagedFieldExpression(field.strategy))
-    .join(", ");
+  const createManagedValuesSql = createManagedFields.map((field) => buildManagedFieldExpression(field)).join(", ");
   // ADR-0010: the Server version (the nowMicroseconds-on-update managed field) must be strictly
   // monotonic per row, so its on-update stamp is floored at the previous value + 1 — it can never
   // repeat or step backwards under wall-clock (NTP) skew, which would let a stale echo clear an
@@ -105,8 +127,8 @@ function buildTableBranch(entry: SyncTableEntry): string {
     .map((field) => {
       const expression =
         field.strategy === "nowMicroseconds" && field.columnName === serverVersionColumn
-          ? `GREATEST(${buildManagedFieldExpression("nowMicroseconds")}, ${quoteIdent(field.columnName)} + 1)`
-          : buildManagedFieldExpression(field.strategy);
+          ? `GREATEST(${buildManagedFieldExpression(field)}, ${quoteIdent(field.columnName)} + 1)`
+          : buildManagedFieldExpression(field);
       return `${quoteIdent(field.columnName)} = ${expression}`;
     })
     .join(", ");

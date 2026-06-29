@@ -105,7 +105,9 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
        governance: {
          managedFields: [
            { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
-           { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+           // Stamp the owner from the verified `sub` claim. (`auth.uid()` is just claimPath: ["sub"];
+           // use ["app_metadata","person_id"] etc. for an app-minted identity.)
+           { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
          ],
        },
        // Add a shape.rowFilter for row-level read filtering (see the security note below).
@@ -117,8 +119,9 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
      `defineSyncRegistry` throws unless every `readwrite` table declares **both**: a **Server version** (a
      `nowMicroseconds`-on-`update` managed field, conventionally `updated_at_us`) that optimistic convergence keys on,
      and a **`conflictPolicy`** (`reject-if-stale` | `last-write-wins`) — there is no silent default, because a silent
-     last-write-wins is exactly the data loss the choice exists to surface. Fields stamped by `authUid` /
-     `nowMicroseconds` are server-assigned; the server rejects them if present in a client write payload.
+     last-write-wins is exactly the data loss the choice exists to surface. Fields stamped by `authClaim` (a verified
+     claim at a JSON path — `["sub"]` is the old `auth.uid()` owner) / `nowMicroseconds` are server-assigned; the server
+     rejects them if present in a client write payload.
    </Aside>
 
 2. **Provision the apply function.** The write path applies batches through one in-database PL/pgSQL

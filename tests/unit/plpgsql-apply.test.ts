@@ -26,7 +26,7 @@ const projectedPlpgsqlRegistry = defineSyncRegistry({
     },
     governance: {
       managedFields: [
-        { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+        { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
         { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
         { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
       ],
@@ -39,10 +39,14 @@ describe("plpgsql batch function generator", () => {
     const ddl = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry);
 
     expect(ddl).toContain('"owner_id", "modified_by", "created_at_us", "updated_at_us"');
+    // ADR-0026: owner_id/modified_by are stamped from the verified `sub` claim (the single authClaim
+    // strategy — `auth.uid()` is just `claimPath: ["sub"]`), cast to the uuid column type. The value
+    // expression is embedded as a PL/pgSQL string literal, so its single quotes are doubled.
+    expect(ddl).not.toContain("auth.uid()");
+    expect(ddl).toContain("#>> ''{sub}''");
     expect(ddl).toContain(
-      "auth.uid(), auth.uid(), CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)",
+      `"modified_by" = (NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid`,
     );
-    expect(ddl).toContain('"modified_by" = auth.uid()');
     // ADR-0010: the Server version's on-update stamp is floored at the prior value + 1 (strictly
     // monotonic), not a bare clock read — so an inverted wall clock can never lower it.
     expect(ddl).toContain(
@@ -52,6 +56,46 @@ describe("plpgsql batch function generator", () => {
     expect(ddl).not.toContain("($1->>'modified_by')::uuid");
     expect(ddl).not.toContain("($1->>'created_at_us')::bigint");
     expect(ddl).not.toContain("($1->>'updated_at_us')::bigint");
+  });
+
+  it("stamps an authClaim field from a nested claim path, defaulting the cast to the column type (ADR-0026)", () => {
+    const nestedClaimRegistry = defineSyncRegistry({
+      claimItems: defineSyncTable({
+        tableName: "claim_items",
+        makeColumns: () => ({
+          id: uuid("id").primaryKey(),
+          // A uuid column with no explicit cast: the stamp must default to the column's own SQL type.
+          createdByPersonId: uuid("created_by_person_id"),
+          title: varchar("title", { length: 120 }).notNull(),
+          updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+        }),
+        mode: "readwrite",
+        conflictPolicy: "last-write-wins",
+        governance: {
+          managedFields: [
+            // The emergent case: an app-minted identity at a nested path, no `auth.uid()` involved.
+            {
+              column: "createdByPersonId",
+              applyOn: ["create"],
+              strategy: "authClaim",
+              claimPath: ["app_metadata", "person_id"],
+            },
+            { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+          ],
+        },
+      }),
+    });
+
+    const ddl = buildPlpgsqlBatchFunctionDdl(nestedClaimRegistry);
+
+    // The nested path becomes a `jsonb #>>` text-array path; the cast defaults to the uuid column type.
+    // (Single quotes are doubled because the expression is embedded as a PL/pgSQL string literal.)
+    expect(ddl).toContain(
+      `(NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{app_metadata,person_id}'')::uuid`,
+    );
+    // Server-stamped, never read from the client payload.
+    expect(ddl).not.toContain("($1->>'created_by_person_id')::uuid");
+    expect(ddl).not.toContain("auth.uid()");
   });
 
   it("does not build DML branches from client-omitted columns", () => {

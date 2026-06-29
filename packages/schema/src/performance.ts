@@ -114,8 +114,8 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
       conflictPolicy: "last-write-wins",
       governance: {
         managedFields: [
-          { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
-          { column: "modifiedBy", applyOn: ["create", "update"], strategy: "authUid" },
+          { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
+          { column: "modifiedBy", applyOn: ["create", "update"], strategy: "authClaim", claimPath: ["sub"] },
           { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
           { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
         ],

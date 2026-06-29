@@ -135,7 +135,7 @@ const messageSyncEntry = defineSyncTable({
   retention: "ephemeral",
   governance: {
     managedFields: [
-      { column: "authorId", applyOn: ["create"], strategy: "authUid" },
+      { column: "authorId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
       { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
       { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
     ],
@@ -166,7 +166,7 @@ const issueSyncEntry = defineSyncTable({
   consistencyGroup: TEAM_SCOPE,
   governance: {
     managedFields: [
-      { column: "createdBy", applyOn: ["create"], strategy: "authUid" },
+      { column: "createdBy", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
       { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
       { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
     ],

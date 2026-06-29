@@ -52,8 +52,9 @@ invent REST endpoints per table; do not write to Postgres tables directly from t
    conventionally `updated_at_us`, that optimistic convergence keys on) **and** a `conflictPolicy`
    (`reject-if-stale` | `last-write-wins`). There is no silent default — a silent last-write-wins is the
    exact data loss the choice exists to surface.
-3. **Managed fields are server-assigned.** Fields stamped by `authUid` / `nowMicroseconds` are set by the
-   apply function; the write API **rejects** a client payload that includes them. Never send them.
+3. **Managed fields are server-assigned.** Fields stamped by `authClaim` (a verified claim at a JSON path —
+   `["sub"]` is the old `auth.uid()` owner idiom) / `nowMicroseconds` are set by the apply function; the
+   write API **rejects** a client payload that includes them. Never send them.
 4. **Enum columns in a shape `where` must be cast to `text`** — `"role"::text = 'manager'`, not
    `"role" = 'manager'`. The column stays an enum everywhere else. This is because **Electric**, not
    Postgres, evaluates the shape filter.

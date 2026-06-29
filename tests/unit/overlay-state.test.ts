@@ -99,9 +99,9 @@ const customServerVersionRegistry = defineSyncRegistry({
   }),
 });
 
-// A writable table with an `authUid` create-managed field that is NOT NULL (owner/author/created_by —
-// the board's `message.author_id`). The field is stripped from the create input (the server stamps
-// `auth.uid()`), so the optimistic overlay must fill it from the decoded auth subject or the overlay
+// A writable table with an `authClaim` create-managed field that is NOT NULL (owner/author/created_by —
+// the board's `message.author_id`). The field is stripped from the create input (the server stamps it
+// from the `sub` claim), so the optimistic overlay must fill it from the decoded claim or the overlay
 // INSERT violates NOT NULL. Regression: board Phase 7 finding (first `create` in the demo).
 const authOwnedRegistry = defineSyncRegistry({
   authOwnedItems: defineSyncTable({
@@ -117,7 +117,7 @@ const authOwnedRegistry = defineSyncRegistry({
     conflictPolicy: "last-write-wins",
     governance: {
       managedFields: [
-        { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+        { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
         { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
         { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
       ],
@@ -296,7 +296,7 @@ describe("overlay state helpers", () => {
     await db.close();
   });
 
-  it("stamps an authUid create-managed field into the optimistic overlay from the decoded subject — board Phase 7", async () => {
+  it("stamps an authClaim create-managed field into the optimistic overlay from the decoded claim — board Phase 7", async () => {
     const db = await createFreshTestPGlite();
     await db.exec(generateLocalSchemaSql(authOwnedRegistry));
     const subject = "01963227-d4c7-72db-b858-f89f6af8fc10";
@@ -307,9 +307,9 @@ describe("overlay state helpers", () => {
       getAuthToken: async () => fakeJwtWithSub(subject),
     });
 
-    // `ownerId` is an authUid create-managed field, so it is stripped from the create input. Before the
-    // fix the overlay INSERT passed an explicit NULL → NOT NULL violation; now it is filled from the
-    // decoded `sub` so the local row is attributed immediately.
+    // `ownerId` is an authClaim create-managed field (claimPath ["sub"]), so it is stripped from the
+    // create input. Before the fix the overlay INSERT passed an explicit NULL → NOT NULL violation; now
+    // it is filled from the decoded `sub` claim so the local row is attributed immediately.
     await runtime.create("authOwnedItems", {
       id: "01963227-d4c7-72db-b858-f89f6af8fc01",
       body: "optimistic message",
@@ -321,8 +321,8 @@ describe("overlay state helpers", () => {
     );
     expect(rows.rows[0]).toEqual({ ownerId: subject, overlayKind: "pending_create" });
 
-    // The server stamps `auth.uid()` authoritatively, so the flushed payload must NOT carry the
-    // authUid field — the server rejects a payload that includes a server-managed field.
+    // The server stamps the claim authoritatively, so the flushed payload must NOT carry the
+    // authClaim field — the server rejects a payload that includes a server-managed field.
     const journal = await db.query<{ payloadJson: string }>(
       `SELECT payload_json AS "payloadJson" FROM auth_owned_items_mutations WHERE id = $1`,
       ["01963227-d4c7-72db-b858-f89f6af8fc01"],

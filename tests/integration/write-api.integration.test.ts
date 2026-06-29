@@ -865,8 +865,10 @@ describe("write api RLS auth context", () => {
     }
   });
 
-  it("applies claims context so auth.uid defaults can be used", async () => {
+  it("applies claims context so an authClaim default (owner_id from the sub claim) is stamped", async () => {
     const id = "91e2a1e4-940f-4d4a-b61b-f0b89e0f24ce";
+    // owner_id is an authClaim managed field at claimPath ["sub"], so the applier stamps it from the
+    // verified request claims — the same value `auth.uid()` would have read, now via one general path.
     const expectedOwnerId = "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d";
 
     const response = await server.request("/api/mutations", {
@@ -931,12 +933,10 @@ describe("write api missing governance prerequisites", () => {
     await serverDb.close();
   });
 
-  it("fails with 500 when auth.uid() is unavailable", async () => {
-    // auth.uid() is native to Supabase — this test verifies the error path
-    // by provisioning a server without governance preconditions.
-    // With Supabase-managed databases auth.uid() is always present,
-    // so this test checks the startup check catches missing auth.uid().
-    // (auth.uid() is provided by Supabase's auth schema.)
+  it("stamps an authClaim owner from the sub claim and acks under Supabase-native RLS helpers", async () => {
+    // `authors.owner_id` is an authClaim managed field (claimPath ["sub"]) — the applier stamps it from
+    // the verified claims (no `auth.uid()` in the write path anymore). The table's RLS still uses
+    // `auth.uid()`, which is native to Supabase, so the claim-stamped create applies and acks.
     const response = await postBatchMutations(
       server,
       [

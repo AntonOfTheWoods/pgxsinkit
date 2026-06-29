@@ -185,12 +185,37 @@ export interface DeferrableConstraintSpec {
 }
 
 export type ManagedFieldApplyOn = "create" | "update";
-export type ManagedFieldStrategy = "authUid" | "nowMicroseconds";
+
+/**
+ * How the applier stamps a server-managed column (it overrides any client-sent value — the client write
+ * payload omits managed fields, and the apply function re-derives them under the verified request claims):
+ *
+ * - `nowMicroseconds` — `clock_timestamp()` microseconds. The audit/version columns (`created_at_us`,
+ *   `updated_at_us`); the `updated_at_us`-on-update field is the strictly-monotonic Server version (ADR-0010).
+ * - `authClaim` — a value read from the **verified JWT claims** at a JSON {@link ManagedFieldSpec.claimPath}
+ *   (e.g. `["sub"]` for the auth subject, or `["app_metadata","person_id"]` for an app-minted identity). This
+ *   is the single claim-stamping strategy: the old `authUid` is exactly `{ claimPath: ["sub"], cast: "uuid" }`,
+ *   so there is one mechanism, not a `sub`-only special case beside a general one.
+ */
+export type ManagedFieldStrategy = "nowMicroseconds" | "authClaim";
 
 export interface ManagedFieldSpec {
   column: string;
   applyOn: ManagedFieldApplyOn[];
   strategy: ManagedFieldStrategy;
+  /**
+   * For `strategy: "authClaim"` only (required there, forbidden otherwise): the JSON path into the verified
+   * request claims to stamp from — `["sub"]`, `["app_metadata", "person_id"]`, etc. Each segment must be a
+   * plain identifier (`[A-Za-z_][A-Za-z0-9_]*`); it is emitted into the apply-function DDL as a `jsonb #>>`
+   * text-array path, so it is never a value-injection surface.
+   */
+  claimPath?: string[];
+  /**
+   * Optional SQL cast for an `authClaim` value (`jsonb #>>` yields text). Defaults to the **target column's
+   * own SQL type** (so a `uuid` column casts to `uuid` with no declaration needed). Override only to force a
+   * different cast; must be a plain SQL type name.
+   */
+  cast?: string;
 }
 
 export interface TableGovernanceSpec {
