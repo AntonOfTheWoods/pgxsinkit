@@ -82,6 +82,21 @@ describe("write api implementation integration", () => {
     }
   });
 
+  it("allows the apikey header in the preflight (a deployment gateway sends it alongside Authorization)", async () => {
+    // Regression: a Supabase-style client sends `apikey` on every request; a preflight that does not
+    // allow it blocks the write path entirely (browser "Request header field apikey is not allowed").
+    const response = await server.request("/api/todos", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost:5173",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,apikey",
+      },
+    });
+
+    expect(response.headers.get("Access-Control-Allow-Headers")?.toLowerCase()).toContain("apikey");
+  });
+
   it("returns an empty todo list via direct DB query", async () => {
     const rows = await server.drizzle.select().from(todosTable);
     expect(rows).toEqual([]);

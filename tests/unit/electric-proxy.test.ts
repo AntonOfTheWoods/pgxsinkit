@@ -533,3 +533,68 @@ function buildExpectedShapeUrl(table: string, existingSearch: string, where: str
   params.forEach((param, index) => url.searchParams.set(`params[${index + 1}]`, param));
   return url.toString();
 }
+
+describe("electric proxy — CORS (gateway-less browser deployment)", () => {
+  const ORIGINS = ["https://pgxsinkit.github.io", "http://localhost:5173"];
+  const originalFetch = globalThis.fetch;
+  const fetchSpy = mock();
+  afterEach(() => {
+    fetchSpy.mockReset();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("answers an OPTIONS preflight from an allowed origin without forwarding to Electric", async () => {
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const request = new Request("http://fn/v1/shape?table=authors&offset=-1", {
+      method: "OPTIONS",
+      headers: { origin: "https://pgxsinkit.github.io", "access-control-request-headers": "authorization,apikey" },
+    });
+
+    const response = await proxyElectricShapeRequest(request, null, {
+      registry: demoSyncRegistry,
+      electricUrl: "http://localhost:3000/v1/shape",
+      cors: { origins: ORIGINS },
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://pgxsinkit.github.io");
+    expect(response.headers.get("access-control-allow-headers")).toBe("authorization,apikey");
+    expect(fetchSpy).not.toHaveBeenCalled(); // a preflight must never reach Electric
+  });
+
+  it("exposes the Electric headers + allowed origin on a real shape response", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response("[]", { status: 200, headers: { "content-type": "application/json", "electric-offset": "0_0" } }),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const request = new Request("http://fn/v1/shape?table=authors&offset=-1", {
+      headers: { origin: "https://pgxsinkit.github.io", authorization: "Bearer t" },
+    });
+
+    const response = await proxyElectricShapeRequest(
+      request,
+      { sub: DEMO_USER1_ID },
+      { registry: demoSyncRegistry, electricUrl: "http://localhost:3000/v1/shape", cors: { origins: ORIGINS } },
+    );
+
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://pgxsinkit.github.io");
+    expect(response.headers.get("access-control-expose-headers")).toContain("electric-handle");
+    expect(response.headers.get("access-control-expose-headers")).toContain("electric-offset");
+  });
+
+  it("gives a disallowed origin no CORS headers (fails closed)", async () => {
+    fetchSpy.mockResolvedValue(new Response("[]", { status: 200, headers: { "content-type": "application/json" } }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const request = new Request("http://fn/v1/shape?table=authors&offset=-1", {
+      headers: { origin: "https://evil.example", authorization: "Bearer t" },
+    });
+
+    const response = await proxyElectricShapeRequest(
+      request,
+      { sub: DEMO_USER1_ID },
+      { registry: demoSyncRegistry, electricUrl: "http://localhost:3000/v1/shape", cors: { origins: ORIGINS } },
+    );
+
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+});

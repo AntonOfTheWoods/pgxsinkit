@@ -133,7 +133,9 @@ export function createSyncServer<
     {
       origins: options.allowedOrigins ?? defaultAllowedOrigins,
       allowMethods: ["GET", "POST", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Authorization"],
+      // `apikey`: a deployment gateway (Supabase) expects it on every request, so the browser client
+      // sends it; it must be allowed in the preflight even though the server itself ignores it.
+      allowHeaders: ["Content-Type", "Authorization", "apikey"],
     },
     corsScopes,
   );

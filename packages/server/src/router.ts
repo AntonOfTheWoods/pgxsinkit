@@ -85,7 +85,13 @@ export class FetchRouter {
     }
     if (this.#cors) {
       headers.set("Access-Control-Allow-Methods", this.#cors.allowMethods.join(","));
-      headers.set("Access-Control-Allow-Headers", this.#cors.allowHeaders.join(","));
+      // Echo what the browser asks to send (e.g. a deployment gateway's `apikey` alongside the
+      // toolkit's `Authorization`), falling back to the declared list — so a client header the app
+      // legitimately sets is never rejected just because it wasn't enumerated here.
+      headers.set(
+        "Access-Control-Allow-Headers",
+        request.headers.get("access-control-request-headers") ?? this.#cors.allowHeaders.join(","),
+      );
     }
     return new Response(null, { status: 204, headers });
   }

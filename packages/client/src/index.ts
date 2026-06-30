@@ -39,7 +39,7 @@ import {
 } from "./mutation";
 import { buildDesyncTableSql, buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
 import { createElectricExtension, startConfiguredSync } from "./shape-sync";
-import { buildAuthShapeHeaders } from "./sync-auth";
+import { buildShapeHeaders } from "./sync-auth";
 
 export { generateLocalSchemaSql };
 export {
@@ -69,6 +69,13 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   electricUrl: string;
   writeUrl: string;
   getAuthToken?: () => Promise<string | undefined>;
+  /**
+   * Static headers added to **every** read-shape and write request, alongside the per-request
+   * `Authorization` (which always wins). The toolkit is agnostic about deployment-gateway
+   * credentials, so this is the seam for them — e.g. a Supabase Cloud `apikey` header the platform
+   * function gateway expects. Sent even when no `getAuthToken` is supplied.
+   */
+  requestHeaders?: Record<string, string>;
   syncEnabled?: boolean;
   dataDir?: string;
   resetSubscriptionKeys?: string[];
@@ -341,6 +348,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     registry: options.registry,
     writeUrl: options.writeUrl,
     ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
+    ...(options.requestHeaders ? { requestHeaders: options.requestHeaders } : {}),
     ...(options.maxMutationAttempts != null ? { maxMutationAttempts: options.maxMutationAttempts } : {}),
     ...(options.onQuarantine ? { onQuarantine: options.onQuarantine } : {}),
     ...(options.onConflict ? { onConflict: options.onConflict } : {}),
@@ -406,7 +414,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       },
       // The read path resolves the token per request (ADR-0013), not frozen at boot — so a
       // long-lived session never wedges on JWT expiry. Read and write share one token lifecycle.
-      ...(options.getAuthToken ? { shapeHeaders: buildAuthShapeHeaders(options.getAuthToken) } : {}),
+      ...(options.getAuthToken || options.requestHeaders
+        ? {
+            shapeHeaders: buildShapeHeaders({
+              ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
+              ...(options.requestHeaders ? { requestHeaders: options.requestHeaders } : {}),
+            }),
+          }
+        : {}),
       ...(options.onTableInitialSync ? { onTableInitialSync: options.onTableInitialSync } : {}),
       onInitialSync: () => {
         initialSyncCompleted = true;

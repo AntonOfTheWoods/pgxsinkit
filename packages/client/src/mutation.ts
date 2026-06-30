@@ -130,6 +130,8 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
   registry: TRegistry;
   writeUrl: string;
   getAuthToken?: () => Promise<string | undefined>;
+  /** Static headers added to every write request (e.g. a Supabase Cloud `apikey`); see {@link CreateSyncClientOptions.requestHeaders}. */
+  requestHeaders?: Record<string, string>;
   /**
    * Registry fingerprint (ADR-0004) stamped onto each enqueued mutation as its
    * `registry_version`, so a version-boundary crossing is known before sending (ADR-0006).
@@ -677,6 +679,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         flushBatchSize,
         table,
         resolveAuthToken,
+        options.requestHeaders,
       );
 
       processedCount = batchResult.processedCount;
@@ -869,14 +872,14 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         const authToken = await options.getAuthToken?.();
         let response = await fetch(url, {
           method: "POST",
-          headers: buildRequestHeaders(authToken),
+          headers: buildRequestHeaders(authToken, options.requestHeaders),
           body: jsonStringifyPayload({ writeUnit: unitId, mutations }),
         });
 
         if ([401, 403].includes(response.status) && options.getAuthToken) {
           response = await fetch(url, {
             method: "POST",
-            headers: buildRequestHeaders(await options.getAuthToken()),
+            headers: buildRequestHeaders(await options.getAuthToken(), options.requestHeaders),
             body: jsonStringifyPayload({ writeUnit: unitId, mutations }),
           });
         }
@@ -2093,6 +2096,7 @@ async function flushBatch(
   batchSize: number,
   tableFilter?: string,
   getAuthToken?: () => Promise<string | undefined>,
+  requestHeaders?: Record<string, string>,
 ): Promise<FlushBatchResult> {
   const contexts = filterContexts(tableContexts, tableFilter);
   const nowUs = nowMicroseconds();
@@ -2213,14 +2217,14 @@ async function flushBatch(
 
     let response = await fetch(batchMutationUrl, {
       method: "POST",
-      headers: buildRequestHeaders(authToken),
+      headers: buildRequestHeaders(authToken, requestHeaders),
       body: jsonStringifyPayload({ mutations }),
     });
 
     if ([401, 403].includes(response.status) && getAuthToken) {
       response = await fetch(batchMutationUrl, {
         method: "POST",
-        headers: buildRequestHeaders(await getAuthToken()),
+        headers: buildRequestHeaders(await getAuthToken(), requestHeaders),
         body: jsonStringifyPayload({ mutations }),
       });
     }
@@ -2713,16 +2717,12 @@ async function reconcileTable(db: MutationDb, context: TableContext) {
   }
 }
 
-function buildRequestHeaders(bearerToken?: string): Record<string, string> {
-  if (!bearerToken) {
-    return {
-      "Content-Type": "application/json",
-    };
-  }
-
+function buildRequestHeaders(bearerToken?: string, requestHeaders?: Record<string, string>): Record<string, string> {
+  // Static headers first so the toolkit-owned Content-Type/Authorization always win.
   return {
+    ...(requestHeaders ?? {}),
     "Content-Type": "application/json",
-    Authorization: `Bearer ${bearerToken}`,
+    ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
   };
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildAuthShapeHeaders, createShapeErrorHandler } from "../../packages/client/src/sync-auth";
+import { buildAuthShapeHeaders, buildShapeHeaders, createShapeErrorHandler } from "../../packages/client/src/sync-auth";
 
 /**
  * A stand-in for Electric's `FetchError` — the handler detects auth failures by the documented
@@ -41,6 +41,35 @@ describe("read-path identity — per-request token (ADR-0013 Phase 1)", () => {
     expect(await authorization()).toBe(""); // no token → unauthenticated, not "Bearer undefined"
     token = "refreshed";
     expect(await authorization()).toBe("Bearer refreshed"); // same function, fresh value
+  });
+});
+
+describe("read-path static request headers (deployment-gateway credentials)", () => {
+  it("merges static requestHeaders alongside the async Authorization", async () => {
+    const headers = buildShapeHeaders({
+      getAuthToken: async () => "tok",
+      requestHeaders: { apikey: "sb_publishable_demo" },
+    });
+    expect(headers["apikey"]).toBe("sb_publishable_demo");
+    const authorization = headers["Authorization"];
+    if (typeof authorization !== "function") throw new Error("expected an async header function");
+    expect(await authorization()).toBe("Bearer tok");
+  });
+
+  it("emits the static headers even with no token provider (credential-only consumer)", () => {
+    const headers = buildShapeHeaders({ requestHeaders: { apikey: "sb_publishable_demo" } });
+    expect(headers["apikey"]).toBe("sb_publishable_demo");
+    expect(headers["Authorization"]).toBeUndefined();
+  });
+
+  it("never lets a static header clobber the toolkit-owned Authorization", async () => {
+    const headers = buildShapeHeaders({
+      getAuthToken: async () => "tok",
+      requestHeaders: { Authorization: "Bearer attacker" },
+    });
+    const authorization = headers["Authorization"];
+    if (typeof authorization !== "function") throw new Error("Authorization must remain the toolkit async function");
+    expect(await authorization()).toBe("Bearer tok");
   });
 });
 

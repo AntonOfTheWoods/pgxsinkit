@@ -18,15 +18,37 @@ type ShapeStreamErrorHandler = NonNullable<ShapeStreamOptions["onError"]>;
  * request by both paths and **must be refresh-deduping** — return the cached valid token and refresh
  * single-flight, so an N-shape consistency group does not trigger N refreshes.
  */
-export function buildAuthShapeHeaders(getAuthToken: () => Promise<string | undefined>): ExternalHeadersRecord {
-  return {
+/**
+ * Build the read-path shape headers: the optional async `Authorization` (per ADR-0013) **plus** any
+ * caller-supplied static `requestHeaders`. The static headers are spread first so the toolkit-owned
+ * `Authorization` always wins; they exist for deployment-gateway credentials the toolkit is otherwise
+ * agnostic about — e.g. a Supabase `apikey` header the platform function gateway expects. Emitted
+ * whenever *either* a token provider or static headers are present, so a credential-only consumer
+ * (no per-request token) still sends its headers.
+ */
+export function buildShapeHeaders(input: {
+  getAuthToken?: () => Promise<string | undefined>;
+  requestHeaders?: Record<string, string>;
+}): ExternalHeadersRecord {
+  const headers: ExternalHeadersRecord = { ...(input.requestHeaders ?? {}) };
+  const getAuthToken = input.getAuthToken;
+  if (getAuthToken) {
     // Resolved per request: a fresh token each time, never one captured at boot. An absent token
     // yields an empty value (unauthenticated) rather than the literal string `Bearer undefined`.
-    Authorization: async () => {
+    headers["Authorization"] = async () => {
       const token = await getAuthToken();
       return token ? `Bearer ${token}` : "";
-    },
-  };
+    };
+  }
+  return headers;
+}
+
+/** Token-only convenience over {@link buildShapeHeaders}; retained for callers that pass a provider. */
+export function buildAuthShapeHeaders(
+  getAuthToken: () => Promise<string | undefined>,
+  requestHeaders?: Record<string, string>,
+): ExternalHeadersRecord {
+  return buildShapeHeaders({ getAuthToken, ...(requestHeaders ? { requestHeaders } : {}) });
 }
 
 /** HTTP statuses that mean "the credential is the problem" — re-auth, never give up (ADR-0013). */

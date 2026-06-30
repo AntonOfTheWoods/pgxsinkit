@@ -8,21 +8,51 @@ import {
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
+export interface ElectricProxyCors {
+  /** Exact browser origins allowed to read this shape (e.g. a hosted SPA + localhost dev). */
+  origins: string[];
+}
+
 export interface ElectricProxyOptions {
   registry: SyncTableRegistry;
   electricUrl: string;
   /** Extra params passed to customWhere functions (e.g. fromLang, toLang). */
   extraParams?: Record<string, unknown>;
+  /**
+   * CORS for a browser-facing deployment with **no CORS-adding gateway in front** — e.g. a Supabase
+   * Cloud edge function, which the platform routes to directly. When set, OPTIONS preflights are
+   * answered here and the response carries the allowed origin plus the Electric headers the client
+   * must read off each shape. Omit it where a gateway already handles CORS (the local stack's Envoy).
+   */
+  cors?: ElectricProxyCors;
 }
 
+// Electric response headers the browser client reads off each shape response (offset/handle drive
+// resumption, schema/cursor drive parsing, up-to-date ends the initial sync). They must be exposed via
+// CORS or the client cannot resume — the classic Electric "MissingHeadersError".
+const ELECTRIC_EXPOSED_HEADERS = "electric-offset,electric-handle,electric-schema,electric-cursor,electric-up-to-date";
+
 /**
- * Proxies an Electric shape request, applying registry-driven row filters
- * and stripping omitted columns from JSON shape-log payloads.
+ * Proxies an Electric shape request, applying registry-driven row filters and stripping omitted
+ * columns from JSON shape-log payloads. Optionally answers CORS preflights and adds CORS headers
+ * ({@link ElectricProxyOptions.cors}) for gateway-less browser deployments.
  *
  * The caller is responsible for resolving auth claims from the request.
  * Pass `claims` as `null` for unauthenticated requests (all rows blocked).
  */
 export async function proxyElectricShapeRequest(
+  request: Request,
+  claims: JwtClaims | null,
+  options: ElectricProxyOptions,
+): Promise<Response> {
+  if (options.cors && request.method === "OPTIONS") {
+    return corsPreflightResponse(request, options.cors);
+  }
+  const response = await forwardShapeRequest(request, claims, options);
+  return options.cors ? withCorsResponseHeaders(request, response, options.cors) : response;
+}
+
+async function forwardShapeRequest(
   request: Request,
   claims: JwtClaims | null,
   options: ElectricProxyOptions,
@@ -312,6 +342,44 @@ function isAbortError(error: unknown): boolean {
       (typeof (error as unknown as { code?: unknown }).code === "number" &&
         (error as unknown as { code: number }).code === 20))
   );
+}
+
+/** The request's `Origin` if it is on the allow-list, else `null` (so a disallowed origin gets no CORS). */
+function allowedCorsOrigin(request: Request, cors: ElectricProxyCors): string | null {
+  const origin = request.headers.get("origin");
+  return origin && cors.origins.includes(origin) ? origin : null;
+}
+
+/** Answer a browser preflight: allowed origin, GET-only, the requested headers, cached for an hour. */
+function corsPreflightResponse(request: Request, cors: ElectricProxyCors): Response {
+  const headers = new Headers();
+  const origin = allowedCorsOrigin(request, cors);
+  if (origin) {
+    headers.set("Access-Control-Allow-Origin", origin);
+    headers.append("Vary", "Origin");
+  }
+  headers.set("Access-Control-Allow-Methods", "GET,OPTIONS");
+  // Echo what the browser asks to send (authorization + apikey for a Supabase function), falling back
+  // to the standard set — so any client header is permitted without enumerating every one here.
+  headers.set(
+    "Access-Control-Allow-Headers",
+    request.headers.get("access-control-request-headers") ?? "authorization,apikey,content-type",
+  );
+  headers.set("Access-Control-Max-Age", "3600");
+  return new Response(null, { status: 204, headers });
+}
+
+/** Add the allowed origin + the exposed Electric headers to a real shape response (no-op off-list). */
+function withCorsResponseHeaders(request: Request, response: Response, cors: ElectricProxyCors): Response {
+  const origin = allowedCorsOrigin(request, cors);
+  if (!origin) {
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", origin);
+  headers.append("Vary", "Origin");
+  headers.set("Access-Control-Expose-Headers", ELECTRIC_EXPOSED_HEADERS);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 function omitColumnsFromRow(row: Record<string, unknown>, omittedColumns: readonly string[]): Record<string, unknown> {
