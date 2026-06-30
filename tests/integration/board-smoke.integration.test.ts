@@ -285,9 +285,10 @@ describe("board demo smoke (real edge stack: GoTrue → Kong → edge functions 
   // pgxsinkit ADR-0025 read filter + ADR-0021 lazy/ephemeral chat. The `message` shape carries a Member
   // read window: a Member syncs only their visible channels AND the recent `CHAT_WINDOW_DAYS` of chat,
   // while the Admin syncs every channel and the full history. The seed spreads chat across ~30 days, so
-  // older messages always fall outside the 21-day window and are visibly admin-only. (`message` is
-  // `lazy`/`ephemeral` on the client, but those are client-side subscription/retention hints — the proxy
-  // serves the shape on request all the same, which is what this reads.)
+  // older messages always fall outside the 21-day window and are visibly admin-only. (`message` is `lazy`
+  // for both roles and the retention is per-client — `persistent` for the Admin, projected `ephemeral`
+  // for the Member — but those are client-side subscription/retention hints; the proxy serves the shape on
+  // request all the same, which is what this reads.)
   describe("member chat read window (ADR-0025 read filter)", () => {
     it("windows a Member to their channels and the recent history, giving the Admin everything", async () => {
       const aliceMsgs = await fetchShapeRows("message", aliceToken);

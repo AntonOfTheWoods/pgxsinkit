@@ -5,6 +5,7 @@ import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { generateLocalSchemaSql } from "@pgxsinkit/client";
 import {
+  asEphemeral,
   asReadonly,
   assertReadContractPreserved,
   c,
@@ -12,6 +13,7 @@ import {
   defineSyncTable,
   fingerprintReadContract,
   fingerprintRegistry,
+  withRetention,
 } from "@pgxsinkit/contracts";
 
 // Per-client mode projection: the authoritative (server) registry defines a table once with its full
@@ -149,6 +151,11 @@ describe("read-contract fingerprint", () => {
     expect(fingerprintReadContract(lww)).toBe(fingerprintReadContract(reject));
   });
 
+  it("ignores a retention (lifecycle) difference", () => {
+    const persistent = writableRestriction();
+    expect(fingerprintReadContract(withRetention(persistent, "ephemeral"))).toBe(fingerprintReadContract(persistent));
+  });
+
   it("changes when a synced column changes", () => {
     const widened = defineSyncTable({
       tableName: "posting_restriction",
@@ -210,5 +217,88 @@ describe("assertReadContractPreserved (projection invariant)", () => {
   it("throws when a projected table is absent from the authoritative registry", () => {
     const orphan = defineSyncRegistry({ ghost: readonlyOffering() });
     expect(() => assertReadContractPreserved(authoritative, orphan)).toThrow(/ghost/);
+  });
+});
+
+// Lifecycle projection: a per-client registry may override the **retention** axis (ADR-0021) of an
+// authoritative entry — durable for one client, no-durable-trace (`TEMP`) for another — without touching
+// the read contract. `withRetention` is the bidirectional primitive; `asEphemeral` the named convenience.
+describe("withRetention / asEphemeral (lifecycle projection)", () => {
+  // A grouped pair sharing one consistency group, to exercise the group-uniformity constraint.
+  const groupedA = () =>
+    defineSyncTable({ tableName: "g_a", makeColumns: () => ({ id: uuid("id").primaryKey() }), consistencyGroup: "g" });
+  const groupedB = () =>
+    defineSyncTable({ tableName: "g_b", makeColumns: () => ({ id: uuid("id").primaryKey() }), consistencyGroup: "g" });
+
+  it("overrides retention while preserving everything else", () => {
+    const rw = writableRestriction();
+    const ephemeral = withRetention(rw, "ephemeral");
+
+    expect(rw.retention).toBeUndefined(); // default persistent
+    expect(ephemeral.retention).toBe("ephemeral");
+
+    // The write contract and read/identity contract carry through untouched.
+    expect(ephemeral.mode).toBe(rw.mode);
+    expect(ephemeral.conflictPolicy).toBe(rw.conflictPolicy);
+    expect(ephemeral.governance).toEqual(rw.governance);
+    expect(ephemeral.table).toBe(rw.table);
+    expect(ephemeral.localTable).toBe(rw.localTable);
+    expect(ephemeral.view).toBe(rw.view);
+    expect(ephemeral.primaryKey).toEqual(rw.primaryKey);
+    expect(ephemeral.shape).toEqual(rw.shape);
+  });
+
+  it("is bidirectional (ephemeral -> persistent)", () => {
+    const ephemeral = asEphemeral(readonlyOffering());
+    expect(ephemeral.retention).toBe("ephemeral");
+    expect(withRetention(ephemeral, "persistent").retention).toBe("persistent");
+  });
+
+  it("asEphemeral is the named convenience for withRetention(entry, 'ephemeral')", () => {
+    const rw = writableRestriction();
+    expect(asEphemeral(rw).retention).toBe(withRetention(rw, "ephemeral").retention);
+  });
+
+  it("preserves the read contract, so a retention projection passes assertReadContractPreserved", () => {
+    const authoritative = defineSyncRegistry({ offering: readonlyOffering() });
+    const client = defineSyncRegistry({ offering: asEphemeral(readonlyOffering()) });
+    expect(fingerprintReadContract(client.offering)).toBe(fingerprintReadContract(authoritative.offering));
+    expect(() => assertReadContractPreserved(authoritative, client)).not.toThrow();
+  });
+
+  it("DOES shift the full registry fingerprint (the local store's DDL genuinely changes)", () => {
+    expect(fingerprintRegistry(defineSyncRegistry({ offering: readonlyOffering() }))).not.toBe(
+      fingerprintRegistry(defineSyncRegistry({ offering: asEphemeral(readonlyOffering()) })),
+    );
+  });
+
+  it("emits a TEMP cluster for the ephemeral projection (client schema gen)", () => {
+    const persistentSql = generateLocalSchemaSql(defineSyncRegistry({ offering: readonlyOffering() }));
+    const ephemeralSql = generateLocalSchemaSql(defineSyncRegistry({ offering: asEphemeral(readonlyOffering()) }));
+
+    expect(persistentSql).toContain("offering");
+    expect(persistentSql).not.toContain("TEMP");
+
+    expect(ephemeralSql).toContain("offering");
+    expect(ephemeralSql).toContain("TEMP");
+  });
+
+  it("composes with asReadonly (readonly + ephemeral)", () => {
+    const projected = asEphemeral(asReadonly(writableRestriction()));
+    expect(projected.mode).toBe("readonly");
+    expect(projected.retention).toBe("ephemeral");
+
+    const sqlText = generateLocalSchemaSql(defineSyncRegistry({ posting_restriction: projected }));
+    // readonly: no overlay/journal write cluster; ephemeral: the synced base table is TEMP.
+    expect(sqlText).not.toContain("posting_restriction_overlay");
+    expect(sqlText).not.toContain("posting_restriction_mutations");
+    expect(sqlText).toContain("TEMP");
+  });
+
+  it("rejects a consistency group with mixed retention (override the whole group, not one member)", () => {
+    expect(() => defineSyncRegistry({ g_a: asEphemeral(groupedA()), g_b: groupedB() })).toThrow(/lifecycle/);
+
+    // Flipping every member of the group is accepted.
+    expect(() => defineSyncRegistry({ g_a: asEphemeral(groupedA()), g_b: asEphemeral(groupedB()) })).not.toThrow();
   });
 });

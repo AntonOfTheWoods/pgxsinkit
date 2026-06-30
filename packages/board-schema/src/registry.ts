@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import {
+  asEphemeral,
   asReadonly,
   assertReadContractPreserved,
   c,
@@ -73,8 +74,10 @@ function issueReadFilter(claims: JwtClaims) {
 // admin-only (sign in as a member: the channel shows recent chat; as the admin: the full backlog). The
 // cutoff is **day-quantized** — midnight (UTC), `CHAT_WINDOW_DAYS` back, in microseconds — so the Electric
 // shape `where`/param is stable within a day (clients share one shape cache; the window slides once daily)
-// instead of minting a new shape on every subscribe. Evaluated in the proxy per request. `message` is
-// `ephemeral`, so no cross-session stale-shape cache needs a `rowFilter.revision` bump when this changes.
+// instead of minting a new shape on every subscribe. Evaluated in the proxy per request. The windowed
+// branch is Member-only, and the Member projects `message` to `ephemeral` (its shape cache dies with the
+// session), so the daily-sliding cutoff needs no `rowFilter.revision` bump; the Admin branch is static
+// full-history (`null`), so its `persistent` cache never goes stale from this either.
 const MS_PER_DAY = 86_400_000;
 const CHAT_WINDOW_DAYS = 21;
 function memberChatWindowCutoffMicros(): bigint {
@@ -135,10 +138,15 @@ export const boardSyncRegistry = defineSyncRegistry({
  * - **Member** only reads both — `asReadonly` strips the local write machinery (no overlay/journal, no
  *   `client.tables.team{,_member}` write handle, no `_read_model` view) while preserving the read
  *   contract, so a member can never optimistically apply a write that RLS would only quarantine.
+ * - **Chat retention** also differs by role (ADR-0021 lifecycle projection): the authoritative `message`
+ *   is `persistent` — the Admin's durable, promote-on-first-use `lazy` full history — and the Member
+ *   projects it through `asEphemeral`, so a Member's chat lives in a `TEMP` cluster and leaves no durable
+ *   trace. Retention is a lifecycle axis the read-contract invariant ignores, so this projection still
+ *   passes `assertReadContractPreserved`.
  *
  * The read filters above already branch on `isAdmin`, so the one authoritative registry serves both
- * roles' shapes; only the client's *write capability* differs, which is exactly what the projection
- * expresses.
+ * roles' shapes; the client's *write capability* (team/team_member) and *retention* (message) differ,
+ * which is exactly what a per-client projection expresses.
  */
 export const boardAdminRegistry = boardSyncRegistry;
 
@@ -146,8 +154,10 @@ export const boardMemberRegistry = defineSyncRegistry({
   ...boardSyncRegistry,
   team: asReadonly(boardSyncRegistry.team),
   team_member: asReadonly(boardSyncRegistry.team_member),
+  message: asEphemeral(boardSyncRegistry.message),
 });
 
 // Fail closed if a projection ever diverges the data it syncs (columns / pk / row-filter shape) — a
-// member and an admin must see the same rows through the same tables, differing only in write rights.
+// member and an admin must see the same rows through the same tables, differing only in write rights and
+// lifecycle (here, chat retention).
 assertReadContractPreserved(boardSyncRegistry, boardMemberRegistry, { label: "board member" });

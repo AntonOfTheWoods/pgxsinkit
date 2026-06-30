@@ -28,9 +28,11 @@ describe("board sync registry", () => {
     expect(boardSyncRegistry.team.conflictPolicy).toBe("reject-if-stale");
   });
 
-  it("makes chat lazy + ephemeral, leaving the other tables eager + persistent (ADR-0021)", () => {
+  it("makes chat lazy, persistent on the authoritative entry, leaving the other tables eager + persistent (ADR-0021)", () => {
+    // The authoritative/Admin chat is `lazy + persistent` (default retention); the Member projects it to
+    // `ephemeral` (asserted in the per-client describe below).
     expect(boardSyncRegistry.message.subscription).toBe("lazy");
-    expect(boardSyncRegistry.message.retention).toBe("ephemeral");
+    expect(boardSyncRegistry.message.retention).toBeUndefined(); // default persistent
     for (const key of ["profile", "team", "team_member", "channel", "issue"] as const) {
       expect(boardSyncRegistry[key].subscription).toBeUndefined();
       expect(boardSyncRegistry[key].retention).toBeUndefined();
@@ -89,9 +91,19 @@ describe("board sync registry", () => {
     });
 
     it("preserves the read contract across the projection (the invariant the import asserts)", () => {
-      for (const key of ["team", "team_member"] as const) {
+      for (const key of ["team", "team_member", "message"] as const) {
         expect(fingerprintReadContract(boardMemberRegistry[key])).toBe(fingerprintReadContract(boardSyncRegistry[key]));
       }
+    });
+
+    it("projects chat retention per role: persistent Admin, ephemeral Member (ADR-0021 lifecycle)", () => {
+      // The authoritative/Admin entry is persistent (default); the Member projects it ephemeral. Both stay
+      // lazy + readwrite, so only the local durability differs — a lifecycle axis the read-contract
+      // invariant ignores (asserted above).
+      expect(boardAdminRegistry.message.retention).toBeUndefined(); // persistent (default)
+      expect(boardMemberRegistry.message.retention).toBe("ephemeral");
+      expect(boardMemberRegistry.message.subscription).toBe("lazy");
+      expect(boardMemberRegistry.message.mode).toBe("readwrite");
     });
   });
 

@@ -18,4 +18,8 @@ they cover everything a fresh reader (human or AI) tends to get wrong.
 6. [Local schema & DDL parity](/concepts/local-schema-ddl-parity/) — what local PGlite does and
    does not replicate.
 
+Once you have the model, the [Registry entry options](/concepts/registry-entry-options/) page is the
+field-by-field reference for configuring a sync table — every option, with a short example, what it
+achieves, and when to use it.
+
 The canonical vocabulary for all of these lives in the repository's `CONTEXT.md`.

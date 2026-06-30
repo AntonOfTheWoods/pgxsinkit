@@ -106,14 +106,22 @@ const channelSyncEntry = defineSyncTable({
 });
 
 // message — readwrite, last-write-wins (append-mostly; each insert has its own PK so inserts never
-// collide). Chat is the ADR-0021 lifecycle showcase: `lazy` — its shape is held out of the boot set and
-// subscribes on first reference (opening a Channel), so the board's other shapes own the HTTP/2
-// connection budget at startup; `ephemeral` — its whole local cluster (read cache, overlay, journal,
-// views) is emitted as `TEMP`, so chat leaves no durable trace and is re-fetched fresh each session.
-// `message` is its own singleton consistency group (no `consistencyGroup`), so these axes apply to it
-// alone. Trade-off (ADR-0021/0022): ephemeral has no durable offline write queue — a message posted
-// while online flushes immediately; one staged offline does not survive a session end. Acceptable for
-// chat, and the durable offline-write story is already shown by issues.
+// collide). Chat is the ADR-0021 × ADR-0025 lifecycle showcase, split across two axes:
+//   - `lazy` (both roles) — its shape is held out of the boot set and subscribes on first reference
+//     (opening a Channel), so the board's other shapes own the HTTP/2 connection budget at startup.
+//   - retention is **per-client** (registry.ts). The authoritative/Admin entry is `persistent` (the
+//     default), so for the Admin chat is `lazy + persistent` — a deferred-activation durable table that,
+//     on first channel-open, *permanently promotes* itself to the eager set (a persisted activation
+//     flag) and resumes full history like any durable shape on later boots. The Member registry projects
+//     this entry through `asEphemeral`, so for a Member chat is `lazy + ephemeral` — its whole local
+//     cluster (read cache, overlay, journal, views) is emitted as `TEMP`, leaving no durable trace and
+//     re-hydrating fresh each session. Same rows (modulo the Member read-window), different durability —
+//     exactly what a per-client projection may legitimately differ on.
+// `message` is its own singleton consistency group (no `consistencyGroup`), so these lifecycle axes apply
+// to it alone (no whole-group flip needed for the projection). Trade-off (ADR-0021/0022): the ephemeral
+// Member has no durable offline write queue — a message posted while online flushes immediately; one
+// staged offline does not survive a session end (acceptable for chat; the durable offline-write story is
+// shown by issues). The persistent Admin keeps a durable queue.
 const messageSyncEntry = defineSyncTable({
   tableName: "message",
   makeColumns: () => ({
@@ -131,8 +139,9 @@ const messageSyncEntry = defineSyncTable({
   extras: (t) => buildMessagePolicies(authenticatedRole, t.channelId, t.authorId, channelSyncEntry.table),
   mode: "readwrite",
   conflictPolicy: "last-write-wins",
+  // `lazy` for both roles; the authoritative entry is `persistent` (Admin), projected `ephemeral` for the
+  // Member in registry.ts. See the block comment above.
   subscription: "lazy",
-  retention: "ephemeral",
   governance: {
     managedFields: [
       { column: "authorId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },

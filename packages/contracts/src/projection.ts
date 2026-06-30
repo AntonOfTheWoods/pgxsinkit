@@ -1,5 +1,6 @@
 import type { AnyPgTable } from "drizzle-orm/pg-core";
 
+import type { Retention } from "./config";
 import { fingerprintReadContract } from "./fingerprint";
 import type { ClientProjectionSpecForTable, SyncTableEntry, SyncTableRegistry } from "./registry";
 
@@ -51,6 +52,49 @@ export function asReadonly<TTable extends AnyPgTable, TLocalTable extends AnyPgT
     ...(entry.subscription != null ? { subscription: entry.subscription } : {}),
     ...(entry.retention != null ? { retention: entry.retention } : {}),
   };
+}
+
+/**
+ * Project an entry onto a different **retention** (ADR-0021) — the per-table local-persistence axis:
+ * `persistent` (the durable PGlite/OPFS backend) | `ephemeral` (the table's whole local cluster — read
+ * cache, overlay, journal, sequence, views, reconcile function — emitted as `TEMP`/`pg_temp`, leaving no
+ * durable trace). Returns a copy of `entry` with `retention` overridden and **everything else preserved
+ * verbatim** (table, columns, mode, write contract, shape/row filter, the other lifecycle axes).
+ *
+ * Retention is a **lifecycle** axis, not a read-contract one, so a per-client registry may legitimately
+ * differ on it: {@link fingerprintReadContract} excludes retention, so a `withRetention(...)` of an
+ * authoritative entry still satisfies {@link assertReadContractPreserved}. This is how one authoritative
+ * registry yields a table that is durable for one client and ephemeral for another, e.g.
+ * `withRetention(asReadonly(authoritative.exam), "ephemeral")`.
+ *
+ * Unlike `mode` (whose overlay/journal/view fields {@link asReadonly} must re-resolve), retention has **no
+ * entry-derived fields** — the durable-vs-`TEMP` decision is taken by the client's schema generator at
+ * runtime from this scalar — so overriding it needs no re-resolution and a plain copy is correct. The
+ * return type is the input entry's exact type (write handles, create/update typing, governance marker all
+ * carry through); the cast restates what a generic object spread cannot prove.
+ *
+ * Two constraints carry over (enforced elsewhere, not by this helper):
+ * - **Consistency-group uniformity** (ADR-0021 §4): every table sharing a `consistencyGroup` must agree on
+ *   retention — override the whole group, not one member, or `defineSyncRegistry` rejects the mixed group.
+ *   A singleton-group table can be flipped alone.
+ * - **No durable offline write queue for `ephemeral`** (ADR-0021 composition rule): an ephemeral writable
+ *   table's journal is `TEMP`, so a write staged offline does not survive session end — pair a must-not-lose
+ *   write with a `pessimistic` write-mode (ADR-0022) or a prompt flush.
+ */
+export function withRetention<TEntry extends SyncTableEntry>(entry: TEntry, retention: Retention): TEntry {
+  return { ...entry, retention } as TEntry;
+}
+
+/**
+ * The named `ephemeral` lifecycle projection — `withRetention(entry, "ephemeral")` — the lifecycle twin of
+ * {@link asReadonly}, for the common direction (a client wants no durable trace of a table the authoritative
+ * registry keeps `persistent`). Composes with `asReadonly`: `asEphemeral(asReadonly(authoritative.exam))`
+ * is a read-only, no-durable-trace projection. The reverse direction (an ephemeral authoritative table a
+ * client wants durable) is the bidirectional {@link withRetention} with `"persistent"`. See
+ * {@link withRetention} for the constraints that carry over (group uniformity; no durable offline queue).
+ */
+export function asEphemeral<TEntry extends SyncTableEntry>(entry: TEntry): TEntry {
+  return withRetention(entry, "ephemeral");
 }
 
 /**
