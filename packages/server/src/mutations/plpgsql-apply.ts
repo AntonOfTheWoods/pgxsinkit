@@ -303,6 +303,11 @@ function buildApplyFunctionBody(
   } = {},
 ): string {
   const tableBranches = Object.values(registry)
+    // A read projection (ADR-0027) owns no writable table — its `table` IS the owner's, so the owner's
+    // branch already handles that physical table. Emitting a branch for the projection too would
+    // DUPLICATE the owner's table branch (same table name). Read projections are readonly and never
+    // reach the write path, so exclude them from the apply function entirely.
+    .filter((entry) => !(entry as SyncTableEntry).readProjection)
     .map((entry) => buildTableBranch(entry as SyncTableEntry))
     .join("\n");
   const functionName = qualifyIdent(options.functionSchema, APPLY_FUNCTION_NAME);

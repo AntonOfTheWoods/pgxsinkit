@@ -530,8 +530,14 @@ export function defineSyncTable<
  * reads lives on the OWNER's table (a projection adds no DDL to a table it does not own); its
  * `customWhere` must be a subset of what that RLS allows.
  */
-export function defineReadProjection<const TOwnerTable extends AnyPgTable, const TAs extends string>(
-  owner: SyncTableEntry<TOwnerTable>,
+export function defineReadProjection<
+  const TOwnerTable extends AnyPgTable,
+  const TOwnerLocal extends AnyPgTable,
+  const TAs extends string,
+>(
+  // Two table params so an owner that uses `omitColumns` (its `table` and `localTable` types differ) is
+  // accepted — `TOwnerTable` (the physical table) is what `columns`/`rowFilter` are typed against.
+  owner: SyncTableEntry<TOwnerTable, TOwnerLocal>,
   opts: {
     /** The projection's distinct local identity — its PGlite table name AND its `shapeKey`. */
     as: TAs;
