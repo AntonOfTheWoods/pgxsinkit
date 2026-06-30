@@ -1,0 +1,51 @@
+name: Demo reset
+
+# Nightly truncate + refresh of the hosted board /demo's shared backend (board ADR-0009).
+#
+# The /demo is a PUBLIC, signed-in-as-a-fixture, writable board — anyone can create/move issues and
+# post chat. This job restores it to the known seeded fixtures every night so vandalism (offensive
+# issue titles, chat spam) never persists. It runs `seed:board`, which truncate-cascades every board
+# table and recreates the deterministic identities + fixtures against the cloud project — the exact
+# same script used for local seeding and `board:cloud:seed`, just pointed at the cloud via env.
+#
+# It talks ONLY to the managed services (GoTrue admin API + the project's direct Postgres connection);
+# no Postgres/Electric containers, no Pages deploy. Inputs:
+#   - var    DEMO_BOARD_SUPABASE_URL   the project URL (public; the GoTrue admin gateway)
+#   - secret DEMO_BOARD_SECRET_KEY     the project's sb_secret_… key (admin API auth)
+#   - secret DEMO_BOARD_DATABASE_URL   the DIRECT (5432) connection — truncate + insert as `postgres`
+#
+# The fixtures use the in-script shared password (`board-demo-password`) the login screen publishes —
+# a public demo's sign-in password is public by design, so there is nothing to inject here.
+#
+# Gated on the public variable so a fork (which has neither the variable nor the secrets) skips it
+# instead of failing every night. Disable open signups on the Supabase project so the only accounts
+# are the seeded fixtures (the reset truncates all board ROWS regardless of author, but only deletes
+# the FIXTURE auth identities) — see the hosted-demo guide.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch: # manual reset on demand
+
+concurrency:
+  group: demo-reset
+  cancel-in-progress: true
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    if: ${{ vars.DEMO_BOARD_SUPABASE_URL != '' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install
+      - name: Truncate + reseed the hosted demo
+        run: bun run seed:board
+        env:
+          BOARD_GATEWAY_URL: ${{ vars.DEMO_BOARD_SUPABASE_URL }}
+          BOARD_SECRET_KEY: ${{ secrets.DEMO_BOARD_SECRET_KEY }}
+          BOARD_DATABASE_URL: ${{ secrets.DEMO_BOARD_DATABASE_URL }}
