@@ -13,7 +13,7 @@ it honest against real infrastructure.
 
 `apps/board` is a Linear-style issue board with realtime chat — the **substantial** demo. It drives
 the full read and write paths against a trimmed, but
-version-matched, self-hosted **Supabase + Electric** stack: GoTrue auth, a Kong gateway, the two
+version-matched, self-hosted **Supabase + Electric** stack: GoTrue auth, an Envoy gateway, the two
 toolkit edge functions (`board-write` for the governed mutation ingress, `board-sync` for the
 registry-filtered Electric shape proxy), Postgres, and Electric. Its job is twofold:
 
@@ -41,7 +41,10 @@ no legacy HS256). See board
 and
 [ADR-0008 — Run the board on managed BaaS](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0008-board-on-managed-baas.md).
 The live cloud run is supported and documented, not CI-gated (it needs real Supabase + Electric Cloud
-credentials).
+credentials). A public, always-on instance is hosted at
+[pgxsinkit.github.io/demo](https://pgxsinkit.github.io/demo/) and reset nightly — board
+[ADR-0009](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0009-hosted-public-demo.md),
+[The hosted board /demo](/demo-and-harness/hosted-demo/).
 
 The **minimal** reference (the `apps/write-api` Bun server) runs against the toolkit harness stack
 instead — the smallest possible `@pgxsinkit/server` deployment:
@@ -60,7 +63,7 @@ verification lanes back it:
 - **Integration suites** (`tests/integration`) stand up an isolated, ephemeral PostgreSQL + Electric
   stack and assert the topology end-to-end: write validation, the in-database apply, membership
   fan-out, RLS auth context, and eventual convergence in local PGlite.
-- **Board demo smoke** drives the demo's full deployment topology — GoTrue → Kong → the bundled edge
+- **Board demo smoke** drives the demo's full deployment topology — GoTrue → Envoy → the bundled edge
   functions → Electric — proving the governed path the unit and integration suites stub out (auth, the
   proxy's claim-driven read filter, and the apply's RLS actor switch).
 - **Performance lab** (`apps/perf-lab`, `tests/performance`) measures the write/sync cycle under load.

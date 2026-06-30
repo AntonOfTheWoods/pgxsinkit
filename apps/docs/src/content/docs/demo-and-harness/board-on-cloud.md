@@ -12,6 +12,10 @@ The board demo (`apps/board`) runs against **managed BaaS — Supabase Cloud + E
 It is **not** a one-command push. It is: do a little one-time console setup, fill in a credentials file,
 then run one deploy command — after which `bun run dev:board` drives the cloud backend.
 
+For a public, always-on, browser-ready instance of this same setup — served at
+[pgxsinkit.github.io/demo](https://pgxsinkit.github.io/demo/) and reset nightly — see
+[The hosted board /demo](/demo-and-harness/hosted-demo/).
+
 ## What it looks like
 
 ```bash
