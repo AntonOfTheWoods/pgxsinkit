@@ -42,6 +42,45 @@ goes through `POST /api/mutations` and is applied by the single in-database func
 function once from your registry with the `pgxsinkit-generate` CLI (a drizzle-kit migration). Do not
 invent REST endpoints per table; do not write to Postgres tables directly from the client.
 
+## Reading the local store: base table vs overlay view
+
+Reads run against local PGlite through the client, not hand-written SQL. Use `client.query({ use, build })`
+(the guarded read): `use` names the registry relations the query touches — they are activated and awaited
+before it runs — and `build` receives the client and returns a **Drizzle** select builder. `client.query`
+resolves to the **rows array directly** (not `{ rows }`). Inside `build`, reach relations through a
+directly-imported synced table/view object, `c.drizzle`, or `c.views`.
+
+**The non-obvious rule — which relation to select FROM:**
+
+- A **readonly** entry syncs only its **base table**. Read it from the entry's **`.table`**
+  (`registry.<name>.table`). There is no overlay.
+- A **readwrite** entry also generates a `_read_model` **overlay view** that merges your own optimistic
+  (not-yet-synced) writes on top of the synced base rows. Read it from the entry's **`.view`**
+  (`registry.<name>.view`) — **not** its `.table`. Selecting the base `.table` of a readwrite entry
+  silently omits the writer's own pending writes, so a just-issued create/edit/delete will not appear
+  locally until it round-trips through Postgres and streams back via Electric.
+
+```ts
+// readonly entry → base table
+client.query({
+  use: ["catalogResource"],
+  build: (c) => c.drizzle.select({ id: catalogResource.table.id }).from(catalogResource.table),
+});
+
+// readwrite entry → overlay view, so your own optimistic writes are included
+const reportView = registry.report.view!; // `.view` is populated only for readwrite entries
+client.query({
+  use: ["report"],
+  build: (c) => c.drizzle.select({ id: reportView.id, status: reportView.status }).from(reportView),
+});
+```
+
+This is the read-side twin of "writes return through Electric": your optimistic write is visible
+immediately **only because you read the overlay view**; the base table catches up when Postgres streams the
+committed row back. (`c.views.<name>` is the client's accessor for the same overlay views; the entry's
+`.view` object is the direct handle. Type note: `.view` is typed as optional on a `SyncTableEntry`, so a
+non-null assertion — `registry.<name>.view!` — is expected at the read site.)
+
 ## Non-negotiables (each fails closed or throws)
 
 1. **The Electric subquery flag is mandatory.** Run Electric with
@@ -102,6 +141,8 @@ constraint that holds server-side also holds in PGlite.
 - Omitting `conflictPolicy` (throws) or sending a managed field in a write payload (rejected).
 - Comparing an enum without `::text` in a shape filter.
 - Writing directly to Postgres tables / building per-table CRUD instead of using the one write path.
+- Reading a **readwrite** entry from its base `.table` instead of its `.view` overlay, so your own
+  optimistic writes do not appear locally until they round-trip through Postgres.
 - Assuming PGlite enforces every Postgres constraint.
 - Assuming a revoked member keeps their synced rows offline — membership changes converge both ways,
   live and on resume.

@@ -57,6 +57,41 @@ where ownership is enforced. Treat synced tables in PGlite as **replication
 targets**: they are written by this path and must never be mutated by application code (writes go
 through [the write path](/concepts/write-path/)).
 
+## Reading from the local store
+
+The app reads through the client's guarded query, `client.query({ use, build })` — never hand-written SQL.
+`use` names the registry relations the query touches (they are activated and awaited before it runs);
+`build` receives the client and returns a [Drizzle](https://orm.drizzle.team) select builder. The call
+resolves to the **rows array** directly. Inside `build`, reach a relation through a directly-imported
+synced table/view object, `c.drizzle`, or `c.views`.
+
+Which relation you select **from** depends on the entry's mode:
+
+- A **readonly** entry syncs only its base table — read it from the entry's `.table`.
+- A **readwrite** entry also has a `_read_model` **overlay view** that merges your own optimistic
+  (not-yet-synced) writes over the synced base rows. Read it from the entry's `.view`, **not** its
+  `.table`. Selecting the base table of a readwrite entry omits your own pending writes, so a just-issued
+  create / edit / delete does not appear locally until it round-trips through Postgres and streams back.
+
+```ts
+// readonly entry → base table
+client.query({
+  use: ["catalogResource"],
+  build: (c) => c.drizzle.select({ id: catalogResource.table.id }).from(catalogResource.table),
+});
+
+// readwrite entry → overlay view, so your own optimistic writes are included
+const reportView = registry.report.view!; // `.view` is populated only for readwrite entries
+client.query({
+  use: ["report"],
+  build: (c) => c.drizzle.select({ id: reportView.id }).from(reportView),
+});
+```
+
+This is the read-side twin of optimistic writes returning through Electric: the write is visible
+immediately only because you read the overlay view; the base table catches up when the committed row
+streams back.
+
 ## Hard prerequisite
 
 Subquery `where` (used for fan-out) is a flagged ElectricSQL preview feature. The proxy forwards the
