@@ -1,7 +1,9 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["eslint", "typescript", "react", "import", "node", "oxc"],
-  // Custom JS plugin (alpha in oxlint 1.72): enforces the pure/raw split of the client query surface.
+  // Custom JS plugin enforcing the pure/raw split of the client query surface. oxlint's jsPlugins feature
+  // is alpha and not semver-covered, so oxlint is pinned EXACT in package.json — re-verify this rule on
+  // every oxlint bump (see oxlint-plugin.js). It runs on any oxlint version, not just the pinned one.
   // Referenced here by PATH to the exact file that ships as `@pgxsinkit/client`'s `./oxlint` subpath
   // export — because in this source repo the workspace package is not a physical node_modules install, so
   // oxlint's resolver can't take the specifier. Downstream repos (where it IS installed) enable it via

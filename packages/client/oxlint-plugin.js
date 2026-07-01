@@ -12,7 +12,12 @@
 // Plain JS (not TS, and outside src/) on purpose: it is a tooling artifact loaded by oxlint at lint time,
 // not part of the library's typed surface, so it is neither built nor typechecked nor self-linted.
 //
-// NOTE: oxlint jsPlugins are alpha (not semver-covered) as of oxlint 1.72. Pinned deliberately.
+// NOTE: this plugin has NO version logic — it runs under whatever oxlint loads it (1.72, 1.73, …), not
+// only the version it was written against. But oxlint's jsPlugins feature is alpha and NOT semver-covered:
+// the plugin API it relies on (create/context/report, ESTree node `.range`, `fixer.removeRange`) can
+// change on a *minor* oxlint bump without that being flagged as breaking. That is why oxlint is pinned to
+// an EXACT version in package.json (no `^`) — so upgrades are deliberate. On every oxlint bump, re-run
+// lint and confirm this rule still loads and fires; adjust it here if the alpha API drifted.
 
 const PURE_METHODS = new Set(["query", "queryRow"]);
 const RAW_METHODS = new Set(["queryRaw", "queryRawRow", "useLiveQueryRaw", "useLiveQueryRawRow"]);
