@@ -98,7 +98,16 @@ function buildTableBranch(entry: SyncTableEntry): string {
   // only the first column (the old `columns[0]`) matched too many rows on a composite-PK table.
   const primaryKeyColumns = entry.primaryKey.columns.map((columnName) => {
     const columnObject = Object.values(columns).find((column) => column.name === columnName);
-    return { name: columnName, type: columnObject?.getSQLType() ?? "text" };
+    if (!columnObject) {
+      // Hard error, not a silent `text` fallback: an unmatched PK column means the primaryKey spec
+      // has drifted from the table (e.g. a rename) — a generated applier keyed on a mistyped tuple
+      // would mis-match rows at apply time.
+      throw new Error(
+        `plpgsql apply generator: primary key column ${columnName} not found on table ${tableName}; ` +
+          `the entry's primaryKey spec has drifted from its Drizzle table`,
+      );
+    }
+    return { name: columnName, type: columnObject.getSQLType() };
   });
   const primaryKeyColumnNames = new Set(primaryKeyColumns.map((pk) => pk.name));
 

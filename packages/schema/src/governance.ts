@@ -21,6 +21,12 @@ export function buildRegistryGovernanceSql(registry: SyncTableRegistry): string 
     const qualifiedTableName = qualifyIdent(tableConfig.schema, tableConfig.name);
 
     for (const constraint of entry.governance?.deferrableConstraints ?? []) {
+      // `constraintName` must stay hand-carried (it names the constraint the MIGRATION created —
+      // drizzle-kit's SQL suffix `_fkey` differs from the ORM's `getName()` `_fk`), but the spec's
+      // `columns` can be validated structurally: an FK over exactly those columns must still exist
+      // on the table, so a column rename/drop fails loudly here instead of silently emitting an
+      // ALTER for a constraint that no longer matches anything.
+      assertForeignKeyForColumns(entry, tableConfig, constraint.columns, constraint.constraintName);
       statements.push(
         `ALTER TABLE ${qualifiedTableName} ALTER CONSTRAINT ${quoteIdent(constraint.constraintName)} DEFERRABLE INITIALLY ${constraint.initiallyDeferred ? "DEFERRED" : "IMMEDIATE"};`,
       );
@@ -32,6 +38,43 @@ export function buildRegistryGovernanceSql(registry: SyncTableRegistry): string 
   }
 
   return statements.join("\n\n");
+}
+
+function assertForeignKeyForColumns(
+  entry: SyncTableEntry,
+  tableConfig: ReturnType<typeof getTableConfig>,
+  specColumns: readonly string[],
+  constraintName: string,
+): void {
+  // Spec columns are Drizzle property keys; resolve each to its DB column name through the table
+  // object itself (falling back to the raw string for a spec already written as a column name).
+  const wanted = new Set(
+    specColumns.map((propertyKey) => {
+      const viaTable = (entry.table as unknown as Record<string, { name?: string } | undefined>)[propertyKey];
+      return viaTable?.name ?? propertyKey;
+    }),
+  );
+
+  const matched = tableConfig.foreignKeys.some((foreignKey) => {
+    const localColumns = foreignKey.reference().columns.map((column) => column.name);
+    return localColumns.length === wanted.size && localColumns.every((name) => wanted.has(name));
+  });
+
+  if (!matched) {
+    const available = tableConfig.foreignKeys
+      .map((foreignKey) =>
+        foreignKey
+          .reference()
+          .columns.map((column) => column.name)
+          .join("+"),
+      )
+      .join(", ");
+    throw new Error(
+      `governance: deferrable constraint ${constraintName} declares columns [${specColumns.join(", ")}] ` +
+        `but ${tableConfig.name} has no foreign key over them (FK column sets: ${available || "none"}); ` +
+        `the spec has drifted from the Drizzle table`,
+    );
+  }
 }
 
 function collectTableGrants(entry: SyncTableEntry): TableGrant[] {

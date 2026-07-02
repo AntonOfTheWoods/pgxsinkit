@@ -9,6 +9,10 @@
  *          node-`pg` is swapped for Bun.SQL behind a thin shim so the test BODIES are preserved.
  *          Runs on the repo's Podman Electric+Postgres lane (DATABASE_URL/ELECTRIC_URL are set by
  *          scripts/run-integration-suite.ts). Refresh: re-pull upstream + re-apply this shim.
+ *
+ * Raw-SQL policy: this whole file is a KEEP zone — its ~190 raw statements are the preserved
+ * upstream oracle bodies (and the raw ingest surface under test). Never convert them to Drizzle;
+ * doing so would fork the bodies from upstream and break the refresh procedure above.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 

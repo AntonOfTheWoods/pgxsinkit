@@ -287,7 +287,7 @@ export type { CorsConfig, CorsScope, FetchHandler, RouterErrorHandler } from "./
 export { FetchRouter } from "./router";
 export { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "./mutations/plpgsql-apply";
 export type { ApplyFunctionDriftCheck } from "./mutations/plpgsql-apply";
-export { ensureOperationsLogSchema } from "./operations-log/ddl";
+export { ensureOperationsLogSchema, operationsLogRegclassTarget } from "./operations-log/ddl";
 export { operationsLogTable } from "./operations-log/schema";
 export { proxyElectricShapeRequest } from "./electric-proxy";
 export type { ElectricProxyOptions } from "./electric-proxy";

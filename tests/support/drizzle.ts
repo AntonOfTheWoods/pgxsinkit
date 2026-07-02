@@ -10,7 +10,10 @@ const handles = new WeakMap<PGlite, PgliteDatabase<never>>();
 export function drizzleOver(pg: PGlite): PgliteDatabase<never> {
   let db = handles.get(pg);
   if (!db) {
-    db = drizzle(pg as never) as PgliteDatabase<never>;
+    // MUST be the `{ client }` config form: drizzle's pglite driver destructures `{ connection, client }`
+    // from a bare first argument, so `drizzle(pg)` misdetects the instance as a config and silently
+    // constructs a NEW in-memory PGlite — every read would then target an empty database.
+    db = drizzle({ client: pg as never }) as PgliteDatabase<never>;
     handles.set(pg, db);
   }
   return db;
