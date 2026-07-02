@@ -1,8 +1,10 @@
 import { Repl } from "@electric-sql/pglite-repl";
+import { count, eq, sql } from "drizzle-orm";
 import { startTransition, useEffect, useMemo, useState } from "react";
 
+import { getReadModelView } from "@pgxsinkit/client";
 import type { MutationBatchItem, MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
-import { getSyncRegistrySchema, quoteIdentifier, quoteSqlLiteral } from "@pgxsinkit/contracts";
+import { getSyncRegistrySchema, quoteIdentifier, quoteSqlLiteral, type SyncTableEntry } from "@pgxsinkit/contracts";
 import {
   buildSyntheticRegistrySchemaName,
   buildSyntheticCreatePayload,
@@ -1063,6 +1065,35 @@ function PercentilePanel({
   );
 }
 
+const SEED_OWNER_ID = "11111111-1111-4111-8111-111111111111";
+
+function buildLocalSeedRows(tableIndex: number, start: number, end: number, extraColumnCount: number) {
+  const rows: Array<Record<string, string | bigint>> = [];
+
+  for (let rowIndex = start; rowIndex < end; rowIndex += 1) {
+    const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
+    const timestampUs = 1_700_000_000_000_000n + BigInt(rowIndex);
+    const row: Record<string, string | bigint> = {
+      id: payload.id,
+      ownerId: SEED_OWNER_ID,
+      modifiedBy: SEED_OWNER_ID,
+      status: payload.status,
+      priority: payload.priority,
+      createdAtUs: timestampUs,
+      updatedAtUs: timestampUs,
+    };
+
+    for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
+      const fieldKey = `field${columnIndex.toString().padStart(2, "0")}`;
+      row[fieldKey] = payload[fieldKey] ?? "";
+    }
+
+    rows.push(row);
+  }
+
+  return rows;
+}
+
 async function seedLocalRows(
   client: PerfLabClient,
   bundle: SyntheticRegistryBundle,
@@ -1070,16 +1101,6 @@ async function seedLocalRows(
   extraColumnCount: number,
   onProgress: (progress: ProgressState) => void,
 ) {
-  const columnNames = [
-    "id",
-    ...Array.from({ length: extraColumnCount }, (_, index) => `field_${index.toString().padStart(2, "0")}`),
-    "owner_id",
-    "modified_by",
-    "status",
-    "priority",
-    "created_at_us",
-    "updated_at_us",
-  ];
   const batchSize = 250;
   const totalRows = countSyntheticWorkloadRows(bundle.tableNames.length, rowCount);
   let completedRows = 0;
@@ -1087,45 +1108,13 @@ async function seedLocalRows(
   await truncateLocalPerfLabTables(client, bundle);
 
   for (const [tableIndex, tableName] of bundle.tableNames.entries()) {
-    const qualifiedTableName = localProjectionName(bundle, tableName);
+    const { table } = requireRegistryEntry(bundle, tableName);
 
     for (let start = 0; start < rowCount; start += batchSize) {
       const batchEnd = Math.min(rowCount, start + batchSize);
-      const values: Array<string | number> = [];
-      const tuples: string[] = [];
+      const rows = buildLocalSeedRows(tableIndex, start, batchEnd, extraColumnCount);
 
-      for (let rowIndex = start; rowIndex < batchEnd; rowIndex += 1) {
-        const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
-        const placeholders: string[] = [];
-
-        values.push(String(payload.id));
-        placeholders.push(`$${values.length}`);
-
-        for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
-          values.push(String(payload[`field${columnIndex.toString().padStart(2, "0")}`]));
-          placeholders.push(`$${values.length}`);
-        }
-
-        values.push("11111111-1111-4111-8111-111111111111");
-        placeholders.push(`$${values.length}`);
-        values.push("11111111-1111-4111-8111-111111111111");
-        placeholders.push(`$${values.length}`);
-        values.push(String(payload.status));
-        placeholders.push(`$${values.length}`);
-        values.push(String(payload.priority));
-        placeholders.push(`$${values.length}`);
-        values.push(1_700_000_000_000_000 + rowIndex);
-        placeholders.push(`$${values.length}`);
-        values.push(1_700_000_000_000_000 + rowIndex);
-        placeholders.push(`$${values.length}`);
-
-        tuples.push(`(${placeholders.join(", ")})`);
-      }
-
-      await client.pglite.query(
-        `INSERT INTO ${qualifiedTableName} (${columnNames.join(", ")}) VALUES ${tuples.join(", ")}`,
-        values,
-      );
+      await client.drizzle.insert(table).values(rows);
       completedRows += batchEnd - start;
       onProgress({ label: "Seeding local rows across hot tables", completed: completedRows, total: totalRows });
       await yieldToBrowser();
@@ -1199,14 +1188,31 @@ async function measurePointReads(
   onProgress: (progress: ProgressState) => void,
 ) {
   const timings: number[] = [];
+  // Each hot table's point-read is AUTHORED once, up front, as tier-① Drizzle over the read-model view
+  // object (`sql.placeholder` renders as `$1`), then pre-rendered to text. The measured loop below must
+  // stay exactly a raw query of that pre-rendered text, so statement construction never pollutes the
+  // per-sample timing.
+  const statementByTable = new Map<string, string>(
+    bundle.tableNames.map((tableName) => {
+      const view = getReadModelView(bundle.registry, tableName);
+      // The view's columns ride an index signature (dynamic by construction); `id` always exists.
+      const idColumn = view["id"]!;
+      const statement = client.drizzle
+        .select({ id: idColumn })
+        .from(view)
+        .where(eq(idColumn, sql.placeholder("id")))
+        .toSQL().sql;
+      return [tableName, statement];
+    }),
+  );
 
   for (let index = 0; index < readSamples; index += 1) {
     const target = pickSyntheticWorkloadTarget(bundle.tableNames.length, index, localRows);
     const tableName = bundle.tableNames[target.tableIndex]!;
-    const readModelName = localProjectionName(bundle, `${tableName}_read_model`);
+    const statement = statementByTable.get(tableName)!;
     const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id;
     const started = performance.now();
-    const result = await client.pglite.query<{ id: string }>(`SELECT id FROM ${readModelName} WHERE id = $1`, [rowId]);
+    const result = await client.pglite.query<{ id: string }>(statement, [rowId]);
     timings.push(performance.now() - started);
 
     if (result.rows[0]?.id !== rowId) {
@@ -1420,11 +1426,11 @@ async function waitForFlushConvergence(
 async function queryRowCounts(client: PerfLabClient, bundle: SyntheticRegistryBundle) {
   const counts = await Promise.all(
     bundle.tableNames.map(async (tableName) => {
-      const result = await client.pglite.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM ${localProjectionName(bundle, tableName)}`,
-      );
+      const result = await client.drizzle
+        .select({ count: count() })
+        .from(requireRegistryEntry(bundle, tableName).table);
 
-      return [tableName, Number.parseInt(result.rows[0]?.count ?? "0", 10)] as const;
+      return [tableName, result[0]?.count ?? 0] as const;
     }),
   );
 
@@ -1433,23 +1439,25 @@ async function queryRowCounts(client: PerfLabClient, bundle: SyntheticRegistryBu
 
 async function queryOverlayBreakdown(client: PerfLabClient, bundle: SyntheticRegistryBundle) {
   const results = await Promise.all(
-    bundle.tableNames.map((tableName) =>
-      client.pglite.query<{ overlay_kind: string; count: string }>(
-        `
-          SELECT overlay_kind, COUNT(*)::text AS count
-          FROM ${localProjectionName(bundle, `${tableName}_read_model`)}
-          GROUP BY overlay_kind
-          ORDER BY overlay_kind
-        `,
-      ),
-    ),
+    bundle.tableNames.map((tableName) => {
+      const view = getReadModelView(bundle.registry, tableName);
+      // Index-signature access (dynamic by construction); the read model always carries `overlay_kind`.
+      const overlayKind = view["overlay_kind"]!;
+
+      return client.drizzle
+        .select({ overlayKind, count: count() })
+        .from(view)
+        .groupBy(overlayKind)
+        .orderBy(overlayKind);
+    }),
   );
 
   const countsByKind = new Map<string, number>();
 
-  for (const result of results) {
-    for (const row of result.rows) {
-      countsByKind.set(row.overlay_kind, (countsByKind.get(row.overlay_kind) ?? 0) + Number.parseInt(row.count, 10));
+  for (const rows of results) {
+    for (const row of rows) {
+      const kind = String(row.overlayKind);
+      countsByKind.set(kind, (countsByKind.get(kind) ?? 0) + row.count);
     }
   }
 
@@ -1655,6 +1663,16 @@ function localProjectionName(bundle: SyntheticRegistryBundle, objectName: string
   }
 
   return `${quoteIdentifier(schemaName)}.${quoteIdentifier(objectName)}`;
+}
+
+function requireRegistryEntry(bundle: SyntheticRegistryBundle, tableName: string): SyncTableEntry {
+  const entry = bundle.registry[tableName];
+
+  if (!entry) {
+    throw new Error(`Perf-lab registry has no entry for table ${tableName}`);
+  }
+
+  return entry;
 }
 
 function formatCount(value: number) {

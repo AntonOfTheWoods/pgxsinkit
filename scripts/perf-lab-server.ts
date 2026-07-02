@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sql";
-import { type AnyPgTable } from "drizzle-orm/pg-core";
+import { PgDialect, type AnyPgTable } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 import { createSchemaFactory } from "drizzle-orm/zod";
 import { Hono } from "hono";
@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import {
   batchMutationRequestSchema,
-  escapeSqlLiteral,
+  buildOwnershipShapeWhere,
   quoteIdentifier as quoteIdent,
   type BatchMutationRequest,
   type MutationAck,
@@ -305,7 +305,7 @@ app.get("/v1/electric-proxy", async (context) => {
     return context.json({ message: "Perf-lab registry is not ready yet." }, 503);
   }
 
-  return await proxyShapeRequest(context.req.raw, claims, activeRegistry.electricTables);
+  return await proxyShapeRequest(context.req.raw, claims, activeRegistry);
 });
 
 app.onError((error, context) => {
@@ -476,8 +476,8 @@ function buildSeedInsertRows(
   return rows;
 }
 
-async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null, protectedTables: string[]) {
-  const targetUrl = buildShapeTargetUrl(request, claims, protectedTables);
+async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null, registry: PreparedPerfRegistry) {
+  const targetUrl = buildShapeTargetUrl(request, claims, registry);
   const response = await fetch(targetUrl, {
     method: "GET",
     headers: forwardHeaders(request.headers),
@@ -496,10 +496,10 @@ async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null,
   });
 }
 
-function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, protectedTables: string[]) {
+function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, registry: PreparedPerfRegistry) {
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(electricUrl);
-  const activeTables = new Set(protectedTables);
+  const activeTables = new Set(registry.electricTables);
 
   targetUrl.search = requestUrl.search;
 
@@ -509,7 +509,7 @@ function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, pro
     return targetUrl.toString();
   }
 
-  const ownershipFilter = claims?.sub ? `owner_id = '${escapeSqlLiteral(claims.sub)}'` : "1 = 0";
+  const ownershipFilter = renderOwnershipShapeFilter(registry, table, claims?.sub);
   const existingWhere = targetUrl.searchParams.get("where");
 
   if (!existingWhere) {
@@ -519,6 +519,32 @@ function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, pro
 
   targetUrl.searchParams.set("where", `(${existingWhere}) AND (${ownershipFilter})`);
   return targetUrl.toString();
+}
+
+/**
+ * The ownership `where` the proxy pins onto a non-admin shape request, authored from the registry's
+ * real owner COLUMN via `buildOwnershipShapeWhere` (bare column + typed subject; `DENY_ALL` = `false`
+ * when unauthenticated) and rendered inline once for the shape URL. The rendered text carries a QUOTED
+ * bare column (`"owner_id" = '…'`) — Electric's shape grammar accepts quoted bare columns, and `false`
+ * exactly as it accepted the old hand-written `1 = 0`.
+ */
+function renderOwnershipShapeFilter(
+  registry: PreparedPerfRegistry,
+  electricTable: string,
+  subject: string | undefined,
+) {
+  const entry = Object.values(registry.registry).find(
+    (candidate) => (candidate.shape?.electricTable ?? candidate.shape?.tableName) === electricTable,
+  );
+  // Index-signature access (registry columns are dynamic by construction); every synthetic perf-lab
+  // table defines `ownerId`, and `electricTables` above derives from this same registry.
+  const ownerColumn = entry ? getColumns(entry.table as AnyPgTable)["ownerId"] : undefined;
+
+  if (!ownerColumn) {
+    throw new Error(`Perf-lab registry has no ownerId column for shape table ${electricTable}`);
+  }
+
+  return new PgDialect().sqlToQuery(buildOwnershipShapeWhere(ownerColumn, subject).inlineParams()).sql;
 }
 
 function findManagedFieldViolations(
@@ -638,12 +664,16 @@ async function readServerUpdatedAtUs(
 
   const whereClause = conditions.length === 1 ? conditions[0]! : and(...conditions);
   const rows = await tx
-    .select({ updatedAtUs: sql<string>`${updatedAtColumn}::text` })
+    .select({ updatedAtUs: updatedAtColumn })
     .from(entry.table as AnyPgTable)
     .where(whereClause)
     .limit(1);
 
-  return rows[0]?.updatedAtUs ?? undefined;
+  // The column is bigint `mode: "bigint"`, so drizzle maps the driver value to a BigInt (the generic
+  // column object erases that type, hence the assertion); `String(...)` renders the same digits the
+  // old `::text` projection produced (no suffix), keeping the JSON-safe string form callers expect.
+  const updatedAtUs = rows[0]?.updatedAtUs as bigint | string | undefined;
+  return updatedAtUs == null ? undefined : String(updatedAtUs);
 }
 
 function formatBatchExecutionError(error: unknown): string {

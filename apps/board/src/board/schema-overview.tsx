@@ -1,9 +1,30 @@
 import { Badge, Button, Group, Paper, Stack, Table, Text, Title } from "@mantine/core";
+import { count, eq } from "drizzle-orm";
+import { pgSchema, text, union, type AnyPgTable } from "drizzle-orm/pg-core";
 import { useEffect, useState } from "react";
 
 import { boardSyncRegistry } from "@pgxsinkit/board-schema";
+import { getSyncedLocalTable } from "@pgxsinkit/client";
+import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { useSyncClient } from "../board-client";
+
+// Tiny Drizzle stubs over the information_schema relations the presence probe reads (tier ①:
+// rename-safe column objects, typed params). They are query-authoring objects only — this catalog is
+// Postgres-owned, so they are never DDL/migration inputs.
+const informationSchema = pgSchema("information_schema");
+const catalogTables = informationSchema.table("tables", {
+  tableName: text("table_name").notNull(),
+  tableSchema: text("table_schema").notNull(),
+});
+const catalogSequences = informationSchema.table("sequences", {
+  sequenceName: text("sequence_name").notNull(),
+  sequenceSchema: text("sequence_schema").notNull(),
+});
+const catalogTriggers = informationSchema.table("triggers", {
+  triggerName: text("trigger_name").notNull(),
+  triggerSchema: text("trigger_schema").notNull(),
+});
 
 // The runtime shape we read off each registry entry. The registry resolves `clientProjection` to the
 // concrete local object names (ADR-0009), so the per-table cluster is fully derivable here.
@@ -16,6 +37,8 @@ interface Entity {
   key: string;
   table: string;
   mode: RegistryEntryShape["mode"];
+  /** The synced local table as a Drizzle object (rename-safe), for the row-count probe below. */
+  syncedLocalTable: AnyPgTable;
   overlay?: string;
   journal?: string;
   readModel?: string;
@@ -30,13 +53,17 @@ interface Entity {
 const ENTITIES: Entity[] = (Object.entries(boardSyncRegistry) as unknown as [string, RegistryEntryShape][]).map(
   ([key, entry]) => {
     const table = entry.clientProjection?.syncedTable ?? key;
+    // The synced local table as a runtime Drizzle object — resolves the projection rename + the
+    // registry's local schema, so the count query below tracks the same relation `table` names.
+    const syncedLocalTable = getSyncedLocalTable(boardSyncRegistry as SyncTableRegistry, key);
     if (entry.mode !== "readwrite") {
-      return { key, table, mode: entry.mode };
+      return { key, table, mode: entry.mode, syncedLocalTable };
     }
     return {
       key,
       table,
       mode: entry.mode,
+      syncedLocalTable,
       overlay: entry.clientProjection?.overlayTable ?? `${table}_overlay`,
       journal: entry.clientProjection?.journalTable ?? `${table}_mutations`,
       readModel: `${table}_read_model`,
@@ -109,25 +136,30 @@ export function SchemaOverview() {
       try {
         // Introspection over the live catalog — tables + views (`information_schema.tables`), the journal
         // sequences (`…sequences`) and the reconcile triggers (`…triggers`, one row per event → DISTINCT) —
-        // so every object the panel lists is verified to actually exist. This (and the per-table counts
-        // below over dynamic identifiers) is exactly the case the "prefer Drizzle" rule carves out for a
-        // raw query: Drizzle can't express either. Identifiers are registry-derived (trusted), and quoted.
-        const catalog = await client.pglite.query<{ name: string }>(
-          `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public'
-           UNION
-           SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public'
-           UNION
-           SELECT DISTINCT trigger_name FROM information_schema.triggers WHERE trigger_schema = 'public'`,
+        // so every object the panel lists is verified to actually exist. Authored as tier-① Drizzle over
+        // the catalog stubs above (`union` dedupes exactly like the SQL `UNION` it replaces); the counts
+        // below run over each entry's synced local table object, so nothing here is a name-in-a-string.
+        const catalog = await union(
+          client.drizzle
+            .select({ name: catalogTables.tableName })
+            .from(catalogTables)
+            .where(eq(catalogTables.tableSchema, "public")),
+          client.drizzle
+            .select({ name: catalogSequences.sequenceName })
+            .from(catalogSequences)
+            .where(eq(catalogSequences.sequenceSchema, "public")),
+          client.drizzle
+            .selectDistinct({ name: catalogTriggers.triggerName })
+            .from(catalogTriggers)
+            .where(eq(catalogTriggers.triggerSchema, "public")),
         );
-        const names = new Set(catalog.rows.map((row) => row.name));
+        const names = new Set(catalog.map((row) => row.name));
         const countPairs = await Promise.all(
           ENTITIES.map(async (entity): Promise<[string, number | null]> => {
             if (!names.has(entity.table)) return [entity.table, null];
             try {
-              const result = await client.pglite.query<{ n: number }>(
-                `SELECT count(*)::int AS n FROM "${entity.table}"`,
-              );
-              return [entity.table, result.rows[0]?.n ?? 0];
+              const result = await client.drizzle.select({ n: count() }).from(entity.syncedLocalTable);
+              return [entity.table, result[0]?.n ?? 0];
             } catch {
               return [entity.table, null];
             }

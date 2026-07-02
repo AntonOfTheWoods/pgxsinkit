@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { useMemo } from "react";
 
 import {
+  boardSyncRegistry,
   channelTable,
   issueTable,
   issueView,
@@ -10,8 +11,9 @@ import {
   teamMemberTable,
   teamTable,
 } from "@pgxsinkit/board-schema";
+import { getSyncStateView } from "@pgxsinkit/client";
 
-import { useLiveDrizzleRows, useLiveRows } from "./board-client";
+import { useLiveDrizzleRows } from "./board-client";
 
 // The read surface over the local PGlite store. Readonly tables (profile/team/channel) are read from
 // their synced local tables; readwrite tables (issue/message) from their `_read_model` views (which
@@ -174,32 +176,41 @@ export type IssueConvergence = {
   quarantineState: string | null;
 };
 
-type SyncStateRow = {
-  id: string;
-  conflict_state: string | null;
-  pending_count: number;
-  quarantined_count: number;
-  quarantine_state: string | null;
-};
+// The `issue_sync_state` view as a runtime Drizzle object (`getSyncStateView`): the entry's PK columns
+// under their property keys + the fixed convergence columns. The PK column rides the index signature
+// (dynamic by construction), hence the bracket access; `issue` always has an `id` PK.
+const issueSyncState = getSyncStateView(boardSyncRegistry, "issue");
+const issueSyncStateId = issueSyncState["id"]!;
 
 /**
  * Per-Issue convergence state from the toolkit's derived `issue_sync_state` view (ADR-0011): one row
- * per Issue that has any local activity. A live raw query (the view isn't a Drizzle object) — the
- * board reads `conflict_state` to surface reject-if-stale conflicts inline (Phase 6) and
- * `pending_count`/`quarantined_count` for the convergence dots + Inspector (Phase 8).
+ * per Issue that has any local activity. A live Drizzle query over the toolkit's view object — the
+ * board reads `conflictState` to surface reject-if-stale conflicts inline (Phase 6) and
+ * `pendingCount`/`quarantinedCount` for the convergence dots + Inspector (Phase 8). The two counts are
+ * int8 at runtime (PGlite returns them as strings), hence the `Number(...)` coercion.
  */
 export function useIssueConvergence(): Map<string, IssueConvergence> {
-  const { rows } = useLiveRows<SyncStateRow>(
-    "SELECT id, conflict_state, pending_count, quarantined_count, quarantine_state FROM issue_sync_state",
+  const { rows } = useLiveDrizzleRows(
+    (client) =>
+      client.drizzle
+        .select({
+          id: issueSyncStateId,
+          conflictState: issueSyncState.conflictState,
+          pendingCount: issueSyncState.pendingCount,
+          quarantinedCount: issueSyncState.quarantinedCount,
+          quarantineState: issueSyncState.quarantineState,
+        })
+        .from(issueSyncState),
+    [],
   );
   return useMemo(() => {
     const map = new Map<string, IssueConvergence>();
     for (const row of rows) {
-      map.set(row.id, {
-        conflictState: row.conflict_state,
-        pendingCount: Number(row.pending_count),
-        quarantinedCount: Number(row.quarantined_count),
-        quarantineState: row.quarantine_state,
+      map.set(String(row.id), {
+        conflictState: row.conflictState,
+        pendingCount: Number(row.pendingCount),
+        quarantinedCount: Number(row.quarantinedCount),
+        quarantineState: row.quarantineState,
       });
     }
     return map;
