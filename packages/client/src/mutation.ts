@@ -1,5 +1,47 @@
-import { is, SQL } from "drizzle-orm";
-import { getTableConfig, getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
+import {
+  and,
+  desc,
+  eq,
+  exists,
+  getColumns,
+  gt,
+  inArray,
+  is,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  notExists,
+  SQL,
+  sql,
+} from "drizzle-orm";
+import {
+  alias,
+  getTableConfig,
+  getViewConfig,
+  PgDialect,
+  type AnyPgTable,
+  type PgColumn,
+  type PgInsertValue,
+} from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/pglite";
+
+import {
+  getJournalTable,
+  getOverlayTable,
+  getSyncedLocalTable,
+  type JournalTable,
+  type OverlayTable,
+} from "./local-tables";
+
+// Statements are AUTHORED as Drizzle builders over the journal/overlay/synced table objects
+// (rename-safe, typed, schema-qualification handled by the table objects) and rendered to
+// text+params here, because they EXECUTE through the caller's raw `MutationDb` seam — the one
+// connection the mutation runtime and its tests own (and mock). `drizzle.mock()` builds queries
+// without a connection; `queryDialect` renders standalone `sql` fragments the builders cannot
+// express (compound CTE shapes, derived-table wrappers).
+const queryBuilder = drizzle.mock();
+const queryDialect = new PgDialect();
 
 /**
  * Strip the two internal overlay columns that appear on _read_model views
@@ -46,7 +88,6 @@ import type {
 import {
   batchMutationErrorSchema,
   buildOverlayResolutionBarrier,
-  escapeSqlLiteral as escapeSqlString,
   fingerprintRegistry,
   getProjectedColumns as getProjectedTableColumns,
   getSyncRegistrySchema,
@@ -219,6 +260,32 @@ interface TableContext {
     propertyKey: string;
     column: ReturnType<typeof getProjectedTableColumns<AnyPgTable>>[number]["column"];
   }>;
+  /**
+   * The generated local relations as runtime Drizzle table objects (local-tables.ts), so the
+   * runtime's statements are AUTHORED as tier-① builders while still EXECUTING through the raw
+   * `MutationDb` seam. Journal fixed columns are camelCase-keyed; per-entry PK columns are keyed
+   * by DB column name; overlay/synced columns are keyed by drizzle property key.
+   */
+  tables: {
+    synced: AnyPgTable;
+    overlay: OverlayTable;
+    journal: JournalTable;
+  };
+  /** Overlay columns keyed by property key (`getColumns` memo — overlay keys are property keys, not DB names). */
+  overlayColumnsByPropertyKey: Record<string, PgColumn>;
+  /** Synced read-cache columns keyed by property key. */
+  syncedColumnsByPropertyKey: Record<string, PgColumn>;
+  /** The entry's PK columns ON THE OVERLAY, resolved by DB column name (ordered like `pkColumnNames`). */
+  overlayPkColumns: PgColumn[];
+  /** The entry's PK columns ON THE SYNCED table, resolved by DB column name (ordered like `pkColumnNames`). */
+  syncedPkColumns: PgColumn[];
+  /** The Server version column ON THE SYNCED table (ADR-0010), or null when the table declares none. */
+  syncedServerVersionColumn: PgColumn | null;
+  /**
+   * Memoized render of the reconcile idle probe (the per-tick hot statement): built once per
+   * context so every convergence tick pays only a plain `db.query` of a cached string.
+   */
+  reconcileIdleProbe?: { sql: string; params: unknown[] };
 }
 
 export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
@@ -1051,18 +1118,13 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       const nowUs = nowMicroseconds();
 
       for (const context of contexts) {
-        await options.db.query(
-          `
-            UPDATE ${context.journalTable}
-            SET
-              status = 'pending',
-              next_retry_at_us = $1::bigint,
-              updated_at_us = $1::bigint,
-              conflict_reason = NULL
-            WHERE status = 'failed'
-          `,
-          [nowUs],
-        );
+        const journal = context.tables.journal;
+        const query = queryBuilder
+          .update(journal)
+          .set({ status: "pending", nextRetryAtUs: nowUs, updatedAtUs: nowUs, conflictReason: null })
+          .where(eq(journal.status, "failed"))
+          .toSQL();
+        await options.db.query(query.sql, query.params as unknown[]);
       }
     },
     recoverSending: async (table) => {
@@ -1071,21 +1133,21 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       const nowUs = nowMicroseconds();
 
       for (const context of contexts) {
-        await options.db.query(
-          `
-            UPDATE ${context.journalTable}
-            SET
-              status = 'pending',
-              updated_at_us = $1::bigint,
-              sent_at_us = NULL,
-              next_retry_at_us = $1::bigint,
-              last_error = NULL,
-              last_http_status = NULL,
-              conflict_reason = NULL
-            WHERE status = 'sending'
-          `,
-          [nowUs],
-        );
+        const journal = context.tables.journal;
+        const query = queryBuilder
+          .update(journal)
+          .set({
+            status: "pending",
+            updatedAtUs: nowUs,
+            sentAtUs: null,
+            nextRetryAtUs: nowUs,
+            lastError: null,
+            lastHttpStatus: null,
+            conflictReason: null,
+          })
+          .where(eq(journal.status, "sending"))
+          .toSQL();
+        await options.db.query(query.sql, query.params as unknown[]);
       }
     },
     readMutationStats: async (table) => {
@@ -1100,16 +1162,27 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       };
 
       for (const context of contexts) {
-        const result = await options.db.query<MutationDiagnostics & Record<string, unknown>>(`
-          SELECT
-            COUNT(*) FILTER (WHERE status = 'pending')::int AS "pendingCount",
-            COUNT(*) FILTER (WHERE status = 'sending')::int AS "sendingCount",
-            COUNT(*) FILTER (WHERE status = 'failed')::int AS "failedCount",
-            COUNT(*) FILTER (WHERE status = 'quarantined')::int AS "quarantinedCount",
-            COUNT(*) FILTER (WHERE status = 'conflicted')::int AS "conflictedCount",
-            COUNT(*) FILTER (WHERE status = 'acked')::int AS "ackedCount"
-          FROM ${context.journalTable}
-        `);
+        const journal = context.tables.journal;
+        // Drizzle has no `FILTER` operator (tier ②): each aggregate is a typed `sql` fragment over the
+        // journal `status` column object with a bound status literal, aliased to the exact camelCase row
+        // key the totals below read (the raw seam returns rows UNMAPPED, so aliases are load-bearing).
+        const filteredCount = (status: MutationStatus, columnAlias: string) =>
+          sql<number>`count(*) filter (where ${journal.status} = ${status})::int`.as(columnAlias);
+        const query = queryBuilder
+          .select({
+            pendingCount: filteredCount("pending", "pendingCount"),
+            sendingCount: filteredCount("sending", "sendingCount"),
+            failedCount: filteredCount("failed", "failedCount"),
+            quarantinedCount: filteredCount("quarantined", "quarantinedCount"),
+            conflictedCount: filteredCount("conflicted", "conflictedCount"),
+            ackedCount: filteredCount("acked", "ackedCount"),
+          })
+          .from(journal)
+          .toSQL();
+        const result = await options.db.query<MutationDiagnostics & Record<string, unknown>>(
+          query.sql,
+          query.params as unknown[],
+        );
 
         const row = result.rows[0];
         if (!row) {
@@ -1152,24 +1225,29 @@ async function readMutationDetailsForContexts(
   const rows: MutationDetail[] = [];
 
   for (const context of contexts) {
-    const result = await db.query<MutationDetailRow>(`
-      SELECT
-        mutation_id AS "mutationId",
-        entity_key_json AS "entityKeyJson",
-        mutation_seq AS "mutationSeq",
-        mutation_kind AS "mutationKind",
-        status,
-        attempt_count AS "attemptCount",
-        last_http_status AS "lastHttpStatus",
-        last_error AS "lastError",
-        conflict_reason AS "conflictReason",
-        next_retry_at_us::text AS "nextRetryAtUs",
-        server_updated_at_us::text AS "serverUpdatedAtUs",
-        updated_at_us::text AS "updatedAtUs",
-        registry_version AS "registryVersion"
-      FROM ${context.journalTable}
-      ORDER BY updated_at_us DESC, mutation_seq DESC
-    `);
+    const journal = context.tables.journal;
+    // The raw seam returns rows UNMAPPED (no drizzle result mapping), so every field is aliased
+    // explicitly to its camelCase row key, and the `_us` bigints keep their `::text` casts.
+    const query = queryBuilder
+      .select({
+        mutationId: sql<string>`${journal.mutationId}`.as("mutationId"),
+        entityKeyJson: sql<string>`${journal.entityKeyJson}`.as("entityKeyJson"),
+        mutationSeq: sql<number>`${journal.mutationSeq}`.as("mutationSeq"),
+        mutationKind: sql<MutationKind>`${journal.mutationKind}`.as("mutationKind"),
+        status: journal.status,
+        attemptCount: sql<number>`${journal.attemptCount}`.as("attemptCount"),
+        lastHttpStatus: sql<number | null>`${journal.lastHttpStatus}`.as("lastHttpStatus"),
+        lastError: sql<string | null>`${journal.lastError}`.as("lastError"),
+        conflictReason: sql<string | null>`${journal.conflictReason}`.as("conflictReason"),
+        nextRetryAtUs: sql<string | null>`${journal.nextRetryAtUs}::text`.as("nextRetryAtUs"),
+        serverUpdatedAtUs: sql<string | null>`${journal.serverUpdatedAtUs}::text`.as("serverUpdatedAtUs"),
+        updatedAtUs: sql<string>`${journal.updatedAtUs}::text`.as("updatedAtUs"),
+        registryVersion: sql<string | null>`${journal.registryVersion}`.as("registryVersion"),
+      })
+      .from(journal)
+      .orderBy(desc(journal.updatedAtUs), desc(journal.mutationSeq))
+      .toSQL();
+    const result = await db.query<MutationDetailRow>(query.sql, query.params as unknown[]);
 
     for (const row of result.rows) {
       if (mutationIds && !mutationIds.has(row.mutationId)) {
@@ -1355,11 +1433,16 @@ function buildTableContexts<TRegistry extends SyncTableRegistry>(registry: TRegi
   return Object.fromEntries(
     Object.entries(registry)
       .filter(([, entry]) => entry.mode !== "readonly")
-      .map(([key, entry]) => [key, buildTableContext(key, entry, localSchema)]),
+      .map(([key, entry]) => [key, buildTableContext(registry, key, entry, localSchema)]),
   ) as Partial<Record<SyncTableName<TRegistry>, TableContext>>;
 }
 
-function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, localSchema: string): TableContext {
+function buildTableContext<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+  key: string,
+  entry: SyncTableEntry<AnyPgTable>,
+  localSchema: string,
+): TableContext {
   if (!entry.clientProjection?.overlayTable || !entry.clientProjection.journalTable) {
     throw new Error(`overlay and journal tables are required for writable table ${key}`);
   }
@@ -1407,6 +1490,30 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
       return propertyKey && field.claimPath ? [{ propertyKey, claimPath: field.claimPath }] : [];
     });
 
+  // The generated local relations as runtime Drizzle objects (memoized per registry+key in
+  // local-tables.ts), plus name-resolved column handles the statement authors below need:
+  // overlay/synced columns are keyed by PROPERTY key, so PK columns (a DB-column-name concept,
+  // ADR-0012) are resolved once here by matching `.name`.
+  const tables = {
+    synced: getSyncedLocalTable(registry, key as string & keyof TRegistry),
+    overlay: getOverlayTable(registry, key as string & keyof TRegistry),
+    journal: getJournalTable(registry, key as string & keyof TRegistry),
+  };
+  const overlayColumnsByPropertyKey = getColumns(tables.overlay) as Record<string, PgColumn>;
+  const syncedColumnsByPropertyKey = getColumns(tables.synced) as Record<string, PgColumn>;
+  const resolvePkColumns = (columnsByKey: Record<string, PgColumn>, relation: string) =>
+    entry.primaryKey.columns.map((columnName) => {
+      const column = Object.values(columnsByKey).find((candidate) => candidate.name === columnName);
+      if (!column) {
+        throw new Error(`Primary key column ${columnName} was not found on the ${relation} table for ${key}`);
+      }
+      return column;
+    });
+  const syncedServerVersionColumn = serverVersionColumnName
+    ? (Object.values(syncedColumnsByPropertyKey).find((candidate) => candidate.name === serverVersionColumnName) ??
+      null)
+    : null;
+
   return {
     key,
     entry,
@@ -1432,6 +1539,12 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     managedAuthClaimCreateFields,
     recordIncludesOverlayState: "overlayTable" in (entry.clientProjection ?? {}),
     columns,
+    tables,
+    overlayColumnsByPropertyKey,
+    syncedColumnsByPropertyKey,
+    overlayPkColumns: resolvePkColumns(overlayColumnsByPropertyKey, "overlay"),
+    syncedPkColumns: resolvePkColumns(syncedColumnsByPropertyKey, "synced"),
+    syncedServerVersionColumn,
   };
 }
 
@@ -1625,32 +1738,26 @@ async function readLatestMutationStates(
     return new Map<string, BatchLatestMutationStateRow>();
   }
 
-  const { cteSql, params } = buildBatchEntityInputCte(context, entities);
-  const result = await db.query<BatchLatestMutationStateRow>(
-    `
-      WITH ${cteSql},
-      latest_mutations AS (
-        SELECT DISTINCT ON (journal.entity_key_json)
-          journal.entity_key_json,
-          journal.mutation_seq,
-          journal.mutation_kind,
-          journal.status
-        FROM ${context.journalTable} AS journal
-        JOIN input_entities AS input
-          ON input.entity_key_json = journal.entity_key_json
-        ORDER BY journal.entity_key_json, journal.mutation_seq DESC
-      )
-      SELECT
-        input.entity_key_json AS "entityKeyJson",
-        latest.mutation_seq AS "latestMutationSeq",
-        latest.mutation_kind AS "latestMutationKind",
-        latest.status AS "latestMutationStatus"
-      FROM input_entities AS input
-      LEFT JOIN latest_mutations AS latest
-        ON latest.entity_key_json = input.entity_key_json
-    `,
-    params,
-  );
+  // The old VALUES-CTE + LEFT-JOIN-back-to-input existed only to emit null rows for entities with
+  // no journal history; the caller reads via `map.get(...) ?? null`, so a missing key is equivalent.
+  const journal = context.tables.journal;
+  const query = queryBuilder
+    .selectDistinctOn([journal.entityKeyJson], {
+      entityKeyJson: sql<string>`${journal.entityKeyJson}`.as("entityKeyJson"),
+      latestMutationSeq: sql<number>`${journal.mutationSeq}`.as("latestMutationSeq"),
+      latestMutationKind: sql<MutationKind>`${journal.mutationKind}`.as("latestMutationKind"),
+      latestMutationStatus: sql<MutationStatus>`${journal.status}`.as("latestMutationStatus"),
+    })
+    .from(journal)
+    .where(
+      inArray(
+        journal.entityKeyJson,
+        entities.map((entity) => entity.entityKeyJson),
+      ),
+    )
+    .orderBy(journal.entityKeyJson, desc(journal.mutationSeq))
+    .toSQL();
+  const result = await db.query<BatchLatestMutationStateRow>(query.sql, query.params as unknown[]);
 
   return new Map(result.rows.map((row) => [row.entityKeyJson, row]));
 }
@@ -1660,40 +1767,47 @@ async function readCurrentRecordStates(db: MutationDb, context: TableContext, en
     return new Map<string, BatchCurrentRecordStateRow>();
   }
 
-  const { cteSql, params } = buildBatchEntityInputCte(context, entities);
-  const overlaySelectColumns = buildContextSelectColumns(context, "overlay");
-  const syncedSelectColumns = buildContextSelectColumns(context, "synced");
-  const inputOverlayJoin = buildBatchEntityJoinClause(context, "overlay", "input");
-  const inputSyncedJoin = buildBatchEntityJoinClause(context, "synced", "input");
-  const syncedLocalUpdatedSql = hasProperty(context, "updatedAtUs")
-    ? 'synced.updated_at_us::text AS "localUpdatedAtUs"'
-    : `'0' AS "localUpdatedAtUs"`;
+  // Tier ②: the overlay-∪-synced shape over an input VALUES table. The input CTE carries each
+  // entity's `entity_key_json` alongside its PK values (the caller maps rows back by that JSON), so
+  // it cannot be a plain builder select; every identifier still comes from the table objects /
+  // `sql.identifier`, and every value is a bound (cast-typed) param.
+  const overlay = context.tables.overlay;
+  const synced = context.tables.synced;
+  const inputCte = buildEntityInputCte(context, entities);
+  const overlaySelectColumns = buildProjectedSelectColumns(context, context.overlayColumnsByPropertyKey);
+  const syncedSelectColumns = buildProjectedSelectColumns(context, context.syncedColumnsByPropertyKey);
+  const inputOverlayJoin = buildEntityInputJoin(context.pkColumnNames, context.overlayPkColumns);
+  const inputSyncedJoin = buildEntityInputJoin(context.pkColumnNames, context.syncedPkColumns);
+  const syncedUpdatedAtColumn = context.syncedColumnsByPropertyKey["updatedAtUs"];
+  const syncedLocalUpdated =
+    hasProperty(context, "updatedAtUs") && syncedUpdatedAtColumn
+      ? sql`${syncedUpdatedAtColumn}::text AS "localUpdatedAtUs"`
+      : sql`'0' AS "localUpdatedAtUs"`;
 
-  const result = await db.query<BatchCurrentRecordStateRow>(
-    `
-      WITH ${cteSql},
+  const query = queryDialect.sqlToQuery(sql`
+      WITH ${inputCte},
       overlay_rows AS (
         SELECT
           input.entity_key_json AS "entityKeyJson",
-          ${overlaySelectColumns.join(",\n          ")},
-          overlay.overlay_kind AS "overlayKind",
-          overlay.local_updated_at_us::text AS "localUpdatedAtUs"
+          ${overlaySelectColumns},
+          ${overlay.overlayKind} AS "overlayKind",
+          ${overlay.localUpdatedAtUs}::text AS "localUpdatedAtUs"
         FROM input_entities AS input
-        JOIN ${context.overlayTable} AS overlay
+        JOIN ${overlay}
           ON ${inputOverlayJoin}
       ),
       synced_rows AS (
         SELECT
           input.entity_key_json AS "entityKeyJson",
-          ${syncedSelectColumns.join(",\n          ")},
-          'synced' AS "overlayKind",
-          ${syncedLocalUpdatedSql}
+          ${syncedSelectColumns},
+          ${"synced"} AS "overlayKind",
+          ${syncedLocalUpdated}
         FROM input_entities AS input
-        JOIN ${context.syncedTable} AS synced
+        JOIN ${synced}
           ON ${inputSyncedJoin}
         WHERE NOT EXISTS (
           SELECT 1
-          FROM ${context.overlayTable} AS overlay
+          FROM ${overlay}
           WHERE ${inputOverlayJoin}
         )
       )
@@ -1702,9 +1816,8 @@ async function readCurrentRecordStates(db: MutationDb, context: TableContext, en
       UNION ALL
       SELECT *
       FROM synced_rows
-    `,
-    params,
-  );
+    `);
+  const result = await db.query<BatchCurrentRecordStateRow>(query.sql, query.params as unknown[]);
 
   return new Map(result.rows.map((row) => [row.entityKeyJson, row]));
 }
@@ -1721,77 +1834,34 @@ async function insertMutationsBulk(
   }
 
   // ADR-0022: a dynamic write-unit tags every row of the batch with one shared unit id + mode; the
-  // default path leaves both NULL (the flusher derives mode/unit from the static group). Appended after
-  // the existing columns so the per-row placeholder indices above stay put.
+  // default path leaves both NULL (the flusher derives mode/unit from the static group).
   const writeUnit = unit?.id ?? null;
   const writeMode = unit?.mode ?? null;
-  const insertColumnNames = [
-    "mutation_id",
-    ...context.pkColumnNames,
-    "entity_key_json",
-    "mutation_seq",
-    "mutation_kind",
-    "status",
-    "registry_version",
-    "base_server_version",
-    "payload_json",
-    "enqueued_at_us",
-    "next_retry_at_us",
-    "updated_at_us",
-    "write_unit",
-    "write_mode",
-  ];
-  const params: unknown[] = [];
-  const tuples = rows.map((row) => {
-    const start = params.length;
-    const values = [
-      row.mutationId,
-      ...context.pkColumnNames.map((columnName) => row.entityKey[columnName]),
-      row.entityKeyJson,
-      row.mutationKind,
-      "pending",
-      registryVersion,
-      row.baseServerVersion,
-      row.payloadJson,
-      row.nowUs,
-      row.nowUs,
-      row.nowUs,
-      writeUnit,
-      writeMode,
-    ];
+  const journal = context.tables.journal;
+  // `mutationSeq` is intentionally omitted: the generated journal DDL carries
+  // `mutation_seq ... DEFAULT nextval(<journal sequence>)`, so the DB default assigns it — drizzle
+  // renders `default` for every column a row does not provide.
+  const values = rows.map((row) => ({
+    mutationId: row.mutationId,
+    ...Object.fromEntries(context.pkColumnNames.map((columnName) => [columnName, row.entityKey[columnName]])),
+    entityKeyJson: row.entityKeyJson,
+    mutationKind: row.mutationKind,
+    status: "pending",
+    registryVersion,
+    baseServerVersion: row.baseServerVersion,
+    payloadJson: row.payloadJson,
+    enqueuedAtUs: row.nowUs,
+    nextRetryAtUs: row.nowUs,
+    updatedAtUs: row.nowUs,
+    writeUnit,
+    writeMode,
+  }));
 
-    params.push(...values);
-
-    const pk = context.pkColumnNames.length;
-    const valuePlaceholders = [
-      formatSqlValuePlaceholder(start + 1, "mutation_id"),
-      ...context.pkColumnNames.map((columnName, index) => formatSqlValuePlaceholder(start + index + 2, columnName)),
-      formatSqlValuePlaceholder(start + pk + 2, "entity_key_json"),
-      `nextval('${escapeSqlString(context.journalSequence)}')::integer`,
-      formatSqlValuePlaceholder(start + pk + 3, "mutation_kind"),
-      formatSqlValuePlaceholder(start + pk + 4, "status"),
-      formatSqlValuePlaceholder(start + pk + 5, "registry_version"),
-      `$${start + pk + 6}::bigint`,
-      formatSqlValuePlaceholder(start + pk + 7, "payload_json"),
-      formatSqlValuePlaceholder(start + pk + 8, "enqueued_at_us"),
-      formatSqlValuePlaceholder(start + pk + 9, "next_retry_at_us"),
-      formatSqlValuePlaceholder(start + pk + 10, "updated_at_us"),
-      formatSqlValuePlaceholder(start + pk + 11, "write_unit"),
-      formatSqlValuePlaceholder(start + pk + 12, "write_mode"),
-    ];
-
-    return `(${valuePlaceholders.join(", ")})`;
-  });
-
-  await db.query(
-    `
-      INSERT INTO ${context.journalTable} (
-        ${insertColumnNames.join(", ")}
-      )
-      VALUES ${tuples.join(",\n        ")}
-    `,
-    params,
-  );
+  const query = queryBuilder
+    .insert(journal)
+    .values(values as PgInsertValue<JournalTable>[])
+    .toSQL();
+  await db.query(query.sql, query.params as unknown[]);
 }
 
 async function upsertOverlayRecordsBulk(
@@ -1803,110 +1873,106 @@ async function upsertOverlayRecordsBulk(
     return;
   }
 
-  const overlayColumnNames = context.columns.map(({ column }) => column.name);
-  const insertColumns = [...overlayColumnNames, "overlay_kind", "local_updated_at_us"];
-  const updateColumns = [
-    ...overlayColumnNames.map((columnName) => `${columnName} = EXCLUDED.${columnName}`),
-    "overlay_kind = EXCLUDED.overlay_kind",
-    "local_updated_at_us = EXCLUDED.local_updated_at_us",
-  ];
-  const params: unknown[] = [];
-  const tuples = rows.map((row) => {
-    const start = params.length;
-    const values = [
-      ...context.columns.map(({ propertyKey }) => row.record[propertyKey] ?? null),
-      row.overlayKind,
-      row.localUpdatedAtUs,
-    ];
+  const overlay = context.tables.overlay;
+  const values = rows.map((row) => ({
+    ...Object.fromEntries(context.columns.map(({ propertyKey }) => [propertyKey, row.record[propertyKey] ?? null])),
+    overlayKind: row.overlayKind,
+    localUpdatedAtUs: row.localUpdatedAtUs,
+  }));
+  // Every inserted column (the projection + the two overlay columns) takes its EXCLUDED value on
+  // conflict — the fixed alias PostgreSQL defines for the proposed row; its column names are the
+  // table's own, so they come from the column objects via `sql.identifier`.
+  const excludedSet = Object.fromEntries([
+    ...context.columns.map(({ propertyKey, column }) => [propertyKey, sql`excluded.${sql.identifier(column.name)}`]),
+    ["overlayKind", sql`excluded.${sql.identifier(overlay.overlayKind.name)}`],
+    ["localUpdatedAtUs", sql`excluded.${sql.identifier(overlay.localUpdatedAtUs.name)}`],
+  ]) as Record<string, SQL>;
 
-    params.push(...values);
-
-    return `(${insertColumns
-      .map((columnName, index) => formatSqlValuePlaceholder(start + index + 1, columnName))
-      .join(", ")})`;
-  });
-
-  await db.query(
-    `
-      INSERT INTO ${context.overlayTable} (
-        ${insertColumns.join(", ")}
-      )
-      VALUES ${tuples.join(",\n        ")}
-      ON CONFLICT (${context.pkColumnNames.join(", ")})
-      DO UPDATE SET
-        ${updateColumns.join(",\n        ")}
-    `,
-    params,
-  );
+  const query = queryBuilder
+    .insert(overlay)
+    .values(values as PgInsertValue<OverlayTable>[])
+    .onConflictDoUpdate({ target: context.overlayPkColumns, set: excludedSet })
+    .toSQL();
+  await db.query(query.sql, query.params as unknown[]);
 }
 
-function buildBatchEntityInputCte(context: TableContext, entities: ReadonlyArray<BatchEntityRef>) {
-  const columns = ["entity_key_json", ...context.pkColumnNames];
-  const params: unknown[] = [];
+/**
+ * The batch-input CTE as a typed fragment: `input_entities (entity_key_json, <pks…>) AS (VALUES …)`
+ * with every value a bound param, cast to its PK column's type (an untyped VALUES column would
+ * otherwise default to text and break the join against a uuid/int PK).
+ */
+function buildEntityInputCte(context: TableContext, entities: ReadonlyArray<BatchEntityRef>): SQL {
+  const columnNames = ["entity_key_json", ...context.pkColumnNames];
   const tuples = entities.map((entity) => {
-    const start = params.length;
-    const values = [entity.entityKeyJson, ...context.pkColumnNames.map((columnName) => entity.entityKey[columnName])];
-
-    params.push(...values);
-
-    return `(${columns
-      .map((columnName, index) => formatBatchEntityInputPlaceholder(context, start + index + 1, columnName))
-      .join(", ")})`;
+    const values = [
+      sql`${entity.entityKeyJson}`,
+      ...context.pkColumnNames.map((columnName) => {
+        const columnEntry = context.columns.find(({ column }) => column.name === columnName);
+        const castSuffix = columnEntry ? resolveInputCastSuffix(columnEntry.column.columnType) : "";
+        // The cast keyword is a FIXED type suffix selected from the closed switch below — never
+        // derived from user data — so `sql.raw` is safe here; the value itself is a bound param.
+        return castSuffix
+          ? sql`${entity.entityKey[columnName]}${sql.raw(castSuffix)}`
+          : sql`${entity.entityKey[columnName]}`;
+      }),
+    ];
+    return sql`(${sql.join(values, sql`, `)})`;
   });
 
-  return {
-    cteSql: `input_entities (${columns.join(", ")}) AS (VALUES ${tuples.join(", ")})`,
-    params,
-  };
+  return sql`input_entities (${sql.join(
+    columnNames.map((columnName) => sql.identifier(columnName)),
+    sql`, `,
+  )}) AS (VALUES ${sql.join(tuples, sql`, `)})`;
 }
 
-function formatBatchEntityInputPlaceholder(context: TableContext, position: number, columnName: string) {
-  if (columnName === "entity_key_json") {
-    return `$${position}`;
-  }
-
-  const columnEntry = context.columns.find(({ column }) => column.name === columnName);
-
-  if (!columnEntry) {
-    return `$${position}`;
-  }
-
-  switch (columnEntry.column.columnType) {
+function resolveInputCastSuffix(columnType: string): string {
+  switch (columnType) {
     case "PgUUID":
-      return `$${position}::uuid`;
+      return "::uuid";
     case "PgBigInt64":
     case "PgBigInt53":
-      return `$${position}::bigint`;
+      return "::bigint";
     case "PgInteger":
     case "PgSerial":
     case "PgSmallInt":
-      return `$${position}::int`;
+      return "::int";
     case "PgBoolean":
-      return `$${position}::boolean`;
+      return "::boolean";
     case "PgTimestamp":
     case "PgTimestampString":
-      return `$${position}::timestamp`;
+      return "::timestamp";
     default:
-      return `$${position}`;
+      return "";
   }
 }
 
-function buildContextSelectColumns(context: TableContext, tableAlias: string) {
-  return context.columns.map(({ propertyKey, column }) => {
-    const qualifiedColumn = `${tableAlias}.${column.name}`;
-
-    if (column.columnType === "PgBigInt64" || column.columnType === "PgBigInt53") {
-      return `${qualifiedColumn}::text AS "${propertyKey}"`;
-    }
-
-    return `${qualifiedColumn} AS "${propertyKey}"`;
-  });
+/**
+ * The projected columns of one branch (overlay or synced) as select-list fragments, aliased to
+ * their camelCase property keys — the raw seam returns rows unmapped, so the aliases ARE the row
+ * keys — with `::text` casts on the bigint columns (matching how the runtime reads them).
+ */
+function buildProjectedSelectColumns(context: TableContext, columnsByPropertyKey: Record<string, PgColumn>): SQL {
+  return sql.join(
+    context.columns.map(({ propertyKey, column }) => {
+      const target = columnsByPropertyKey[propertyKey];
+      if (!target) {
+        throw new Error(`Projected column ${propertyKey} was not found on the local tables for ${context.key}`);
+      }
+      if (column.columnType === "PgBigInt64" || column.columnType === "PgBigInt53") {
+        return sql`${target}::text AS ${sql.identifier(propertyKey)}`;
+      }
+      return sql`${target} AS ${sql.identifier(propertyKey)}`;
+    }),
+    sql`, `,
+  );
 }
 
-function buildBatchEntityJoinClause(context: TableContext, tableAlias: string, inputAlias: string) {
-  return context.pkColumnNames
-    .map((columnName) => `${tableAlias}.${columnName} = ${inputAlias}.${columnName}`)
-    .join(" AND ");
+/** PK equality between a branch table's columns and the `input` CTE, as a typed fragment. */
+function buildEntityInputJoin(pkColumnNames: string[], pkColumns: PgColumn[]): SQL {
+  return sql.join(
+    pkColumnNames.map((columnName, index) => sql`${pkColumns[index]!} = input.${sql.identifier(columnName)}`),
+    sql` AND `,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1966,19 +2032,61 @@ interface MutationStatusUpdate {
  * back to the entity's current synced version once that predecessor has been reconciled away. Either
  * fallback yields the entity's own latest server state, so its own chain never self-conflicts.
  */
-function buildResolvedBaseServerVersionSql(context: TableContext): string {
-  const journal = context.journalTable;
-  const predecessor = `(SELECT MAX(pred.server_updated_at_us) FROM ${journal} AS pred WHERE pred.entity_key_json = ${journal}.entity_key_json AND pred.mutation_seq < ${journal}.mutation_seq AND pred.status = 'acked')`;
+function buildResolvedBaseServerVersion(context: TableContext): SQL {
+  const journal = context.tables.journal;
+  const synced = context.tables.synced;
+  const pred = alias(journal, "pred");
+  const predecessor = queryBuilder
+    .select({ value: sql`MAX(${pred.serverUpdatedAtUs})` })
+    .from(pred)
+    .where(
+      and(
+        eq(pred.entityKeyJson, journal.entityKeyJson),
+        lt(pred.mutationSeq, journal.mutationSeq),
+        eq(pred.status, "acked"),
+      ),
+    );
 
-  const syncedFallback = context.serverVersionColumnName
-    ? `(SELECT synced.${quoteIdentifier(context.serverVersionColumnName)} FROM ${context.syncedTable} AS synced WHERE ${buildColumnEquality(context.pkColumnNames, "synced", journal)})`
-    : null;
+  if (!context.syncedServerVersionColumn) {
+    return sql`COALESCE(${journal.baseServerVersion}, ${predecessor})::text`;
+  }
 
-  const expression = syncedFallback
-    ? `COALESCE(${journal}.base_server_version, ${predecessor}, ${syncedFallback})`
-    : `COALESCE(${journal}.base_server_version, ${predecessor})`;
+  const syncedFallback = queryBuilder
+    .select({ value: sql`${context.syncedServerVersionColumn}` })
+    .from(synced)
+    .where(
+      and(
+        ...context.pkColumnNames.map((columnName, index) => eq(context.syncedPkColumns[index]!, journal[columnName]!)),
+      ),
+    );
 
-  return `${expression}::text`;
+  return sql`COALESCE(${journal.baseServerVersion}, ${predecessor}, ${syncedFallback})::text`;
+}
+
+/**
+ * One table's send-eligible journal rows as a builder select with the shared {@link PendingBatchRow}
+ * projection — the aliases ARE the row keys (raw seam), `tableKey` rides as a bound param, and the
+ * resolved Base server version (ADR-0015) is the typed COALESCE fragment above.
+ */
+function buildPendingRowsProjection(context: TableContext) {
+  const journal = context.tables.journal;
+  return {
+    tableKey: sql<string>`${context.key}`.as("tableKey"),
+    mutationId: sql<string>`${journal.mutationId}`.as("mutationId"),
+    entityKeyJson: sql<string>`${journal.entityKeyJson}`.as("entityKeyJson"),
+    mutationSeq: sql<number>`${journal.mutationSeq}`.as("mutationSeq"),
+    mutationKind: sql<MutationKind>`${journal.mutationKind}`.as("mutationKind"),
+    status: journal.status,
+    payloadJson: sql<string>`${journal.payloadJson}`.as("payloadJson"),
+    attemptCount: sql<number>`${journal.attemptCount}`.as("attemptCount"),
+    lastHttpStatus: sql<number | null>`${journal.lastHttpStatus}`.as("lastHttpStatus"),
+    lastError: sql<string | null>`${journal.lastError}`.as("lastError"),
+    conflictReason: sql<string | null>`${journal.conflictReason}`.as("conflictReason"),
+    nextRetryAtUs: sql<string | null>`${journal.nextRetryAtUs}::text`.as("nextRetryAtUs"),
+    serverUpdatedAtUs: sql<string | null>`${journal.serverUpdatedAtUs}::text`.as("serverUpdatedAtUs"),
+    baseServerVersion: buildResolvedBaseServerVersion(context).as("baseServerVersion"),
+    enqueuedAtUs: sql<string>`${journal.enqueuedAtUs}::text`.as("enqueuedAtUs"),
+  };
 }
 
 async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], nowUs: string, batchSize: number) {
@@ -1986,57 +2094,46 @@ async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], no
     return [] as PendingBatchRow[];
   }
 
-  const unionSql = contexts
-    .map(
-      (context) => `
-        SELECT
-          '${escapeSqlString(context.key)}' AS "tableKey",
-          mutation_id AS "mutationId",
-          entity_key_json AS "entityKeyJson",
-          mutation_seq AS "mutationSeq",
-          mutation_kind AS "mutationKind",
-          status,
-          payload_json AS "payloadJson",
-          attempt_count AS "attemptCount",
-          last_http_status AS "lastHttpStatus",
-          last_error AS "lastError",
-          conflict_reason AS "conflictReason",
-          next_retry_at_us::text AS "nextRetryAtUs",
-          server_updated_at_us::text AS "serverUpdatedAtUs",
-          ${buildResolvedBaseServerVersionSql(context)} AS "baseServerVersion",
-          enqueued_at_us::text AS "enqueuedAtUs"
-        FROM ${context.journalTable}
-        WHERE status IN ('pending', 'failed')
-          -- ADR-0022: pessimistic rows are flushed by the authoritative unit path (flushUnit), never the
-          -- optimistic batch — exclude them here so a tagged write is never optimistically sent.
-          AND COALESCE(write_mode, '') <> 'pessimistic'
-          AND COALESCE(next_retry_at_us, 0) <= $1::bigint
-          AND NOT EXISTS (
-            SELECT 1
-            FROM ${context.journalTable} AS earlier
-            WHERE earlier.entity_key_json = ${context.journalTable}.entity_key_json
-              AND earlier.mutation_seq < ${context.journalTable}.mutation_seq
-              -- A still-unresolved earlier mutation blocks later same-entity ones so the
-              -- server applies them in author order. The quarantined status is included: a
-              -- later mutation must not flush past a prerequisite the server permanently
-              -- rejected (it would itself fail); resolving the quarantine unblocks the queue.
-              AND earlier.status IN ('pending', 'failed', 'sending', 'quarantined')
-          )
-      `,
-    )
-    .join("\nUNION ALL\n");
+  const branches = contexts.map((context) => {
+    const journal = context.tables.journal;
+    const earlier = alias(journal, "earlier");
+    return queryBuilder
+      .select(buildPendingRowsProjection(context))
+      .from(journal)
+      .where(
+        and(
+          inArray(journal.status, ["pending", "failed"]),
+          // ADR-0022: pessimistic rows are flushed by the authoritative unit path (flushUnit), never the
+          // optimistic batch — exclude them here so a tagged write is never optimistically sent.
+          sql`COALESCE(${journal.writeMode}, '') <> 'pessimistic'`,
+          sql`COALESCE(${journal.nextRetryAtUs}, 0) <= ${nowUs}::bigint`,
+          notExists(
+            queryBuilder
+              .select({ one: sql`1` })
+              .from(earlier)
+              .where(
+                and(
+                  eq(earlier.entityKeyJson, journal.entityKeyJson),
+                  lt(earlier.mutationSeq, journal.mutationSeq),
+                  // A still-unresolved earlier mutation blocks later same-entity ones so the
+                  // server applies them in author order. The quarantined status is included: a
+                  // later mutation must not flush past a prerequisite the server permanently
+                  // rejected (it would itself fail); resolving the quarantine unblocks the queue.
+                  inArray(earlier.status, ["pending", "failed", "sending", "quarantined"]),
+                ),
+              ),
+          ),
+        ),
+      );
+  });
 
-  const result = await db.query<PendingBatchRow>(
-    `
-      SELECT *
-      FROM (
-        ${unionSql}
-      ) AS pending
-      ORDER BY pending."enqueuedAtUs"::bigint ASC, pending."mutationSeq" ASC
-      LIMIT ${batchSize}
-    `,
-    [nowUs],
+  // The union rides inside a derived table because the outer ORDER BY casts the (text) output
+  // columns — a set operation's own ORDER BY may only name plain output columns. The `pending`
+  // alias and its two quoted output-column names are fixed by the projection above, not data.
+  const query = queryDialect.sqlToQuery(
+    sql`SELECT * FROM (${sql.join(branches, sql` UNION ALL `)}) AS pending ORDER BY pending."enqueuedAtUs"::bigint ASC, pending."mutationSeq" ASC LIMIT ${batchSize}`,
   );
+  const result = await db.query<PendingBatchRow>(query.sql, query.params as unknown[]);
 
   return result.rows;
 }
@@ -2055,35 +2152,18 @@ async function readUnitPendingRows(
     return [];
   }
 
-  const unionSql = contexts
-    .map(
-      (context) => `
-        SELECT
-          '${escapeSqlString(context.key)}' AS "tableKey",
-          mutation_id AS "mutationId",
-          entity_key_json AS "entityKeyJson",
-          mutation_seq AS "mutationSeq",
-          mutation_kind AS "mutationKind",
-          status,
-          payload_json AS "payloadJson",
-          attempt_count AS "attemptCount",
-          last_http_status AS "lastHttpStatus",
-          last_error AS "lastError",
-          conflict_reason AS "conflictReason",
-          next_retry_at_us::text AS "nextRetryAtUs",
-          server_updated_at_us::text AS "serverUpdatedAtUs",
-          ${buildResolvedBaseServerVersionSql(context)} AS "baseServerVersion",
-          enqueued_at_us::text AS "enqueuedAtUs"
-        FROM ${context.journalTable}
-        WHERE write_unit = $1 AND status IN ('pending', 'failed')
-      `,
-    )
-    .join("\nUNION ALL\n");
+  const branches = contexts.map((context) => {
+    const journal = context.tables.journal;
+    return queryBuilder
+      .select(buildPendingRowsProjection(context))
+      .from(journal)
+      .where(and(eq(journal.writeUnit, unitId), inArray(journal.status, ["pending", "failed"])));
+  });
 
-  const result = await db.query<PendingBatchRow>(
-    `SELECT * FROM (${unionSql}) AS unit ORDER BY unit."mutationSeq" ASC`,
-    [unitId],
+  const query = queryDialect.sqlToQuery(
+    sql`SELECT * FROM (${sql.join(branches, sql` UNION ALL `)}) AS unit ORDER BY unit."mutationSeq" ASC`,
   );
+  const result = await db.query<PendingBatchRow>(query.sql, query.params as unknown[]);
 
   return result.rows;
 }
@@ -2541,28 +2621,58 @@ async function discardConflictedEntity(
   await db.exec("BEGIN");
 
   try {
-    await db.query(`DELETE FROM ${context.journalTable} WHERE status = 'conflicted' AND entity_key_json = $1`, [
-      entityKeyJson,
-    ]);
+    const journal = context.tables.journal;
+    const clearQuery = queryBuilder
+      .delete(journal)
+      .where(and(eq(journal.status, "conflicted"), eq(journal.entityKeyJson, entityKeyJson)))
+      .toSQL();
+    await db.query(clearQuery.sql, clearQuery.params as unknown[]);
 
     // Clear the kept overlay only when no journal row still owes this entity — so a discard never
     // strips an overlay another un-resolved write (e.g. a resolution already enqueued) depends on.
-    const pkConditions = context.pkColumnNames.map((columnName, index) => `overlay.${columnName} = $${index + 1}`);
-    const pkValues = context.pkColumnNames.map((columnName) => entityKey[columnName]);
-    await db.query(
-      `DELETE FROM ${context.overlayTable} AS overlay
-       WHERE ${pkConditions.join(" AND ")}
-         AND NOT EXISTS (
-           SELECT 1 FROM ${context.journalTable} AS j WHERE j.entity_key_json = $${pkValues.length + 1}
-         )`,
-      [...pkValues, entityKeyJson],
-    );
+    const overlayQuery = buildOverlayDiscardQuery(context, entityKey, entityKeyJson);
+    await db.query(overlayQuery.sql, overlayQuery.params as unknown[]);
 
     await db.exec("COMMIT");
   } catch (error) {
     await db.exec("ROLLBACK");
     throw error;
   }
+}
+
+/**
+ * The shared overlay-discard statement: delete the entity's overlay row unless a journal row still
+ * owes the entity — `owedStatuses` narrows which journal rows count as "owed" (all of them for a
+ * conflict discard; only the un-sent pending/sending/failed set for a settled-unit discard).
+ */
+function buildOverlayDiscardQuery(
+  context: TableContext,
+  entityKey: Record<string, string>,
+  entityKeyJson: string,
+  owedStatuses?: MutationStatus[],
+) {
+  const overlay = context.tables.overlay;
+  const journal = context.tables.journal;
+  const owed = queryBuilder
+    .select({ one: sql`1` })
+    .from(journal)
+    .where(
+      owedStatuses
+        ? and(eq(journal.entityKeyJson, entityKeyJson), inArray(journal.status, owedStatuses))
+        : eq(journal.entityKeyJson, entityKeyJson),
+    );
+
+  return queryBuilder
+    .delete(overlay)
+    .where(
+      and(
+        ...context.pkColumnNames.map((columnName, index) =>
+          eq(context.overlayPkColumns[index]!, entityKey[columnName]),
+        ),
+        notExists(owed),
+      ),
+    )
+    .toSQL();
 }
 
 /**
@@ -2577,18 +2687,8 @@ async function discardOverlayForSettledEntity(
   entityKey: Record<string, string>,
   entityKeyJson: string,
 ) {
-  const pkConditions = context.pkColumnNames.map((columnName, index) => `overlay.${columnName} = $${index + 1}`);
-  const pkValues = context.pkColumnNames.map((columnName) => entityKey[columnName]);
-  await db.query(
-    `DELETE FROM ${context.overlayTable} AS overlay
-     WHERE ${pkConditions.join(" AND ")}
-       AND NOT EXISTS (
-         SELECT 1 FROM ${context.journalTable} AS j
-         WHERE j.entity_key_json = $${pkValues.length + 1}
-           AND j.status IN ('pending', 'sending', 'failed')
-       )`,
-    [...pkValues, entityKeyJson],
-  );
+  const query = buildOverlayDiscardQuery(context, entityKey, entityKeyJson, ["pending", "sending", "failed"]);
+  await db.query(query.sql, query.params as unknown[]);
 }
 
 async function reconcileTable(db: MutationDb, context: TableContext) {
@@ -2601,9 +2701,26 @@ async function reconcileTable(db: MutationDb, context: TableContext) {
   // <table>_reconcile_on_sync trigger; this bulk pass is a fallback, so skipping it when there is nothing
   // to clear changes no outcome. The guard is a single existence probe over the (small, usually empty)
   // journal.
-  const work = await db.query<{ hasWork: boolean }>(
-    "SELECT EXISTS(SELECT 1 FROM " + context.journalTable + " WHERE status IN ('acked', 'conflicted')) AS \"hasWork\"",
-  );
+  const journal = context.tables.journal;
+  const overlay = context.tables.overlay;
+  const synced = context.tables.synced;
+  // This is the idle-CPU hot statement (it runs for every writable table on every convergence
+  // tick), so the rendered text+params are memoized per context — each tick pays only a plain
+  // `db.query` of a cached string, and it stays OUTSIDE any transaction (no BEGIN on the idle path).
+  let idleProbe = context.reconcileIdleProbe;
+  if (!idleProbe) {
+    const probeQuery = queryDialect.sqlToQuery(
+      sql`SELECT ${exists(
+        queryBuilder
+          .select({ one: sql`1` })
+          .from(journal)
+          .where(inArray(journal.status, ["acked", "conflicted"])),
+      )} AS "hasWork"`,
+    );
+    idleProbe = { sql: probeQuery.sql, params: probeQuery.params as unknown[] };
+    context.reconcileIdleProbe = idleProbe;
+  }
+  const work = await db.query<{ hasWork: boolean }>(idleProbe.sql, idleProbe.params);
   if (work.rows[0]?.hasWork !== true) {
     return;
   }
@@ -2618,98 +2735,170 @@ async function reconcileTable(db: MutationDb, context: TableContext) {
     // conflicted row lingers forever: `<table>_sync_state.conflict_state` keeps surfacing the resolved
     // conflict and `diagnostics().conflictedCount` never drops. Run before the acked-clear below so the
     // resolving row is still present to supersede it. (`discardConflict` is the explicit throw-away path.)
-    await db.query(
-      "DELETE FROM " +
-        context.journalTable +
-        " AS conflicted " +
-        "USING " +
-        context.journalTable +
-        " AS resolver " +
-        "WHERE conflicted.status = 'conflicted' " +
-        "AND resolver.entity_key_json = conflicted.entity_key_json " +
-        "AND resolver.mutation_seq > conflicted.mutation_seq " +
-        "AND resolver.status = 'acked'",
-    );
+    // Drizzle DELETE has no USING; the resolver leg is the equivalent EXISTS semi-join.
+    const resolver = alias(journal, "resolver");
+    const retireQuery = queryBuilder
+      .delete(journal)
+      .where(
+        and(
+          eq(journal.status, "conflicted"),
+          exists(
+            queryBuilder
+              .select({ one: sql`1` })
+              .from(resolver)
+              .where(
+                and(
+                  eq(resolver.entityKeyJson, journal.entityKeyJson),
+                  gt(resolver.mutationSeq, journal.mutationSeq),
+                  eq(resolver.status, "acked"),
+                ),
+              ),
+          ),
+        ),
+      )
+      .toSQL();
+    await db.query(retireQuery.sql, retireQuery.params as unknown[]);
 
     // Clear acknowledged non-delete mutations + matching overlays. ADR-0010: gated by the
     // Convergence barrier (same predicate as the trigger) — the acked write clears only once the
     // synced echo's Server version has reached its acked version. Joining the synced table makes
     // the comparison possible (and means an un-synced acked write is held until its echo lands).
-    await db.query(
-      "WITH cleared_journal AS (" +
-        "DELETE FROM " +
-        context.journalTable +
-        " AS journal " +
-        "USING " +
-        context.syncedTable +
-        " AS synced " +
-        "WHERE journal.status = 'acked' " +
-        "AND journal.server_updated_at_us IS NOT NULL " +
-        "AND journal.mutation_kind <> 'delete' " +
-        "AND " +
-        buildColumnEquality(context.pkColumnNames, "journal", "synced") +
-        " " +
-        "AND " +
-        buildOverlayResolutionBarrier(context.entry, { journalAlias: "journal", syncedAlias: "synced" }) +
-        " " +
-        "RETURNING journal.entity_key_json, " +
-        context.pkColumnNames.map((cn) => "journal." + cn).join(", ") +
-        ") " +
-        "DELETE FROM " +
-        context.overlayTable +
-        " AS overlay " +
-        "USING cleared_journal AS cj " +
-        "WHERE " +
-        buildColumnEquality(context.pkColumnNames, "overlay", "cj") +
-        " " +
-        "AND NOT EXISTS (" +
-        "SELECT 1 FROM " +
-        context.journalTable +
-        " AS j " +
-        "WHERE j.entity_key_json = cj.entity_key_json " +
-        "AND j.status IN ('pending', 'sending', 'failed')" +
-        ")",
+    // Drizzle authoring: DELETE..USING becomes the equivalent EXISTS semi-join, chained through a
+    // data-modifying CTE (both sub-statements see the same statement-start snapshot, exactly like
+    // the USING form). The barrier predicate stays the shared contracts helper (single authority
+    // with the trigger); it renders against the tables' own names, which is how drizzle references
+    // their columns here (no aliases on a DELETE target).
+    const barrier = sql.raw(
+      buildOverlayResolutionBarrier(context.entry, {
+        journalAlias: quoteIdentifier(getTableConfig(journal).name),
+        syncedAlias: quoteIdentifier(getTableConfig(synced).name),
+      }),
     );
+    const clearedJournal = queryBuilder.$with("cleared_journal").as(
+      queryBuilder
+        .delete(journal)
+        .where(
+          and(
+            eq(journal.status, "acked"),
+            isNotNull(journal.serverUpdatedAtUs),
+            ne(journal.mutationKind, "delete"),
+            exists(
+              queryBuilder
+                .select({ one: sql`1` })
+                .from(synced)
+                .where(
+                  and(
+                    ...context.pkColumnNames.map((columnName, index) =>
+                      eq(context.syncedPkColumns[index]!, journal[columnName]!),
+                    ),
+                    barrier,
+                  ),
+                ),
+            ),
+          ),
+        )
+        .returning(
+          Object.fromEntries([
+            ["entity_key_json", journal.entityKeyJson],
+            ...context.pkColumnNames.map((columnName) => [columnName, journal[columnName]!]),
+          ]),
+        ),
+    );
+    const clearedJournalColumns = clearedJournal as unknown as Record<string, PgColumn>;
+    const ackedClearQuery = queryBuilder
+      .with(clearedJournal)
+      .delete(overlay)
+      .where(
+        exists(
+          queryBuilder
+            .select({ one: sql`1` })
+            .from(clearedJournal)
+            .where(
+              and(
+                ...context.pkColumnNames.map((columnName, index) =>
+                  eq(context.overlayPkColumns[index]!, clearedJournalColumns[columnName]!),
+                ),
+                notExists(
+                  queryBuilder
+                    .select({ one: sql`1` })
+                    .from(journal)
+                    .where(
+                      and(
+                        eq(journal.entityKeyJson, clearedJournalColumns["entity_key_json"]!),
+                        inArray(journal.status, ["pending", "sending", "failed"]),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+        ),
+      )
+      .toSQL();
+    await db.query(ackedClearQuery.sql, ackedClearQuery.params as unknown[]);
 
     // Clear acknowledged delete mutations where synced row is absent
     // Single compound CTE — PGlite does not support multi-statement query().
-    await db.query(
-      "WITH clearable_entities AS (" +
-        "SELECT DISTINCT journal.entity_key_json, " +
-        context.pkColumnNames.map((cn) => "journal." + cn).join(", ") +
-        " FROM " +
-        context.journalTable +
-        " AS journal " +
-        "LEFT JOIN " +
-        context.syncedTable +
-        " AS synced " +
-        "ON " +
-        buildColumnEquality(context.pkColumnNames, "journal", "synced") +
-        " " +
-        "WHERE journal.status = 'acked' " +
-        "AND journal.mutation_kind = 'delete' " +
-        "AND synced." +
-        context.pkColumnNames[0] +
-        " IS NULL" +
-        "), " +
-        "deleted_overlay AS (" +
-        "DELETE FROM " +
-        context.overlayTable +
-        " AS overlay " +
-        "USING clearable_entities AS ce " +
-        "WHERE " +
-        buildColumnEquality(context.pkColumnNames, "overlay", "ce") +
-        ") " +
-        "DELETE FROM " +
-        context.journalTable +
-        " AS journal " +
-        "USING clearable_entities AS ce " +
-        "WHERE " +
-        buildColumnEquality(context.pkColumnNames, "journal", "ce") +
-        " " +
-        "AND journal.status = 'acked' " +
-        "AND journal.mutation_kind = 'delete'",
+    const clearableEntities = queryBuilder.$with("clearable_entities").as(
+      queryBuilder
+        .selectDistinct(
+          Object.fromEntries([
+            ["entity_key_json", journal.entityKeyJson],
+            ...context.pkColumnNames.map((columnName) => [columnName, journal[columnName]!]),
+          ]),
+        )
+        .from(journal)
+        .leftJoin(
+          synced,
+          and(
+            ...context.pkColumnNames.map((columnName, index) =>
+              eq(context.syncedPkColumns[index]!, journal[columnName]!),
+            ),
+          ),
+        )
+        .where(
+          and(eq(journal.status, "acked"), eq(journal.mutationKind, "delete"), isNull(context.syncedPkColumns[0]!)),
+        ),
     );
+    const clearableEntityColumns = clearableEntities as unknown as Record<string, PgColumn>;
+    const deletedOverlay = queryBuilder.$with("deleted_overlay").as(
+      queryBuilder.delete(overlay).where(
+        exists(
+          queryBuilder
+            .select({ one: sql`1` })
+            .from(clearableEntities)
+            .where(
+              and(
+                ...context.pkColumnNames.map((columnName, index) =>
+                  eq(context.overlayPkColumns[index]!, clearableEntityColumns[columnName]!),
+                ),
+              ),
+            ),
+        ),
+      ),
+    );
+    const deleteClearQuery = queryBuilder
+      .with(clearableEntities, deletedOverlay)
+      .delete(journal)
+      .where(
+        and(
+          eq(journal.status, "acked"),
+          eq(journal.mutationKind, "delete"),
+          exists(
+            queryBuilder
+              .select({ one: sql`1` })
+              .from(clearableEntities)
+              .where(
+                and(
+                  ...context.pkColumnNames.map((columnName) =>
+                    eq(journal[columnName]!, clearableEntityColumns[columnName]!),
+                  ),
+                ),
+              ),
+          ),
+        ),
+      )
+      .toSQL();
+    await db.query(deleteClearQuery.sql, deleteClearQuery.params as unknown[]);
     await db.exec("COMMIT");
   } catch (error) {
     await db.exec("ROLLBACK");
@@ -2731,135 +2920,47 @@ async function applyMutationStatusUpdates(db: MutationDb, context: TableContext,
     return;
   }
 
-  const columns = [
-    "mutation_id",
-    "status",
-    "attempt_count",
-    "updated_at_us",
-    "sent_at_us",
-    "replace_sent_at_us",
-    "acked_at_us",
-    "replace_acked_at_us",
-    "server_updated_at_us",
-    "replace_server_updated_at_us",
-    "base_server_version",
-    "replace_base_server_version",
-    "last_error",
-    "next_retry_at_us",
-    "last_http_status",
-    "conflict_reason",
-  ] as const;
-  const params: unknown[] = [];
-  const tuples = updates.map((update) => {
-    const start = params.length;
-
-    params.push(
-      update.mutationId,
-      update.status,
-      update.attemptCount,
-      update.updatedAtUs,
-      update.sentAtUs ?? null,
-      update.replaceSentAtUs ?? false,
-      update.ackedAtUs ?? null,
-      update.replaceAckedAtUs ?? false,
-      update.serverUpdatedAtUs ?? null,
-      update.replaceServerUpdatedAtUs ?? false,
-      update.baseServerVersion ?? null,
-      update.replaceBaseServerVersion ?? false,
-      update.lastError ?? null,
-      update.nextRetryAtUs ?? null,
-      update.lastHttpStatus ?? null,
-      update.conflictReason ?? null,
-    );
-
-    return `(${columns
-      .map((columnName, index) => {
-        const position = start + index + 1;
-
-        if (
-          columnName === "updated_at_us" ||
-          columnName === "sent_at_us" ||
-          columnName === "acked_at_us" ||
-          columnName === "server_updated_at_us" ||
-          columnName === "base_server_version" ||
-          columnName === "next_retry_at_us"
-        ) {
-          return `$${position}::bigint`;
-        }
-
-        if (columnName === "attempt_count" || columnName === "last_http_status") {
-          return `$${position}::int`;
-        }
-
-        if (
-          columnName === "replace_sent_at_us" ||
-          columnName === "replace_acked_at_us" ||
-          columnName === "replace_server_updated_at_us" ||
-          columnName === "replace_base_server_version"
-        ) {
-          return `$${position}::boolean`;
-        }
-
-        return `$${position}`;
-      })
-      .join(", ")})`;
-  });
-
-  await db.query(
-    `
-      UPDATE ${context.journalTable} AS journal
-      SET
-        status = updates.status,
-        attempt_count = updates.attempt_count,
-        updated_at_us = updates.updated_at_us::bigint,
-        sent_at_us = CASE
-          WHEN updates.replace_sent_at_us THEN updates.sent_at_us::bigint
-          ELSE journal.sent_at_us
-        END,
-        acked_at_us = CASE
-          WHEN updates.replace_acked_at_us THEN updates.acked_at_us::bigint
-          ELSE journal.acked_at_us
-        END,
-        server_updated_at_us = CASE
-          WHEN updates.replace_server_updated_at_us THEN updates.server_updated_at_us::bigint
-          ELSE journal.server_updated_at_us
-        END,
-        base_server_version = CASE
-          WHEN updates.replace_base_server_version THEN updates.base_server_version::bigint
-          ELSE journal.base_server_version
-        END,
-        last_error = updates.last_error,
-        next_retry_at_us = updates.next_retry_at_us::bigint,
-        last_http_status = updates.last_http_status,
-        conflict_reason = updates.conflict_reason
-      FROM (
-        VALUES ${tuples.join(",\n          ")}
-      ) AS updates (
-        mutation_id,
-        status,
-        attempt_count,
-        updated_at_us,
-        sent_at_us,
-        replace_sent_at_us,
-        acked_at_us,
-        replace_acked_at_us,
-        server_updated_at_us,
-        replace_server_updated_at_us,
-        base_server_version,
-        replace_base_server_version,
-        last_error,
-        next_retry_at_us,
-        last_http_status,
-        conflict_reason
-      )
-      WHERE journal.mutation_id = updates.mutation_id::uuid
-    `,
-    params,
+  // Tier ②: `update().from(<VALUES>)`. Every value is a bound param with the same cast as before;
+  // the `updates` alias and its column list are fixed by this function (not derived from data), so
+  // the alias-qualified references in SET/WHERE are fixed template text, while the journal side of
+  // each CASE interpolates the column objects.
+  const journal = context.tables.journal;
+  const tuples = updates.map(
+    (update) =>
+      sql`(${update.mutationId}, ${update.status}, ${update.attemptCount}::int, ${update.updatedAtUs}::bigint, ${
+        update.sentAtUs ?? null
+      }::bigint, ${update.replaceSentAtUs ?? false}::boolean, ${update.ackedAtUs ?? null}::bigint, ${
+        update.replaceAckedAtUs ?? false
+      }::boolean, ${update.serverUpdatedAtUs ?? null}::bigint, ${update.replaceServerUpdatedAtUs ?? false}::boolean, ${
+        update.baseServerVersion ?? null
+      }::bigint, ${update.replaceBaseServerVersion ?? false}::boolean, ${update.lastError ?? null}, ${
+        update.nextRetryAtUs ?? null
+      }::bigint, ${update.lastHttpStatus ?? null}::int, ${update.conflictReason ?? null})`,
   );
-}
+  const updatesTable = sql`(VALUES ${sql.join(
+    tuples,
+    sql`, `,
+  )}) AS updates (mutation_id, status, attempt_count, updated_at_us, sent_at_us, replace_sent_at_us, acked_at_us, replace_acked_at_us, server_updated_at_us, replace_server_updated_at_us, base_server_version, replace_base_server_version, last_error, next_retry_at_us, last_http_status, conflict_reason)`;
 
-function buildColumnEquality(columnNames: string[], leftAlias: string, rightAlias: string) {
-  return columnNames.map((columnName) => `${leftAlias}.${columnName} = ${rightAlias}.${columnName}`).join(" AND ");
+  const query = queryBuilder
+    .update(journal)
+    .set({
+      status: sql`updates.status`,
+      attemptCount: sql`updates.attempt_count`,
+      updatedAtUs: sql`updates.updated_at_us::bigint`,
+      sentAtUs: sql`CASE WHEN updates.replace_sent_at_us THEN updates.sent_at_us::bigint ELSE ${journal.sentAtUs} END`,
+      ackedAtUs: sql`CASE WHEN updates.replace_acked_at_us THEN updates.acked_at_us::bigint ELSE ${journal.ackedAtUs} END`,
+      serverUpdatedAtUs: sql`CASE WHEN updates.replace_server_updated_at_us THEN updates.server_updated_at_us::bigint ELSE ${journal.serverUpdatedAtUs} END`,
+      baseServerVersion: sql`CASE WHEN updates.replace_base_server_version THEN updates.base_server_version::bigint ELSE ${journal.baseServerVersion} END`,
+      lastError: sql`updates.last_error`,
+      nextRetryAtUs: sql`updates.next_retry_at_us::bigint`,
+      lastHttpStatus: sql`updates.last_http_status`,
+      conflictReason: sql`updates.conflict_reason`,
+    })
+    .from(updatesTable)
+    .where(eq(journal.mutationId, sql`updates.mutation_id::uuid`))
+    .toSQL();
+  await db.query(query.sql, query.params as unknown[]);
 }
 
 function qualifyLocalIdentifier(schemaName: string, tableName: string) {
@@ -2875,10 +2976,6 @@ function qualifyLocalIdentifier(schemaName: string, tableName: string) {
 
 function buildJournalSequenceName(journalTable: string) {
   return `${journalTable}_mutation_seq`;
-}
-
-function formatSqlValuePlaceholder(position: number, columnName: string) {
-  return /_at_us$/.test(columnName) ? `$${position}::bigint` : `$${position}`;
 }
 
 function hasProperty(context: TableContext, propertyKey: string) {

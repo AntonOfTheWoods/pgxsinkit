@@ -63,11 +63,13 @@ export {
   getJournalTable,
   getLocalMetaTable,
   getOverlayTable,
+  getReadModelView,
   getSyncedLocalTable,
   getSyncStateView,
   type JournalTable,
   type LocalMetaTable,
   type OverlayTable,
+  type ReadModelView,
   type SyncStateView,
 } from "./local-tables";
 export type { LocalStoreVersionEvent };

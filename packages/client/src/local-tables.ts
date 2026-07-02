@@ -78,6 +78,20 @@ function buildOverlayFixedColumns() {
   };
 }
 
+/**
+ * The two overlay columns the `<t>_read_model` view carries on top of the projected synced columns.
+ * Read through real drizzle result mapping (a live query, not the raw `MutationDb` seam), so
+ * `local_updated_at_us` is a `mode: "bigint"` int8 (PGlite returns it as a string at runtime) rather than
+ * the journal/overlay `bigintText` passthrough. Snake-case property keys so consumers reach them the same
+ * way the generator names them (`view["overlay_kind"]`).
+ */
+function buildReadModelFixedColumns() {
+  return {
+    overlay_kind: varchar("overlay_kind", { length: 24 }).notNull(),
+    local_updated_at_us: bigint("local_updated_at_us", { mode: "bigint" }).notNull(),
+  };
+}
+
 function buildSyncStateFixedColumns() {
   return {
     observedServerVersion: bigint("observed_server_version", { mode: "bigint" }),
@@ -98,6 +112,7 @@ function buildSyncStateFixedColumns() {
 const journalShape = pgTable("_pgxsinkit_journal_shape", buildJournalFixedColumns());
 const overlayShape = pgTable("_pgxsinkit_overlay_shape", buildOverlayFixedColumns());
 const syncStateShape = pgView("_pgxsinkit_sync_state_shape", buildSyncStateFixedColumns()).existing();
+const readModelShape = pgView("_pgxsinkit_read_model_shape", buildReadModelFixedColumns()).existing();
 const localMetaShape = pgTable(LOCAL_META_TABLE, {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
@@ -109,6 +124,8 @@ export type JournalTable = typeof journalShape & { [columnName: string]: PgColum
 export type OverlayTable = typeof overlayShape & { [columnName: string]: PgColumn };
 /** The `<t>_sync_state` convergence view (ADR-0011): fixed state columns + the entry's PK columns. */
 export type SyncStateView = typeof syncStateShape & { [columnName: string]: PgColumn };
+/** The `<t>_read_model` overlay-merged read view: the two overlay columns + the entry's projected columns (index-signature access). */
+export type ReadModelView = typeof readModelShape & { [columnName: string]: PgColumn };
 /** The `pgxsinkit_local_meta` key/value table (ADR-0006). */
 export type LocalMetaTable = typeof localMetaShape;
 
@@ -158,6 +175,7 @@ interface EntryLocalTables {
   overlay?: OverlayTable;
   journal?: JournalTable;
   syncState?: SyncStateView;
+  readModel?: ReadModelView;
 }
 
 const localTablesCache = new WeakMap<SyncTableRegistry, Map<string, EntryLocalTables>>();
@@ -296,6 +314,38 @@ export function getSyncStateView<TRegistry extends SyncTableRegistry>(
       : pgSchema(localSchema).view(viewName, columns).existing()
   ) as SyncStateView;
   slot.syncState = view;
+  return view;
+}
+
+/**
+ * The `<t>_read_model` overlay-merged read view (ADR-0004) as a runtime Drizzle object: every projected
+ * synced column under the entry's own property key plus the two overlay columns (`overlay_kind`,
+ * `local_updated_at_us`), mirroring the generator's `CREATE VIEW`. The entry's own `entry.view` is
+ * schema-UNQUALIFIED (`defineSyncTable` builds it with a bare `pgView`), so a consumer whose local store
+ * lives in a non-public schema must author against this qualified object instead of `entry.view`.
+ */
+export function getReadModelView<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+  tableKey: string & keyof TRegistry,
+): ReadModelView {
+  const slot = cacheFor(registry, tableKey);
+  if (slot.readModel) {
+    return slot.readModel;
+  }
+  const entry = requireEntry(registry, tableKey);
+  requireWritable(entry, tableKey, "the read-model view");
+  const localSchema = getSyncRegistrySchema(registry);
+  const viewName = `${resolveSyncedTableName(entry)}_read_model`;
+  const columns = {
+    ...(projectedColumnBuilders(entry, tableKey) as Record<string, ColumnBuilderBase>),
+    ...buildReadModelFixedColumns(),
+  };
+  const view = (
+    localSchema === "public"
+      ? pgView(viewName, columns).existing()
+      : pgSchema(localSchema).view(viewName, columns).existing()
+  ) as ReadModelView;
+  slot.readModel = view;
   return view;
 }
 
