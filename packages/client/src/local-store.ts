@@ -1,12 +1,17 @@
-import {
-  getSyncRegistrySchema,
-  type MutationDiagnostics,
-  quoteIdentifier,
-  type SyncTableRegistry,
-} from "@pgxsinkit/contracts";
+import { eq, like } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/pglite";
 
+import { type MutationDiagnostics, type SyncTableRegistry } from "@pgxsinkit/contracts";
+
+import { getLocalMetaTable } from "./local-tables";
 import type { MutationDb } from "./mutation";
-import { buildWipeLocalStoreSql, generateLocalSchemaSql, LOCAL_META_TABLE, REGISTRY_FINGERPRINT_KEY } from "./schema";
+import { buildWipeLocalStoreSql, generateLocalSchemaSql, REGISTRY_FINGERPRINT_KEY } from "./schema";
+
+// Statements are AUTHORED as Drizzle builders over the meta-table object (rename-safe, typed,
+// schema-qualification handled by the table object) and rendered to text+params here, because they
+// EXECUTE through the caller's raw `MutationDb` seam — the one connection the mutation runtime and
+// its tests own (and mock).
+const metaQueryBuilder = drizzle.mock();
 
 /**
  * The fingerprint-keyed local store (ADR-0006). The registry fingerprint the local PGlite
@@ -30,21 +35,19 @@ interface VersionReconcileRuntime {
   readMutationStats: () => Promise<MutationDiagnostics>;
 }
 
-function metaTableRef(localSchema: string): string {
-  return localSchema === "public"
-    ? LOCAL_META_TABLE
-    : `${quoteIdentifier(localSchema)}.${quoteIdentifier(LOCAL_META_TABLE)}`;
-}
-
 /** The registry fingerprint the local store was last provisioned under, or null if unstamped. */
 export async function readStoredRegistryFingerprint(
   db: MutationDb,
   registry: SyncTableRegistry,
 ): Promise<string | null> {
-  const meta = metaTableRef(getSyncRegistrySchema(registry));
-  const result = await db.query<{ value: string }>(`SELECT value FROM ${meta} WHERE key = $1 LIMIT 1`, [
-    REGISTRY_FINGERPRINT_KEY,
-  ]);
+  const meta = getLocalMetaTable(registry);
+  const query = metaQueryBuilder
+    .select({ value: meta.value })
+    .from(meta)
+    .where(eq(meta.key, REGISTRY_FINGERPRINT_KEY))
+    .limit(1)
+    .toSQL();
+  const result = await db.query<{ value: string }>(query.sql, query.params as unknown[]);
 
   return result.rows[0]?.value ?? null;
 }
@@ -59,11 +62,25 @@ const LAZY_ACTIVATION_PREFIX = "lazy_active:";
  * persisted, so it never appears here.)
  */
 export async function readActivatedLazyGroups(db: MutationDb, registry: SyncTableRegistry): Promise<Set<string>> {
-  const meta = metaTableRef(getSyncRegistrySchema(registry));
-  const result = await db.query<{ key: string }>(`SELECT key FROM ${meta} WHERE key LIKE $1`, [
-    `${LAZY_ACTIVATION_PREFIX}%`,
-  ]);
+  const meta = getLocalMetaTable(registry);
+  const query = metaQueryBuilder
+    .select({ key: meta.key })
+    .from(meta)
+    .where(like(meta.key, `${LAZY_ACTIVATION_PREFIX}%`))
+    .toSQL();
+  const result = await db.query<{ key: string }>(query.sql, query.params as unknown[]);
   return new Set(result.rows.map((row) => row.key.slice(LAZY_ACTIVATION_PREFIX.length)));
+}
+
+/** Upsert one meta key — the shared write shape for activations and the fingerprint stamp. */
+async function upsertMetaValue(db: MutationDb, registry: SyncTableRegistry, key: string, value: string): Promise<void> {
+  const meta = getLocalMetaTable(registry);
+  const query = metaQueryBuilder
+    .insert(meta)
+    .values({ key, value })
+    .onConflictDoUpdate({ target: meta.key, set: { value } })
+    .toSQL();
+  await db.query(query.sql, query.params as unknown[]);
 }
 
 /** Persist a `lazy + persistent` group's activation, so the next boot promotes it to eager (ADR-0021 §2). */
@@ -72,12 +89,7 @@ export async function writeLazyGroupActivation(
   registry: SyncTableRegistry,
   groupKey: string,
 ): Promise<void> {
-  const meta = metaTableRef(getSyncRegistrySchema(registry));
-  await db.query(
-    `INSERT INTO ${meta} (key, value) VALUES ($1, $2)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-    [`${LAZY_ACTIVATION_PREFIX}${groupKey}`, "1"],
-  );
+  await upsertMetaValue(db, registry, `${LAZY_ACTIVATION_PREFIX}${groupKey}`, "1");
 }
 
 /** Clear a persisted lazy activation — an explicit `desync` reverts the group to dormant next boot (ADR-0021 §2). */
@@ -86,8 +98,12 @@ export async function clearLazyGroupActivation(
   registry: SyncTableRegistry,
   groupKey: string,
 ): Promise<void> {
-  const meta = metaTableRef(getSyncRegistrySchema(registry));
-  await db.query(`DELETE FROM ${meta} WHERE key = $1`, [`${LAZY_ACTIVATION_PREFIX}${groupKey}`]);
+  const meta = getLocalMetaTable(registry);
+  const query = metaQueryBuilder
+    .delete(meta)
+    .where(eq(meta.key, `${LAZY_ACTIVATION_PREFIX}${groupKey}`))
+    .toSQL();
+  await db.query(query.sql, query.params as unknown[]);
 }
 
 /** Stamp the local store with the fingerprint it is now provisioned under. */
@@ -96,12 +112,7 @@ export async function writeStoredRegistryFingerprint(
   registry: SyncTableRegistry,
   fingerprint: string,
 ): Promise<void> {
-  const meta = metaTableRef(getSyncRegistrySchema(registry));
-  await db.query(
-    `INSERT INTO ${meta} (key, value) VALUES ($1, $2)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-    [REGISTRY_FINGERPRINT_KEY, fingerprint],
-  );
+  await upsertMetaValue(db, registry, REGISTRY_FINGERPRINT_KEY, fingerprint);
 }
 
 /**

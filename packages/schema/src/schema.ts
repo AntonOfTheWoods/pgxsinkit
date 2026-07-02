@@ -1,13 +1,10 @@
-import { sql } from "drizzle-orm";
 import { bigint, pgEnum, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
-import { buildSupabaseOwnerOrAdminNativePolicies, defineSyncTable } from "@pgxsinkit/contracts";
+import { buildSupabaseOwnerOrAdminNativePolicies, defineSyncTable, nowMicrosecondsSql } from "@pgxsinkit/contracts";
 
 export const todoStatusEnum = pgEnum("todo_status", ["todo", "in_progress", "done"]);
 export const todoPriorityEnum = pgEnum("todo_priority", ["low", "medium", "high"]);
-
-const nowMicrosecondsSql = sql`(floor((EXTRACT(epoch FROM clock_timestamp()) * (1000000)::numeric)))`;
 
 const makeAuthorsColumns = () => ({
   id: uuid("id").primaryKey(),

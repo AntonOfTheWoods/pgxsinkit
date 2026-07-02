@@ -1,7 +1,6 @@
-import { sql } from "drizzle-orm";
 import { bigint, bigserial, index, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 
-const nowMicrosecondsSql = sql`(floor((EXTRACT(epoch FROM clock_timestamp()) * (1000000)::numeric)))`;
+import { nowMicrosecondsSql } from "@pgxsinkit/contracts";
 
 export const operationsLogTable = pgTable(
   "operations_log",

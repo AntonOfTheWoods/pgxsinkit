@@ -59,6 +59,17 @@ export {
   type LazyGuardIndex,
   LazyRelationNotActivatedError,
 } from "./lazy-guard";
+export {
+  getJournalTable,
+  getLocalMetaTable,
+  getOverlayTable,
+  getSyncedLocalTable,
+  getSyncStateView,
+  type JournalTable,
+  type LocalMetaTable,
+  type OverlayTable,
+  type SyncStateView,
+} from "./local-tables";
 export type { LocalStoreVersionEvent };
 
 export type ClientPGlite = PGliteWithLive &

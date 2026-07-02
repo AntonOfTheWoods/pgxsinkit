@@ -277,7 +277,10 @@ function grantScopeScenario(config: RlsReadConfig): ScenarioSpec {
       { mode: "rls-fnrows", policies: buildFnRowsGrantScopePolicies() },
     ],
     claims: grantScopeClaims(config),
-    shapeWhere: buildGrantScopeShapeWhere("offering_id", ids),
+    // The Electric shape `where` is a measured artifact and must be the literal text Electric would
+    // run — author it from the typed column via the contracts builder, render once inline.
+    shapeWhere: new PgDialect().sqlToQuery(buildGrantScopeShapeWhere(enrolmentsTable.offeringId, ids).inlineParams())
+      .sql,
   };
 }
 

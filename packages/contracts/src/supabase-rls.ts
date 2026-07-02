@@ -1,8 +1,15 @@
 import { and, eq, getTableName, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
-import { pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
+import { PgDialect, pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
 
-import type { JwtClaims } from "./config";
-import { escapeSqlLiteral } from "./sql-identifier";
+import { c, DENY_ALL, type JwtClaims } from "./config";
+
+// Render a typed fragment to inline-literal SQL text (CREATE POLICY DDL cannot carry `$n` binds).
+// The tier-② discipline for the text builders below: values enter as typed `${value}` interpolations
+// and drizzle owns the escaping; only the claim-extraction leaves stay raw text.
+const textDialect = new PgDialect();
+function renderInlineSql(fragment: SQL): string {
+  return textDialect.sqlToQuery(fragment.inlineParams()).sql;
+}
 
 type SupabaseOwnerOrAdminPolicyKind = "select" | "insert" | "update" | "delete";
 
@@ -118,10 +125,11 @@ function buildSubjectSqlText(subjectCastType: string): string {
 }
 
 // The admin-bypass test: `app_metadata.roles` (from the JWT claims) contains `adminRoleName`. No
-// column reference and no recursion risk, so it is inlined as raw text (shared by the text builder and
-// the native builder).
+// column reference and no recursion risk, so it is inlined as text (shared by the text builder and
+// the native builder). The role value enters as a typed interpolation (drizzle owns the escaping);
+// the claim-extraction body is the allowed raw leaf.
 function buildAdminRoleExistsSqlText(adminRoleName: string): string {
-  return `EXISTS (
+  return renderInlineSql(sql`EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
       COALESCE(
@@ -134,8 +142,8 @@ function buildAdminRoleExistsSqlText(adminRoleName: string): string {
         '[]'::jsonb
       )
     ) AS assigned_role(role_name_value)
-    WHERE assigned_role.role_name_value = '${escapeSqlLiteral(adminRoleName)}'
-  )`;
+    WHERE assigned_role.role_name_value = ${adminRoleName}
+  )`);
 }
 
 function normalizePredicateOptions(options: SupabaseOwnerOrAdminPredicateOptions = {}) {
@@ -463,7 +471,12 @@ function buildRoleInListSqlText(roleValues: string[]): string {
   if (roleValues.length === 0) {
     throw new Error("grant-scope policy requires at least one role value");
   }
-  return roleValues.map((role) => `'${escapeSqlLiteral(role)}'`).join(", ");
+  return renderInlineSql(
+    sql.join(
+      roleValues.map((role) => sql`${role}`),
+      sql`, `,
+    ),
+  );
 }
 
 function resolveGrantScopeIdField(options: GrantScopeClaimOptions): string {
@@ -478,7 +491,7 @@ function buildBypassExistsSqlText(bypass: { roleValues: string[]; scopeKind?: st
   return `exists (
     select 1
     from jsonb_array_elements(${grantsText}) as bypass_grant
-    where bypass_grant -> 'scope' ->> 'kind' = '${escapeSqlLiteral(scopeKind)}'
+    where bypass_grant -> 'scope' ->> 'kind' = ${renderInlineSql(sql`${scopeKind}`)}
       and bypass_grant ->> 'role' in (${buildRoleInListSqlText(bypass.roleValues)})
   )`;
 }
@@ -491,8 +504,8 @@ function buildGrantScopePredicate(options: SupabaseGrantScopeNativePoliciesOptio
   assertTypeName(castType, "scopeCastType");
   const grantsText = buildGrantsArraySqlText(resolveGrantsClaimPath(options.grantsClaimPath));
   const roleIn = buildRoleInListSqlText(options.roleValues);
-  const kindMatch = `grant_elem -> 'scope' ->> 'kind' = '${escapeSqlLiteral(scopeKind)}' and grant_elem ->> 'role' in (${roleIn})`;
-  const idExpr = `(grant_elem -> 'scope' ->> '${escapeSqlLiteral(scopeIdField)}')::${castType}`;
+  const kindMatch = `grant_elem -> 'scope' ->> 'kind' = ${renderInlineSql(sql`${scopeKind}`)} and grant_elem ->> 'role' in (${roleIn})`;
+  const idExpr = `(grant_elem -> 'scope' ->> ${renderInlineSql(sql`${scopeIdField}`)})::${castType}`;
 
   // Correct: uncorrelated `= ANY(ARRAY(select …))` → the grant set materializes once (InitPlan, JWT
   // parsed once) and the ScalarArrayOp drives a bitmap index scan on the scope column — ~25-45× faster
@@ -589,15 +602,18 @@ export function resolveGrantScopeIds(claims: JwtClaims | null, options: GrantSco
 }
 
 /**
- * The Electric shape `where` for a grant-scope table: a literal `IN (…)` over the resolved ids (what
- * the proxy injects). `scopeSqlColumn` is the bare column name (Electric's grammar requires bare
- * columns). An empty id set denies all rows (`1 = 0`), mirroring the policy returning no rows.
+ * The Electric shape `where` for a grant-scope table: an `IN (…)` over the resolved ids (what the
+ * proxy injects). Takes the real Drizzle scope column — referenced bare via `c()` (Electric's grammar
+ * requires bare columns), so the reference is rename-safe — and returns a typed fragment whose ids
+ * are **bound params** once `buildRowFilterShape` serializes it (never hand-escaped literals). An
+ * empty id set denies all rows ({@link DENY_ALL}), mirroring the policy returning no rows.
  */
-export function buildGrantScopeShapeWhere(scopeSqlColumn: string, ids: string[]): string {
-  assertIdentifier(scopeSqlColumn, "scopeSqlColumn");
+export function buildGrantScopeShapeWhere(scopeColumn: AnyColumn, ids: string[]): SQL {
   if (ids.length === 0) {
-    return "1 = 0";
+    return DENY_ALL;
   }
-  const list = ids.map((id) => `'${escapeSqlLiteral(id)}'`).join(", ");
-  return `"${scopeSqlColumn}" in (${list})`;
+  return sql`${c(scopeColumn)} in (${sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  )})`;
 }

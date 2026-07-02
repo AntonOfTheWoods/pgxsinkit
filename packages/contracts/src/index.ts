@@ -8,5 +8,6 @@ export * from "./registry-diff";
 export * from "./mutation";
 export * from "./projection";
 export * from "./runtime";
+export * from "./sql-defaults";
 export * from "./sql-identifier";
 export * from "./supabase-rls";

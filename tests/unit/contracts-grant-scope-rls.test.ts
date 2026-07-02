@@ -164,10 +164,19 @@ describe("contracts grant-scope RLS helpers", () => {
     expect(resolveGrantScopeIds({ sub: "x" }, { scopeKind: "offering", roleValues: teacherRoles })).toEqual([]);
   });
 
-  it("buildGrantScopeShapeWhere emits a literal IN-list (deny on empty)", () => {
-    expect(buildGrantScopeShapeWhere("offering_id", ["off-a", "off-b"])).toBe(`"offering_id" in ('off-a', 'off-b')`);
-    expect(buildGrantScopeShapeWhere("offering_id", [])).toBe("1 = 0");
-    // Single-quote in an id is escaped (no injection through the shape where).
-    expect(buildGrantScopeShapeWhere("offering_id", ["a'b"])).toBe(`"offering_id" in ('a''b')`);
+  it("buildGrantScopeShapeWhere emits a bare-column IN over bound ids (deny on empty)", () => {
+    const enrolments = pgTable("enrolments", { offeringId: uuid("offering_id").notNull() });
+
+    // The fragment parameterizes ids ($n bound params via buildRowFilterShape) and references the
+    // column bare (Electric's grammar), rename-safe through the real column object.
+    const bound = dialect.sqlToQuery(buildGrantScopeShapeWhere(enrolments.offeringId, ["off-a", "off-b"]));
+    expect(normalizeSqlText(bound.sql)).toBe(`"offering_id" in ($1, $2)`);
+    expect(bound.params).toEqual(["off-a", "off-b"]);
+
+    // Rendered inline (a proxy composing a shape URL), drizzle owns the escaping — no injection.
+    const inline = dialect.sqlToQuery(buildGrantScopeShapeWhere(enrolments.offeringId, ["a'b"]).inlineParams());
+    expect(normalizeSqlText(inline.sql)).toBe(`"offering_id" in ('a''b')`);
+
+    expect(dialect.sqlToQuery(buildGrantScopeShapeWhere(enrolments.offeringId, [])).sql).toBe("false");
   });
 });

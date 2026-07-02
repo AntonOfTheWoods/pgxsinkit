@@ -6,6 +6,7 @@ import {
   escapeSqlLiteral as toSqlLiteral,
   getProjectedColumns,
   hashString,
+  NOW_MICROSECONDS_SQL_TEXT,
   quoteIdentifier as quoteIdent,
   resolveServerVersionColumnName,
   type BatchMutationRequest,
@@ -50,7 +51,9 @@ function buildManagedFieldExpression(field: ResolvedManagedField): string {
     return `(NULLIF(current_setting('request.jwt.claims', true), '')::jsonb #>> '{${path}}')::${castType}`;
   }
 
-  return "CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)";
+  // The canonical contracts spelling — byte-identical here by construction, so the generated
+  // apply-function DDL (and its ADR-0018 fingerprint) is unchanged by the consolidation.
+  return NOW_MICROSECONDS_SQL_TEXT;
 }
 
 function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create" | "update"): ResolvedManagedField[] {
@@ -642,12 +645,16 @@ export async function executePlpgsqlBatch(
   } = {},
 ): Promise<MutationConflict[]> {
   const normalizedClaims = userClaims ?? {};
-  const functionName = qualifyIdent(options.functionSchema, "pgxsinkit_apply_mutations");
+  // Typed identifier interpolation (never `sql.raw` of a hand-quoted name); the OUT-column aliases
+  // are the generated function's fixed names.
+  const functionRef = options.functionSchema
+    ? sql`${sql.identifier(options.functionSchema)}.${sql.identifier("pgxsinkit_apply_mutations")}`
+    : sql`${sql.identifier("pgxsinkit_apply_mutations")}`;
 
   // The applier RETURNS the stale-write conflicts (ADR-0015). Read them from the function's result
   // set; an empty set (the last-write-wins case, or nothing stale) means every mutation applied.
   const result = await tx.execute(
-    sql`SELECT "mutation_id"::text AS "mutationId", "table_name" AS "tableName", "current_server_version"::text AS "currentServerVersion" FROM ${sql.raw(functionName)}(${JSON.stringify(batch)}::text::jsonb, ${requestPath}, ${logEnabled}, ${rlsEnabled}, ${JSON.stringify(normalizedClaims)}::text::jsonb)`,
+    sql`SELECT "mutation_id"::text AS "mutationId", "table_name" AS "tableName", "current_server_version"::text AS "currentServerVersion" FROM ${functionRef}(${JSON.stringify(batch)}::text::jsonb, ${requestPath}, ${logEnabled}, ${rlsEnabled}, ${JSON.stringify(normalizedClaims)}::text::jsonb)`,
   );
 
   const rows = Array.from(result as Iterable<unknown>, (row) => row as MutationConflictRow);

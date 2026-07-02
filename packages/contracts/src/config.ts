@@ -362,6 +362,17 @@ export function c(column: AnyColumn): SQL {
  */
 export const DENY_ALL: SQL = sql`false`;
 
+/**
+ * The ownership shape `where` — the read-path mirror of an owner-column RLS policy: rows whose owner
+ * column equals the caller's subject, {@link DENY_ALL} for an unauthenticated caller. Takes the real
+ * Drizzle owner column (bare via {@link c}, rename-safe); the subject rides as a typed interpolation —
+ * a bound param through `buildRowFilterShape`, or a drizzle-escaped literal when a proxy renders it
+ * inline for a shape URL.
+ */
+export function buildOwnershipShapeWhere(ownerColumn: AnyColumn, subject: string | null | undefined): SQL {
+  return subject == null || subject === "" ? DENY_ALL : sql`${c(ownerColumn)} = ${subject}`;
+}
+
 /** The parameterized shape filter the proxy sends to Electric: a `where` and its positional params. */
 export interface RowFilterShape {
   where: string;

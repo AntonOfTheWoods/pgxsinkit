@@ -10,11 +10,10 @@ import {
   defineSyncTable,
   DENY_ALL,
   type JwtClaims,
+  nowMicrosecondsSql,
   type SyncConfigInput,
   type TableSpecInput,
 } from "@pgxsinkit/contracts";
-
-const nowMicrosecondsSql = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)`;
 
 const makeProjectsColumns = () => ({
   id: uuid("id").primaryKey(),

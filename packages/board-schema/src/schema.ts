@@ -1,8 +1,7 @@
-import { sql } from "drizzle-orm";
 import { bigint, pgEnum, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
-import { defineSyncTable } from "@pgxsinkit/contracts";
+import { defineSyncTable, nowMicrosecondsSql } from "@pgxsinkit/contracts";
 
 import {
   buildChannelPolicies,
@@ -16,10 +15,6 @@ import {
 export const issueStatusEnum = pgEnum("issue_status", ["backlog", "todo", "in_progress", "done"]);
 export const issuePriorityEnum = pgEnum("issue_priority", ["none", "urgent", "high", "medium", "low"]);
 export const channelKindEnum = pgEnum("channel_kind", ["global", "team"]);
-
-// Canonical microsecond timestamp (bigint), server-stamped. Doubles as the Server version on
-// writable tables via the nowMicroseconds-on-update managed field.
-const nowMicrosecondsSql = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)`;
 
 // Tables grouped here commit atomically at a shared LSN frontier (board ADR-0004), so a member who is
 // added to a Team sees the Team, its Channel, and its Issues appear in one frame — no broken-join flicker.
